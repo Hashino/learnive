@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Token de sessão injetado pelo servidor. Lido pelo JS e enviado como
+         cabeçalho X-Learnive-Token; nunca guardado em cookie (evita CSRF). -->
+    <meta name="learnive-token" content="{{TOKEN}}" />
+    <title>learnive</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 42rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      code {
+        background: #f0f0f0;
+        padding: 0.1em 0.3em;
+        border-radius: 3px;
+      }
+      #status {
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>learnive</h1>
+    <p>
+      Servidor local rodando. O token de sessão está embutido nesta página e é
+      enviado como cabeçalho <code>X-Learnive-Token</code> em toda requisição
+      (§3.1). A partir daqui, o documento vivo será construído sobre este mesmo
+      canal.
+    </p>
+    <p id="status">verificando servidor…</p>
+
+    <script>
+      // Token da meta tag (injetado pelo servidor), não da URL.
+      const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
+
+      // Quando o HTMX for carregado (fases seguintes), anexa o token a cada
+      // requisição automaticamente.
+      document.body.addEventListener("htmx:configRequest", (e) => {
+        e.detail.headers["X-Learnive-Token"] = TOKEN;
+      });
+
+      // Sanity check: bate no /health com o cabeçalho de token.
+      fetch("/health", { headers: { "X-Learnive-Token": TOKEN } })
+        .then((r) => r.text())
+        .then((t) => {
+          document.getElementById("status").textContent = "servidor: " + t;
+        })
+        .catch(() => {
+          document.getElementById("status").textContent = "sem conexão";
+        });
+    </script>
+  </body>
+</html>
