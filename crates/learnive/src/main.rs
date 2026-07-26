@@ -7,6 +7,7 @@
 //! restritos, nenhuma mutação em GET.
 
 mod ai;
+mod api;
 mod app;
 mod engine;
 mod security;

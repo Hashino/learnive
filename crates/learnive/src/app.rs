@@ -17,9 +17,11 @@ use axum::{
 };
 use tokio_stream::Stream;
 
-use crate::security;
+use crate::ai::Ai;
+use crate::store::Store;
+use crate::{api, security};
 
-/// Estado compartilhado. Barato de clonar (tudo atrás de `Arc`).
+/// Estado compartilhado. Barato de clonar (tudo atrás de `Arc`/handles leves).
 #[derive(Clone)]
 pub struct AppState {
     /// Token de sessão exigido em toda requisição (§3.1).
@@ -28,6 +30,10 @@ pub struct AppState {
     pub allowed_origins: Arc<HashSet<String>>,
     /// Hosts aceitos (ex.: `127.0.0.1:7420`) — defesa de DNS-rebinding.
     pub allowed_hosts: Arc<HashSet<String>>,
+    /// Armazenamento em arquivos (§4).
+    pub store: Store,
+    /// Provedor de IA + tiering (§12).
+    pub ai: Arc<Ai>,
 }
 
 impl AppState {
@@ -40,10 +46,16 @@ impl AppState {
         let allowed_hosts =
             HashSet::from([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
 
+        let data_dir =
+            std::env::var("LEARNIVE_DATA_DIR").unwrap_or_else(|_| "learnive-data".to_string());
+        let store = Store::open(&data_dir).expect("abrir armazenamento de dados");
+
         Self {
             token: Arc::from(security::generate_token()),
             allowed_origins: Arc::new(allowed_origins),
             allowed_hosts: Arc::new(allowed_hosts),
+            store,
+            ai: Arc::new(api::build_ai()),
         }
     }
 }
@@ -54,8 +66,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/health", get(health))
         .route("/events", get(events))
-        // Endpoint mutável de exemplo: existe só como POST, nunca GET (§3.1).
-        .route("/api/echo", post(echo))
+        // Loop de currículo (§6, §8). Tudo POST — mutações nunca em GET (§3.1).
+        .route("/api/documents", post(api::create_document))
+        .route(
+            "/api/documents/{doc}/nodes/{index}/generate",
+            post(api::generate_node),
+        )
+        .route(
+            "/api/documents/{doc}/nodes/{node}/answer",
+            post(api::answer),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security::guard,
@@ -72,11 +92,6 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 /// Liveness. Não expõe nada sensível; ainda assim exige token pela camada.
 async fn health() -> &'static str {
     "ok"
-}
-
-/// Eco de exemplo (mutação) — prova que mutações são POST-only.
-async fn echo(body: String) -> String {
-    body
 }
 
 /// Esqueleto de SSE (§3): canal servidor→cliente por onde o conteúdo gerado
@@ -100,10 +115,14 @@ mod tests {
     const ORIGIN: &str = "http://127.0.0.1:7420";
 
     fn test_state() -> AppState {
+        // Store em diretório temporário único; IA em modo demo (mock scriptado).
+        let dir = std::env::temp_dir().join(format!("learnive-test-{}", crate::engine::new_id()));
         AppState {
             token: Arc::from(TOKEN),
             allowed_origins: Arc::new(HashSet::from([ORIGIN.to_string()])),
             allowed_hosts: Arc::new(HashSet::from([HOST.to_string()])),
+            store: crate::store::Store::open(dir).unwrap(),
+            ai: Arc::new(crate::api::demo_ai()),
         }
     }
 
@@ -116,6 +135,18 @@ mod tests {
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn authed(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", HOST)
+            .header("x-learnive-token", TOKEN)
+            .header("origin", ORIGIN)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -207,9 +238,9 @@ mod tests {
 
     #[tokio::test]
     async fn mutating_endpoint_rejects_get() {
-        // Nenhuma mutação responde a GET (§3.1): /api/echo só existe como POST.
+        // Nenhuma mutação responde a GET (§3.1): /api/documents só existe como POST.
         let req = Request::builder()
-            .uri("/api/echo")
+            .uri("/api/documents")
             .header("host", HOST)
             .header("x-learnive-token", TOKEN)
             .body(Body::empty())
@@ -218,18 +249,49 @@ mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
+    /// O loop inteiro fecha em modo demo: cria documento → gera nó (stream) →
+    /// responde → avança (§6, §8). Uma única `AppState` compartilhada entre as
+    /// requisições (mesmo store + IA).
     #[tokio::test]
-    async fn mutating_endpoint_accepts_post() {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/echo")
-            .header("host", HOST)
-            .header("x-learnive-token", TOKEN)
-            .header("origin", ORIGIN)
-            .body(Body::from("olá"))
-            .unwrap();
-        let (status, body) = send(req).await;
+    async fn full_loop_closes_in_demo_mode() {
+        let state = test_state();
+        let call = |req: Request<Body>| {
+            let state = state.clone();
+            async move {
+                let resp = build_router(state).oneshot(req).await.unwrap();
+                let status = resp.status();
+                let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+
+        // 1. Cold start: tema → outline.
+        let (status, body) = call(authed("POST", "/api/documents", r#"{"topic":"frações"}"#)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "olá");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let doc_id = created["doc_id"].as_str().unwrap().to_string();
+        assert!(!created["titles"].as_array().unwrap().is_empty());
+
+        // 2. Geração do nó 0 — streama e termina com `done`.
+        let (status, body) = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/nodes/0/generate"),
+            "",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: token"), "deve streamar prosa");
+        assert!(body.contains("event: done"), "deve concluir a geração");
+
+        // 3. Resposta ao exercício → avança (demo grada como demonstrado).
+        let (status, body) = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/nodes/n0/answer"),
+            r#"{"answer":"aplico o conceito a um caso novo assim..."}"#,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(ans["advance"], serde_json::json!(true));
     }
 }

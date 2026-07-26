@@ -180,6 +180,30 @@ pub async fn grade(
     parse::assessment(&text)
 }
 
+/// Conversa de remediação na falha (§8.2): explica o conceito no contexto do
+/// exercício e propõe um novo problema similar cuja similaridade cresce a cada
+/// tentativa (`attempt`). Tier robusto (é ensino/prosa). Devolve HTML.
+pub async fn remediate(
+    ai: &Ai,
+    item_title: &str,
+    exercise_html: &str,
+    answer: &str,
+    unmet: &[&ObjectiveGrade],
+    attempt: u32,
+) -> Result<String, EngineError> {
+    let unmet_summary = unmet
+        .iter()
+        .map(|g| format!("- {}: {}", g.objective_id, g.feedback))
+        .collect::<Vec<_>>()
+        .join("\n");
+    collect(
+        ai,
+        Tier::Robust,
+        prompt::remediation(item_title, exercise_html, answer, &unmet_summary, attempt),
+    )
+    .await
+}
+
 /// Monta um nó do dialeto a partir da prosa gerada e do exercício (§4.2/§4.3).
 /// O servidor atribui os IDs (blocos, exercício, rubric).
 pub fn assemble_node(
@@ -281,6 +305,29 @@ pub mod prompt {
             ),
             ChatMessage::user(format!(
                 "Tema: {topic}\nConceito: {item_title}\nProsa do nó:\n{prose}"
+            )),
+        ]
+    }
+
+    pub fn remediation(
+        item_title: &str,
+        exercise_html: &str,
+        answer: &str,
+        unmet_summary: &str,
+        attempt: u32,
+    ) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system(format!(
+                "Sessão de remediação (§8.2). O aluno errou a checagem. Explique o \
+                 conceito NO CONTEXTO do exercício: dê um exemplo resolvido / passo a \
+                 passo, e proponha um novo problema similar. Esta é a tentativa \
+                 {attempt}: quanto maior, MAIS similar ao exemplo resolvido o novo \
+                 problema deve ser (scaffolding por proximidade crescente). Responda \
+                 em HTML semântico simples."
+            )),
+            ChatMessage::user(format!(
+                "Conceito: {item_title}\nExercício: {exercise_html}\n\
+                 Resposta do aluno: {answer}\nObjetivos não demonstrados:\n{unmet_summary}"
             )),
         ]
     }

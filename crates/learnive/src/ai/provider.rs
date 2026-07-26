@@ -181,25 +181,37 @@ impl OpenAiCompat {
     }
 }
 
-/// Provedor falso: streama uma resposta canned token-a-token (palavra a
-/// palavra) — para rodar o loop sem chave e para testes sem rede.
+/// Provedor falso: streama uma resposta token-a-token (palavra a palavra) —
+/// para rodar o loop sem chave e para testes sem rede. A resposta pode ser
+/// constante (`new`) ou decidida a partir da requisição (`scripted`), o que
+/// permite um modo demo offline que responde diferente por sub-tarefa.
 pub struct MockProvider {
-    pub reply: String,
+    responder: Box<dyn Fn(&ChatRequest) -> String + Send + Sync>,
 }
 
 impl MockProvider {
+    /// Sempre responde a mesma string.
     pub fn new(reply: impl Into<String>) -> Self {
+        let reply = reply.into();
         Self {
-            reply: reply.into(),
+            responder: Box::new(move |_| reply.clone()),
         }
     }
 
-    fn stream(&self, _req: ChatRequest) -> TokenStream {
-        let tokens: Vec<String> = self
-            .reply
-            .split_inclusive(' ')
-            .map(|s| s.to_string())
-            .collect();
+    /// Decide a resposta a partir da requisição (ex.: por palavra-chave do
+    /// prompt), para simular o loop inteiro offline.
+    pub fn scripted<F>(f: F) -> Self
+    where
+        F: Fn(&ChatRequest) -> String + Send + Sync + 'static,
+    {
+        Self {
+            responder: Box::new(f),
+        }
+    }
+
+    fn stream(&self, req: ChatRequest) -> TokenStream {
+        let reply = (self.responder)(&req);
+        let tokens: Vec<String> = reply.split_inclusive(' ').map(|s| s.to_string()).collect();
         let stream = async_stream::stream! {
             for token in tokens {
                 yield Ok(token);
