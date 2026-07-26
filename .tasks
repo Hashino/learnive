@@ -1,0 +1,3 @@
+estilizar o site com o estilo do meu blog https://hashino.github.io/
+adicionar .env com as chave API que eu já uso (~/.config/nvim/.../ai.lua)
+renomer README.md para SPEC.md e criar um README.md real com instruções de uso e descrição

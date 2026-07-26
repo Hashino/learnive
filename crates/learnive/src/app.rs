@@ -237,6 +237,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_carry_csp_header() {
+        // Defesa em profundidade §3.1: toda resposta leva CSP.
+        let req = Request::builder()
+            .uri("/health")
+            .header("host", HOST)
+            .header("x-learnive-token", TOKEN)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router().oneshot(req).await.unwrap();
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("connect-src 'self'"));
+    }
+
+    #[tokio::test]
     async fn mutating_endpoint_rejects_get() {
         // Nenhuma mutação responde a GET (§3.1): /api/documents só existe como POST.
         let req = Request::builder()

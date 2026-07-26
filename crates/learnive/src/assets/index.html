@@ -6,6 +6,9 @@
     <!-- Token de sessão injetado pelo servidor; enviado como cabeçalho
          X-Learnive-Token em toda requisição, nunca em cookie (§3.1). -->
     <meta name="learnive-token" content="{{TOKEN}}" />
+    <!-- favicon inline vazio: evita um GET /favicon.ico que a camada de
+         segurança rejeita com 401 (§3.1) e sujaria o console. -->
+    <link rel="icon" href="data:," />
     <title>learnive</title>
     <style>
       :root {
@@ -179,8 +182,11 @@
           await readSse(resp, (event, data) => {
             if (event === "token") {
               // Re-render acumulado tolera tags parciais durante o stream.
+              // Sanitizado: prosa gerada por LLM vai para a origem da app, então
+              // NÃO pode carregar script/handlers (§3.1/§4.4). Só blocos
+              // interativos rodam — e apenas no iframe sandbox.
               prose += data;
-              el("prose").innerHTML = prose;
+              el("prose").innerHTML = sanitizeHtml(prose);
             } else if (event === "exercise") {
               renderExercise(data);
             } else if (event === "done") {
@@ -204,6 +210,7 @@
       function renderExercise(html) {
         const iframe = document.createElement("iframe");
         iframe.className = "sandbox";
+        iframe.title = "Exercício";
         iframe.setAttribute("sandbox", "allow-scripts");
         iframe.srcdoc =
           '<!doctype html><meta charset="utf-8">' +
@@ -245,9 +252,10 @@
                 '<p class="muted">Você concluiu o outline atual.</p>';
             }
           } else if (data.remediation_html) {
+            // Também gerado por LLM → sanitizar antes da origem da app (§3.1).
             el("result").innerHTML +=
               '<div class="remediation"><h3>Vamos revisar</h3>' +
-              data.remediation_html +
+              sanitizeHtml(data.remediation_html) +
               "</div>";
           }
         } catch (err) {
@@ -300,6 +308,52 @@
           /[&<>"]/g,
           (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
         );
+      }
+
+      // Sanitiza HTML gerado por LLM antes de inseri-lo na origem da app (§3.1,
+      // §4.4). O parse acontece num <template> inerte (imagens não carregam,
+      // scripts não rodam), então removemos elementos perigosos, atributos de
+      // evento (on*) e URLs não-http de href/src. Blocos interativos de verdade
+      // não passam por aqui — eles rodam isolados no iframe sandbox.
+      function sanitizeHtml(html) {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html;
+        const BLOCKED = new Set([
+          "SCRIPT",
+          "IFRAME",
+          "OBJECT",
+          "EMBED",
+          "LINK",
+          "META",
+          "BASE",
+          "STYLE",
+          "FORM",
+        ]);
+        const SAFE_URI = /^(https?:|mailto:|#|\/|data:image\/)/i;
+        const els = [];
+        const walker = document.createTreeWalker(
+          tpl.content,
+          NodeFilter.SHOW_ELEMENT,
+        );
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) els.push(n);
+        for (const elm of els) {
+          if (BLOCKED.has(elm.tagName)) {
+            elm.remove();
+            continue;
+          }
+          for (const attr of [...elm.attributes]) {
+            const name = attr.name.toLowerCase();
+            if (name.startsWith("on") || name === "srcdoc" || name === "style") {
+              elm.removeAttribute(attr.name);
+            } else if (
+              (name === "href" || name === "src" || name === "xlink:href") &&
+              !SAFE_URI.test(attr.value.trim())
+            ) {
+              elm.removeAttribute(attr.name);
+            }
+          }
+        }
+        return tpl.innerHTML;
       }
     </script>
   </body>

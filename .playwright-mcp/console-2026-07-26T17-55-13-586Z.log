@@ -1,0 +1,2 @@
+[     198ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:7810/favicon.ico:0
+[  135759ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:7810/x:0

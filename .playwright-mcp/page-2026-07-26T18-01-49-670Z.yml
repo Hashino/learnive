@@ -1,0 +1,23 @@
+- main [ref=f6e11]:
+  - list [ref=f6e12]:
+    - listitem [ref=f6e13]: Introdução ao tema
+    - listitem [ref=f6e14]: Conceito central
+    - listitem [ref=f6e15]: Aplicação prática
+  - article [ref=f6e16]:
+    - heading "Conceito central" [level=2] [ref=f6e17]
+    - paragraph [ref=f6e18]:
+      - text: Este é um parágrafo explicativo gerado em
+      - strong [ref=f6e19]: modo demo
+      - text: (sem chave de IA). Configure um provedor para conteúdo real, fundamentado em fontes.
+    - paragraph [ref=f6e20]: Cada nó é atômico e termina numa checagem de compreensão.
+  - iframe [active] [ref=f6e22]:
+    - generic [ref=f7e1]:
+      - generic [ref=f7e2]:
+        - paragraph [ref=f7e3]: "Explique o conceito com suas palavras e aplique-o a um caso novo:"
+        - textbox [ref=f7e4]: massa curva o espaço-tempo; aplico à órbita da Lua
+      - paragraph [ref=f7e5]:
+        - button "Enviar resposta" [active] [ref=f7e6]
+  - generic [ref=f6e24]:
+    - strong [ref=f6e25]: demonstrated
+    - text: — Boa transferência do conceito para um caso novo.
+  - button "Próximo conceito →" [ref=f6e27] [cursor=pointer]

@@ -1,0 +1,19 @@
+- main [ref=f4e11]:
+  - list [ref=f4e12]:
+    - listitem [ref=f4e13]: Introdução ao tema
+    - listitem [ref=f4e14]: Conceito central
+    - listitem [ref=f4e15]: Aplicação prática
+  - article [ref=f4e16]:
+    - heading "Conceito central" [level=2] [ref=f4e17]
+    - paragraph [ref=f4e18]:
+      - text: Este é um parágrafo explicativo gerado em
+      - strong [ref=f4e19]: modo demo
+      - text: (sem chave de IA). Configure um provedor para conteúdo real, fundamentado em fontes.
+    - paragraph [ref=f4e20]: Cada nó é atômico e termina numa checagem de compreensão.
+  - iframe [ref=f4e22]:
+    - generic [ref=f5e1]:
+      - generic [ref=f5e2]:
+        - paragraph [ref=f5e3]: "Explique o conceito com suas palavras e aplique-o a um caso novo:"
+        - textbox [ref=f5e4]
+      - paragraph [ref=f5e5]:
+        - button "Enviar resposta" [ref=f5e6]

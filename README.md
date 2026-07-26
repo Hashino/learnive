@@ -25,7 +25,8 @@ O servidor guarda as chaves de API do usuário e roda como HTTP acessível por q
 - Token de sessão obrigatório em toda requisição (mesmo padrão usado pelo Jupyter: token na URL/cookie).
 - Validação restritiva de `Origin`/CORS — nunca `Access-Control-Allow-Origin: *`.
 - Nenhum endpoint que mude estado responde a GET (previne CSRF via tag de imagem/link simples).
-- **Conteúdo interativo gerado roda em sandbox.** HTML/JS interativo gerado por LLM (§4.4) **nunca** executa na origem da app: vai em `<iframe sandbox>` sem `allow-same-origin`, sem acesso ao token de sessão, aos cookies ou aos endpoints; devolve resultado só por um canal `postMessage` estreito e validado. Sem esse isolamento, um script gerado (ou injetado via fonte) poderia exfiltrar a chave/token. Reforçar com CSP restritiva.
+- **Conteúdo interativo gerado roda em sandbox.** HTML/JS interativo gerado por LLM (§4.4) **nunca** executa na origem da app: vai em `<iframe sandbox>` sem `allow-same-origin`, sem acesso ao token de sessão, aos cookies ou aos endpoints; devolve resultado só por um canal `postMessage` estreito e validado. Sem esse isolamento, um script gerado (ou injetado via fonte) poderia exfiltrar a chave/token.
+- **HTML gerado não-interativo (prosa, remediação) é sanitizado antes de entrar na origem da app.** Prosa vira parte do documento (selecionável, ancorável §4.3), então mora na origem da app — mas continua sendo saída de LLM (potencialmente envenenada por uma fonte §11.1). Antes de inserir, o cliente remove `<script>`, atributos de evento (`on*`) e URLs perigosas; só **blocos interativos** carregam script, e apenas dentro do sandbox. Reforçado por uma **CSP restritiva** em toda resposta (`default-src 'self'`, `connect-src 'self'` bloqueia exfiltração para outra origem, `object-src`/`base-uri 'none'`).
 
 ## 4. Formato de armazenamento
 

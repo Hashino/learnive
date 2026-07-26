@@ -17,7 +17,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -70,8 +70,25 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
             .into_response();
     }
 
-    next.run(req).await
+    // CSP restritiva (§3.1) como defesa em profundidade além do sanitizador do
+    // cliente: `connect-src 'self'` impede exfiltrar o token para outra origem;
+    // `object-src`/`base-uri 'none'` fecham vetores clássicos. Blocos
+    // interativos rodam em `<iframe sandbox srcdoc>` (§4.4), coberto por
+    // `frame-src 'self'`. `'unsafe-inline'` ainda é necessário porque o script
+    // e os estilos da página são inline — externalizá-los para remover isso é
+    // um endurecimento posterior.
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CSP),
+    );
+    response
 }
+
+/// Política de segurança de conteúdo aplicada a todas as respostas.
+const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; \
+     img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
+     script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'";
 
 /// Confere o token vindo do cabeçalho `X-Learnive-Token` ou da query `?token=`.
 fn token_valid(req: &Request, state: &AppState) -> bool {
