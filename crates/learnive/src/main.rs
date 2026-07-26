@@ -6,6 +6,7 @@
 //! (§3.1): bind só em 127.0.0.1, token de sessão obrigatório, Origin/Host
 //! restritos, nenhuma mutação em GET.
 
+mod ai;
 mod app;
 mod security;
 mod store;
