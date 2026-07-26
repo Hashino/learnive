@@ -8,6 +8,7 @@
 
 mod app;
 mod security;
+mod store;
 
 use std::net::SocketAddr;
 
