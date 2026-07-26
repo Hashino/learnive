@@ -294,8 +294,10 @@ The exercise_html runs isolated in a sandbox iframe (allow-scripts, NO same-orig
 it cannot see the token or the page. So it may use HTML/CSS/JS/SVG freely — including \
 interactive visualizations, not just text fields.\n\
 How the answer comes back (§8):\n\
-- Simple case: include a <form> (or an <input>/<textarea>) — the page injects the \
-\"Submit\" button and collects the fields automatically.\n\
+- Simple case: wrap the answer fields in a <form> and include exactly ONE submit \
+button, labeled in the SAME language as the content (e.g. \"Enviar resposta\"). \
+The page captures the form submission and collects the fields automatically — do \
+NOT add a second button.\n\
 - Interactive/custom case: when the student finishes, call it yourself \
 parent.postMessage({type:'learnive-answer', answer: JSON.stringify(ARTIFACT)}, '*'), \
 where ARTIFACT is a structured JSON the rubric can grade.\n\

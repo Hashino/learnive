@@ -568,14 +568,17 @@
           "</style>" +
           "<body data-t='" + currentTheme() + "'>" +
           html +
-          '<p><button id="__submit" type="button">Submit answer</button></p>' +
           "<script>(function(){" +
           "function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
           "function send(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');}" +
           "function reportHeight(){parent.postMessage({type:'learnive-height',height:document.documentElement.scrollHeight},'*');}" +
           "function applyTheme(t){document.body.setAttribute('data-t',t);document.documentElement.style.colorScheme=t;reportHeight();}" +
-          "document.getElementById('__submit').addEventListener('click',send);" +
+          // A form submit (Enter, or the exercise's own submit button) sends the answer.
           "document.addEventListener('submit',function(e){e.preventDefault();send();});" +
+          // Only add a fallback submit button if the exercise provides none — the
+          // model is asked to include its own (in the content language), so this
+          // avoids the duplicate 'Enviar'/'Submit' buttons.
+          "if(!document.querySelector('button,input[type=submit],input[type=image]')){var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='Submit answer';b.addEventListener('click',send);p.appendChild(b);document.body.appendChild(p);}" +
           "window.addEventListener('message',function(e){var d=e.data;if(d&&d.type==='learnive-theme')applyTheme(d.theme==='light'?'light':'dark');});" +
           "if(window.ResizeObserver){new ResizeObserver(reportHeight).observe(document.body);}" +
           "window.addEventListener('load',reportHeight);setTimeout(reportHeight,60);" +
