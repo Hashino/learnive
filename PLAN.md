@@ -15,6 +15,8 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 **Fundação mínima (o que o loop exige para existir):**
 - [ ] Servidor `axum` bindado só em `127.0.0.1`; token de sessão obrigatório; validação de `Origin`/CORS restritiva; nenhum endpoint mutável em GET (§3.1).
 - [ ] Streaming SSE de conteúdo gerado servidor→cliente (§3).
+- [ ] **Frontend**: HTMX (troca de HTML/SSE/formulários) + JS vanilla mínimo (seleção, linha de leitura por scroll, streaming token-a-token, UI otimista) + módulo **wasm** de ancoragem compilado do mesmo crate Rust da §4.3; assets embutidos, sem etapa de build de página. Sem framework JS de VDOM (§3).
+- [ ] **Sandbox de blocos interativos gerados (§3.1, §4.4)**: HTML/JS gerado por LLM renderiza em `<iframe sandbox>` isolado da origem/token; exercícios interativos devolvem **artefato de resposta estruturado** via `postMessage`, com schema travado junto ao rubric antes da submissão.
 - [ ] Provedor de IA: **OpenRouter OAuth como caminho default** (mesmo na Fase 1), com BYOK direto como opção secundária. O onboarding completo (demais provedores, polimento) é Fase 2 (§12).
 - [ ] Armazenamento em arquivos: um diretório = um documento vivo, um arquivo HTML por nó (§4, §4.1).
 - [ ] **Contrato do nó em duas camadas (§4.3)** — é o formato de dados foundational, definir primeiro: camada de conteúdo imutável com `data-block-id` estável + camada de interação append-only que referencia IDs; ancoragem por ID (fallback fuzzy por quote); linha de leitura é estado efêmero de UI, não persistida. Vocabulário v0 de tags do §4.3.
@@ -24,7 +26,7 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 - [ ] Geração de outline inicial a partir do tema/ideia/problema do usuário (§6).
 - [ ] Geração de nó sob demanda a partir do ponto de leitura (§6).
 - [ ] Objetivos de aprendizagem gerados **junto** com o conteúdo do nó; rubric travado na criação; nota por objetivo em `{não demonstrado, parcial, demonstrado}`; ao menos um item de transferência não coberto no texto; exercício fundamentado no material original (§8).
-- [ ] UI "documento vivo": parágrafos + exercício gerado dinamicamente; linha de leitura em destaque; seleção de texto + pergunta que **edita o próprio documento** com a resposta (§9).
+- [ ] UI "documento vivo": parágrafos + **conteúdo generativo** (prosa e, quando ensina melhor, visualização interativa) + exercício gerado dinamicamente cuja modalidade não se limita a checkbox/textbox (§4.4, §9); linha de leitura em destaque; seleção de texto + pergunta que **edita o próprio documento** com a resposta (§9).
 - [ ] **Remediação na falha (§8.2)**: em vez de avançar/regenerar em silêncio, abrir conversa com o tutor no contexto do exercício (exemplo resolvido / passo a passo) + novo problema similar cuja similaridade ao modelo **cresce a cada falha**; só avança quando o objetivo fica `demonstrado`.
 - [ ] **Calibração de nível de abstração (§6.2)**: subir abstração quando o usuário avança sem errar/perguntar; baixar quando trava — por conceito.
 - [ ] Perfil mínimo: registrar interações e alimentar o contexto recente do próximo nó (sem compactação de longo prazo ainda) (§7).
@@ -64,6 +66,10 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 - [ ] Armazenamento de chave no keychain do SO.
 - [ ] Pairings recomendados mantidos por provedor/tier + override avançado de modelo; explicação mínima com exemplos no setup.
 - [ ] Tier gratuito com tratamento de rate limit (fila/fallback/degradação) sem quebrar a sessão.
+
+**Aprofundamento do HTML generativo interativo (§4.4) — o sandbox+protocolo básico já existe desde a Fase 1:**
+- [ ] Elevar qualidade/confiabilidade das visualizações e exercícios interativos gerados (o modo escolhido — JS arbitrário sempre em sandbox — tem variância; medir e endurecer prompts/validação do artefato).
+- [ ] Cache/reaproveitamento de widgets e checagem do schema de artefato contra o rubric na geração.
 
 **Aprofundamento de responsividade (§14) — o básico já existe desde a Fase 1:**
 - [ ] Prefetch especulativo de múltiplos ramos com política cost-aware refinada; separar geração do esqueleto (previsível) do delta de calibração pós-nota.

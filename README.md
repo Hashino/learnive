@@ -15,6 +15,7 @@ Aplicação de aprendizado autodirigido que gera, para cada tema/ideia/problema 
 - **Topologia**: backend Rust rodando localmente como servidor HTTP; frontend renderizado no navegador do próprio usuário (não é um webview embutido tipo Tauri/Electron). O backend faz toda leitura/escrita de arquivo — o navegador nunca acessa o filesystem diretamente, só fala com o backend via rede local.
 - **Streaming**: Server-Sent Events (SSE) para empurrar conteúdo gerado incrementalmente pro documento em tela — o fluxo principal é servidor→cliente. Ações do usuário (selecionar texto, perguntar, responder exercício) são requisições HTTP normais.
 - **Framework HTTP**: `axum` (suporte nativo a SSE).
+- **Frontend**: **HTMX** como espinha dorsal (troca de HTML servidor→cliente, SSE, formulários — o modelo do HTMX é exatamente o fluxo da §3) + **JavaScript vanilla mínimo** só para o que é estado de cliente (seleção de texto, linha de leitura por scroll, streaming token-a-token, UI otimista) + um **módulo WebAssembly** compilado do mesmo crate Rust para a ancoragem da §4.3 (resolução bloco/quote escrita uma vez, sem reimplementar em JS e sem drift). **Sem framework JS de VDOM (React/etc.)**: o dado canônico é o próprio HTML (§4.2), então um VDOM que quer estado JSON como verdade seria impedância — o servidor gera o dialeto, o cliente o exibe. Sem etapa de build para a página; assets embutidos no binário (portabilidade §15).
 
 ### 3.1 Segurança do servidor local
 
@@ -24,6 +25,7 @@ O servidor guarda as chaves de API do usuário e roda como HTTP acessível por q
 - Token de sessão obrigatório em toda requisição (mesmo padrão usado pelo Jupyter: token na URL/cookie).
 - Validação restritiva de `Origin`/CORS — nunca `Access-Control-Allow-Origin: *`.
 - Nenhum endpoint que mude estado responde a GET (previne CSRF via tag de imagem/link simples).
+- **Conteúdo interativo gerado roda em sandbox.** HTML/JS interativo gerado por LLM (§4.4) **nunca** executa na origem da app: vai em `<iframe sandbox>` sem `allow-same-origin`, sem acesso ao token de sessão, aos cookies ou aos endpoints; devolve resultado só por um canal `postMessage` estreito e validado. Sem esse isolamento, um script gerado (ou injetado via fonte) poderia exfiltrar a chave/token. Reforçar com CSP restritiva.
 
 ## 4. Formato de armazenamento
 
@@ -62,6 +64,18 @@ Resolve a tensão aparente entre §5 (nó imutável) e §9 (a IA "edita o docume
 - Exercício: `<form data-exercise-id data-rubric-id>` com campos gerados
 - Camada de interação: `<aside data-annotation-id data-anchor-block data-anchor-quote>` (anotação); `<div data-thread-id data-anchor-block>` (Q&A/remediação)
 - **A linha de leitura em destaque (§9) NÃO é persistida** — é estado efêmero de UI (posição de scroll), vive só no cliente, não entra no arquivo do nó.
+
+### 4.4 Blocos interativos gerados
+
+A app usa **HTML generativo a fundo** (§9): além de prosa, o conteúdo pode conter **visualizações interativas** quando isso ensina melhor (gráfico manipulável, simulação, diagrama), e os **exercícios têm modalidade livre** — não ficam limitados a checkbox/textbox. Isso é o propósito de gerar HTML em vez de markdown: o nó não é só reescrita em prosa das fontes.
+
+Estratégia de geração: **JS gerado arbitrário, sempre em sandbox.** O LLM escreve um widget sob medida por bloco; não há biblioteca fixa de componentes (máxima expressividade, modelo de segurança uniforme).
+
+- **Camada e imutabilidade (§4.3):** um bloco interativo é conteúdo **congelado na criação**, com `data-block-id` estável (ex.: `<figure data-block-id data-interactive>` embrulhando o `srcdoc` do sandbox). Sua manipulação interna (arrastar, simular, explorar) é **estado efêmero de cliente** — como a linha de leitura, não é persistida. Só o **artefato de resposta** de um exercício é capturado.
+- **Segurança (§3.1):** roda em `<iframe sandbox>` isolado da origem e do token; comunica-se apenas por `postMessage`.
+- **Protocolo de resultado (exercícios, §8):** todo exercício interativo emite um **artefato de resposta estruturado** por `postMessage` (estado final, sequência de ações, alvo atingido, valor submetido). O **schema desse artefato é gerado junto com** o conteúdo e o rubric e **travado antes da submissão** — a interatividade não pode virar avaliação "no olho" (§8). O ônus recai sobre a geração: produzir, ao criar o exercício, tanto o rubric quanto o schema do artefato que ele avalia.
+- **Latência (§14):** a prosa streama primeiro (TTFT ~1s); widgets mais pesados **hidratam depois**, nunca bloqueiam o tempo até estar lendo.
+- **Fundamentação (§11):** uma visualização também é fundamentada/citável — visualiza material de fonte e carrega a citação como qualquer bloco.
 
 ## 5. Modelo de dados: grafo de nós de conceito versionados
 
@@ -130,6 +144,7 @@ O gargalo residual aqui não é de escala/armazenamento (resolvido pelas técnic
 - **Metáfora unitário/integração**: objetivo de nó = teste unitário (conceito isolado foi entendido?). Exercício ocasional de síntese cruzando nós distantes no grafo = teste de integração (o usuário consegue conectar aprendizados de contextos diferentes numa aplicação nova?).
 - **Grounding dos exercícios no material original**: o exercício e sua solução são fundamentados na mesma fonte (livro/capítulo) que embasa o nó, tornando o rubric mais objetivo e reduzindo a leniência. Funciona bem em exatas; em áreas menos determinísticas o grounding é mais frouxo e o peso recai sobre os rubrics da §8.1 — limitação reconhecida, não resolvida.
 - **Nota estruturada por objetivo**: cada objetivo é avaliado em `{não demonstrado, parcial, demonstrado}`, não só passa/falha. Avançar exige todos os objetivos demonstrados; qualquer um não demonstrado dispara a remediação (§8.2). A nota alimenta o estado de retenção por conceito (§7.1).
+- **Modalidade de exercício livre, mas sempre gradeável (§4.4, §9):** o exercício pode ser um widget interativo arbitrário (arrastar-ordenar, rotular diagrama, manipular simulação até atingir um alvo, desenhar), não só checkbox/textbox. Seja qual for a modalidade, ele emite um **artefato de resposta estruturado** (via `postMessage`, §4.4) cujo schema é travado **junto com o rubric, antes da submissão**; o rubric avalia o artefato. Interatividade amplia como o usuário responde, **nunca** substitui o critério pré-definido.
 
 ### 8.1 Avaliação em domínios não-determinísticos (filosofia, ética, etc.)
 
@@ -149,7 +164,7 @@ Quando o usuário falha uma checagem de compreensão, o sistema **não** apenas 
 
 ## 9. Interface — "documento vivo"
 
-- Parágrafos explicando um conceito, seguidos de uma pergunta e um chatbox/formulário gerado dinamicamente (HTML generativo — a modalidade do exercício varia por conteúdo/domínio, decidida na própria geração, não fixada pelo sistema).
+- **Uso pleno do HTML generativo.** O conteúdo não é só reescrita/combinação em prosa das fontes: quando ensina melhor, o nó renderiza **visualizações interativas** (gráficos manipuláveis, simulações, diagramas) geradas sob medida. Do mesmo modo, o exercício **não é limitado a checkbox/textbox** — sua modalidade (chatbox, formulário, widget interativo) varia por conteúdo/domínio, decidida na própria geração, não fixada pelo sistema. Blocos interativos gerados seguem o contrato de sandbox + artefato de resposta da §4.4 (e, para exercícios, o rubric travado da §8).
 - Uma linha central em destaque (highlight) acompanha a posição de leitura atual do usuário (baseada em posição de scroll, não eye-tracking).
 - O usuário pode, a qualquer momento: selecionar um bloco de texto e dizer algo, ou dizer algo sem seleção (contexto = a linha em destaque).
 - A resposta da IA **edita o próprio documento** para conter a resposta — não aparece em um widget separado.
@@ -228,7 +243,7 @@ Alavancas, da maior para a menor:
 
 - **Streaming + otimizar TTFT (já na §3).** Leitura humana é mais lenta que a taxa de geração de prosa; se o nó streama token-a-token enquanto o usuário lê, ele nunca alcança o spinner. A latência percebida vira só o time-to-first-token.
 - **Prefetch preditivo sobre o outline (§6).** Enquanto o usuário lê o nó N e faz o exercício (segundos a minutos de tempo humano), gera-se em background o(s) provável(is) próximo(s) nó(s). Separar **"o que vem a seguir"** (previsível pelo outline → gerar adiantado) de **"como calibrar"** (depende da avaliação → delta pequeno pós-nota). Profundidade/largura do prefetch é **cost-aware/ajustável**, porque em BYOK trabalho especulativo desperdiçado é dinheiro do usuário.
-- **Pipeline dentro do nó.** Prosa streama primeiro; exercício + rubric geram em paralelo enquanto o usuário lê. A §8 exige o rubric **travado antes da submissão**, não na mesma chamada de LLM — então isso preserva o invariante sem serializar a espera. A correção sobrepõe com o prefetch.
+- **Pipeline dentro do nó.** Prosa streama primeiro; exercício + rubric geram em paralelo enquanto o usuário lê. A §8 exige o rubric **travado antes da submissão**, não na mesma chamada de LLM — então isso preserva o invariante sem serializar a espera. A correção sobrepõe com o prefetch. **Visualizações/widgets interativos (§4.4) hidratam depois da prosa** — nunca atrasam o TTFT.
 - **Model tiering (§12.1).** Modelo leve/rápido para as tarefas frequentes (exercício, correção contra rubric, resumos, embeddings, cross-ref); modelo robusto só para prosa e confrontação adversarial. Como a maioria das rodadas do loop atômico são as pequenas, isso ataca direto o "espera constante" — e é um knob disponível hoje via BYOK.
 - **UI otimista.** A ação do usuário (submeter resposta, perguntar) reflete na hora no documento; "pensando" acontece no fluxo do documento, nunca em modal bloqueante.
 
