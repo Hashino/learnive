@@ -3,57 +3,304 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- Token de sessão injetado pelo servidor. Lido pelo JS e enviado como
-         cabeçalho X-Learnive-Token; nunca guardado em cookie (evita CSRF). -->
+    <!-- Token de sessão injetado pelo servidor; enviado como cabeçalho
+         X-Learnive-Token em toda requisição, nunca em cookie (§3.1). -->
     <meta name="learnive-token" content="{{TOKEN}}" />
     <title>learnive</title>
     <style>
+      :root {
+        color-scheme: light dark;
+      }
       body {
         font-family: system-ui, sans-serif;
-        max-width: 42rem;
-        margin: 3rem auto;
+        max-width: 44rem;
+        margin: 2.5rem auto;
         padding: 0 1rem;
-        line-height: 1.5;
+        line-height: 1.6;
       }
-      code {
-        background: #f0f0f0;
-        padding: 0.1em 0.3em;
-        border-radius: 3px;
+      h1 {
+        font-weight: 700;
       }
-      #status {
-        font-weight: 600;
+      textarea {
+        width: 100%;
+        font: inherit;
+        padding: 0.6rem;
+        box-sizing: border-box;
+      }
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        border-radius: 6px;
+        border: 1px solid currentColor;
+        background: transparent;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #outline {
+        font-size: 0.9rem;
+        opacity: 0.8;
+        margin-bottom: 1.5rem;
+      }
+      #outline li.current {
+        font-weight: 700;
+        opacity: 1;
+      }
+      #prose {
+        min-height: 2rem;
+      }
+      iframe.sandbox {
+        width: 100%;
+        border: 1px solid #8884;
+        border-radius: 6px;
+        min-height: 8rem;
+        background: canvas;
+      }
+      .grade {
+        border-left: 3px solid #8888;
+        padding-left: 0.75rem;
+        margin: 0.5rem 0;
+      }
+      .grade.demonstrated {
+        border-color: #2a9d3f;
+      }
+      .grade.partial {
+        border-color: #d9a520;
+      }
+      .grade.not_demonstrated {
+        border-color: #d94a4a;
+      }
+      .muted {
+        opacity: 0.7;
+        font-size: 0.9rem;
+      }
+      .error {
+        color: #d94a4a;
       }
     </style>
   </head>
   <body>
-    <h1>learnive</h1>
-    <p>
-      Servidor local rodando. O token de sessão está embutido nesta página e é
-      enviado como cabeçalho <code>X-Learnive-Token</code> em toda requisição
-      (§3.1). A partir daqui, o documento vivo será construído sobre este mesmo
-      canal.
-    </p>
-    <p id="status">verificando servidor…</p>
+    <!-- Cold start (§6.1): uma única pergunta genérica. -->
+    <section id="coldstart">
+      <h1>learnive</h1>
+      <form id="startForm">
+        <p><label for="topic"><strong>O que vamos aprender?</strong></label></p>
+        <textarea id="topic" rows="3" autofocus></textarea>
+        <p><button type="submit">Começar</button></p>
+      </form>
+      <p id="startStatus" class="muted"></p>
+    </section>
+
+    <!-- Documento vivo (§9). -->
+    <main id="doc" hidden>
+      <ol id="outline"></ol>
+      <article id="prose"></article>
+      <div id="exercise"></div>
+      <div id="result"></div>
+      <div id="controls"></div>
+    </main>
 
     <script>
-      // Token da meta tag (injetado pelo servidor), não da URL.
       const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
 
-      // Quando o HTMX for carregado (fases seguintes), anexa o token a cada
-      // requisição automaticamente.
-      document.body.addEventListener("htmx:configRequest", (e) => {
-        e.detail.headers["X-Learnive-Token"] = TOKEN;
+      // Toda requisição carrega o token no cabeçalho (§3.1).
+      function api(path, options = {}) {
+        const headers = Object.assign(
+          { "X-Learnive-Token": TOKEN },
+          options.headers || {},
+        );
+        return fetch(path, Object.assign({}, options, { headers }));
+      }
+      function postJson(path, body) {
+        return api(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      }
+
+      const el = (id) => document.getElementById(id);
+      const state = { docId: null, titles: [], index: 0, nodeId: null };
+
+      // --- Cold start -------------------------------------------------------
+      el("startForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const topic = el("topic").value.trim();
+        if (!topic) return;
+        el("startStatus").textContent = "planejando o currículo…";
+        try {
+          const resp = await postJson("/api/documents", { topic });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          state.docId = data.doc_id;
+          state.titles = data.titles;
+          el("coldstart").hidden = true;
+          el("doc").hidden = false;
+          renderOutline();
+          generateNode(0);
+        } catch (err) {
+          el("startStatus").innerHTML =
+            '<span class="error">falhou: ' + escapeHtml(String(err)) + "</span>";
+        }
       });
 
-      // Sanity check: bate no /health com o cabeçalho de token.
-      fetch("/health", { headers: { "X-Learnive-Token": TOKEN } })
-        .then((r) => r.text())
-        .then((t) => {
-          document.getElementById("status").textContent = "servidor: " + t;
-        })
-        .catch(() => {
-          document.getElementById("status").textContent = "sem conexão";
-        });
+      function renderOutline() {
+        el("outline").innerHTML = state.titles
+          .map(
+            (t, i) =>
+              '<li class="' +
+              (i === state.index ? "current" : "") +
+              '">' +
+              escapeHtml(t) +
+              "</li>",
+          )
+          .join("");
+      }
+
+      // --- Geração de nó com streaming (§6, §14) ----------------------------
+      async function generateNode(index) {
+        state.index = index;
+        state.nodeId = null;
+        renderOutline();
+        el("prose").innerHTML = "";
+        el("exercise").innerHTML = "";
+        el("result").innerHTML = "";
+        el("controls").innerHTML = '<p class="muted">gerando…</p>';
+
+        let prose = "";
+        try {
+          const resp = await api(
+            `/api/documents/${state.docId}/nodes/${index}/generate`,
+            { method: "POST" },
+          );
+          if (!resp.ok) throw new Error(await resp.text());
+          await readSse(resp, (event, data) => {
+            if (event === "token") {
+              // Re-render acumulado tolera tags parciais durante o stream.
+              prose += data;
+              el("prose").innerHTML = prose;
+            } else if (event === "exercise") {
+              renderExercise(data);
+            } else if (event === "done") {
+              state.nodeId = data;
+              el("controls").innerHTML = "";
+            } else if (event === "error") {
+              throw new Error(data);
+            }
+          });
+        } catch (err) {
+          el("controls").innerHTML =
+            '<p class="error">erro na geração: ' +
+            escapeHtml(String(err)) +
+            "</p>";
+        }
+      }
+
+      // Renderiza o exercício gerado num iframe SANDBOX (§3.1/§4.4): sem
+      // allow-same-origin, então o HTML gerado nunca vê o token nem o DOM pai;
+      // devolve a resposta só por postMessage.
+      function renderExercise(html) {
+        const iframe = document.createElement("iframe");
+        iframe.className = "sandbox";
+        iframe.setAttribute("sandbox", "allow-scripts");
+        iframe.srcdoc =
+          '<!doctype html><meta charset="utf-8">' +
+          "<style>body{font-family:system-ui;margin:.5rem}button{font:inherit}</style>" +
+          "<body>" +
+          html +
+          '<p><button id="__submit" type="button">Enviar resposta</button></p>' +
+          "<script>(function(){function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
+          "document.getElementById('__submit').addEventListener('click',function(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});" +
+          "document.addEventListener('submit',function(e){e.preventDefault();parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});})();<\/script>";
+        el("exercise").replaceChildren(iframe);
+      }
+
+      // Resposta vinda do iframe sandbox (§4.4 result protocol).
+      window.addEventListener("message", (e) => {
+        if (e.data && e.data.type === "learnive-answer") submitAnswer(e.data.answer);
+      });
+
+      // --- Resposta → correção → remediação/avanço (§8, §8.2) ---------------
+      async function submitAnswer(answer) {
+        if (!state.nodeId) return;
+        el("result").innerHTML = '<p class="muted">avaliando…</p>';
+        try {
+          const resp = await postJson(
+            `/api/documents/${state.docId}/nodes/${state.nodeId}/answer`,
+            { answer },
+          );
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          renderGrades(data.grades);
+          if (data.advance) {
+            const next = state.index + 1;
+            if (next < state.titles.length) {
+              el("controls").innerHTML =
+                '<button id="next">Próximo conceito →</button>';
+              el("next").addEventListener("click", () => generateNode(next));
+            } else {
+              el("controls").innerHTML =
+                '<p class="muted">Você concluiu o outline atual.</p>';
+            }
+          } else if (data.remediation_html) {
+            el("result").innerHTML +=
+              '<div class="remediation"><h3>Vamos revisar</h3>' +
+              data.remediation_html +
+              "</div>";
+          }
+        } catch (err) {
+          el("result").innerHTML =
+            '<p class="error">erro: ' + escapeHtml(String(err)) + "</p>";
+        }
+      }
+
+      function renderGrades(grades) {
+        el("result").innerHTML = (grades || [])
+          .map(
+            (g) =>
+              '<div class="grade ' +
+              g.grade +
+              '"><strong>' +
+              g.grade.replace("_", " ") +
+              "</strong> — " +
+              escapeHtml(g.feedback || "") +
+              "</div>",
+          )
+          .join("");
+      }
+
+      // --- Parser de SSE sobre fetch (POST) ---------------------------------
+      async function readSse(response, onEvent) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let sep;
+          while ((sep = buf.indexOf("\n\n")) !== -1) {
+            const block = buf.slice(0, sep);
+            buf = buf.slice(sep + 2);
+            let event = "message";
+            let data = "";
+            for (const line of block.split("\n")) {
+              if (line.startsWith("event:")) event = line.slice(6).trim();
+              else if (line.startsWith("data:")) data += line.slice(5).trim();
+            }
+            if (data) onEvent(event, JSON.parse(data));
+          }
+        }
+      }
+
+      function escapeHtml(s) {
+        return s.replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      }
     </script>
   </body>
 </html>

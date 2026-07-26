@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Greenfield. The only code is a hello-world `src/main.rs`; `Cargo.toml` has no dependencies yet. **`README.md` is the authoritative specification** (in Portuguese) and defines the architecture the implementation must follow — read it before writing anything non-trivial. **`PLAN.md`** holds the living, phased build plan (Phase 1: minimum end-to-end loop, LibGen crawl included from the start; Phase 2: full-depth single living document; Phase 3: multiple cross-referenced documents) — check it for what's in/out of the current phase. Sections below are cross-cutting decisions that require reading multiple spec sections to grasp; do not re-derive them from the code (there isn't any).
+Phase 1 in progress: the minimum end-to-end loop is functional. **`README.md` is the authoritative specification** (in Portuguese) and defines the architecture the implementation must follow — read it before writing anything non-trivial. **`PLAN.md`** holds the living, phased build plan (Phase 1: minimum end-to-end loop, LibGen crawl included from the start; Phase 2: full-depth single living document; Phase 3: multiple cross-referenced documents) — check it for what's in/out of the current phase. Sections below are cross-cutting decisions that require reading multiple spec sections to grasp.
+
+**Workspace layout:** `crates/core` (`learnive-core`) holds the §4.3 node data contract + anchoring, deliberately free of tokio/axum so it compiles to wasm and is shared with the client; `crates/learnive` is the axum binary (`security`, `store`, `ai`, `engine`, `api`, `app`). `cargo run` runs the binary via `default-members`.
+
+**What works today:** secure server (§3.1); node parse/serialize + anchoring (§4.3); file store (§4); swappable provider with streaming + tiering + OpenRouter PKCE (§12); the loop — cold start → outline → streamed node generation → locked-rubric grading → remediation/advance (§6/§8/§8.2) — usable in the browser. Runs keyless in a **demo mode** (prompt-aware mock) when `LEARNIVE_OPENROUTER_KEY` is unset. Env: `LEARNIVE_PORT`, `LEARNIVE_DATA_DIR`, `LEARNIVE_OPENROUTER_KEY`, `LEARNIVE_MODEL_FAST`/`_ROBUST`.
+
+**Not yet built (Phase 1 remainder):** source acquisition (LibGen/arXiv/web §11.1), profile/memory (§7), abstraction calibration (§6.2), predictive prefetch (§14), setup UI + keychain + live OAuth round-trip (§12), the wasm anchoring build + HTMX vendoring, scroll reading-line (§9), text-selection→document routing (§7/§9), cost control (§12.2).
 
 ## Commands
 

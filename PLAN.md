@@ -1,5 +1,7 @@
 # PLAN.md — Plano de desenvolvimento do learnive
 
+> Legenda das checkboxes: `[x]` feito · `[~]` parcial (o essencial existe, falta o anotado) · `[ ]` a fazer.
+
 > Documento vivo. Este plano **pode e deve** mudar conforme o desenvolvimento avança — especialmente porque quase todo o risco do projeto é de *calibração* (qualidade de avaliação, fidelidade do perfil, sensibilidade de cross-ref), coisa que só se aprende usando. As referências `§N` apontam para as seções do `README.md` (especificação autoritativa).
 
 ## Princípio de faseamento
@@ -13,36 +15,36 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 **Objetivo:** provar a tese central com um caminho ponta-a-ponta funcionando: um tema → nó gerado sob demanda → checagem de compreensão com rubric travado → avaliação dispara o próximo nó. Profundidade mínima em tudo; o que importa é o *ciclo* fechar.
 
 **Fundação mínima (o que o loop exige para existir):**
-- [ ] Servidor `axum` bindado só em `127.0.0.1`; token de sessão obrigatório; validação de `Origin`/CORS restritiva; nenhum endpoint mutável em GET (§3.1).
-- [ ] Streaming SSE de conteúdo gerado servidor→cliente (§3).
-- [ ] **Frontend**: HTMX (troca de HTML/SSE/formulários) + JS vanilla mínimo (seleção, linha de leitura por scroll, streaming token-a-token, UI otimista) + módulo **wasm** de ancoragem compilado do mesmo crate Rust da §4.3; assets embutidos, sem etapa de build de página. Sem framework JS de VDOM (§3).
-- [ ] **Sandbox de blocos interativos gerados (§3.1, §4.4)**: HTML/JS gerado por LLM renderiza em `<iframe sandbox>` isolado da origem/token; exercícios interativos devolvem **artefato de resposta estruturado** via `postMessage`, com schema travado junto ao rubric antes da submissão.
-- [ ] Provedor de IA: **OpenRouter OAuth como caminho default** (mesmo na Fase 1), com BYOK direto como opção secundária. O onboarding completo (demais provedores, polimento) é Fase 2 (§12).
-- [ ] Armazenamento em arquivos: um diretório = um documento vivo, um arquivo HTML por nó (§4, §4.1).
-- [ ] **Contrato do nó em duas camadas (§4.3)** — é o formato de dados foundational, definir primeiro: camada de conteúdo imutável com `data-block-id` estável + camada de interação append-only que referencia IDs; ancoragem por ID (fallback fuzzy por quote); linha de leitura é estado efêmero de UI, não persistida. Vocabulário v0 de tags do §4.3.
+- [x] Servidor `axum` bindado só em `127.0.0.1`; token de sessão obrigatório; validação de `Origin`/CORS restritiva; nenhum endpoint mutável em GET (§3.1).
+- [x] Streaming de conteúdo gerado servidor→cliente (§3) — formato SSE sobre um POST (lido via `fetch`), porque `EventSource` não carrega o token nem faz POST e a §3.1 proíbe mutação em GET.
+- [~] **Frontend**: JS vanilla mínimo + streaming token-a-token feitos. Falta: HTMX vendorizado, módulo **wasm** de ancoragem, linha de leitura por scroll, UI otimista (§3).
+- [~] **Sandbox de blocos interativos gerados (§3.1, §4.4)**: exercício renderiza em `<iframe sandbox>` (só `allow-scripts`, sem `allow-same-origin`) e devolve a resposta por `postMessage`. Falta: schema de artefato travado junto ao rubric e validado.
+- [~] Provedor de IA: seam trocável + caminho OpenRouter + primitivas OAuth PKCE prontos; roda em modo demo sem chave. Falta: round-trip OAuth pelo navegador + keychain (com o setup, §12).
+- [x] Armazenamento em arquivos: um diretório = um documento vivo, um arquivo HTML por nó (§4, §4.1).
+- [x] **Contrato do nó em duas camadas (§4.3)**: conteúdo congelado com `data-block-id` + interação append-only; ancoragem por ID com fallback fuzzy por quote; vocabulário v0.
 
 **Loop:**
-- [ ] **Cold start (§6.1)**: tela com a pergunta única "O que vamos aprender?" → o agente decide entre iniciar o documento ou abrir conversa de negociação de escopo até definir o outline.
-- [ ] Geração de outline inicial a partir do tema/ideia/problema do usuário (§6).
-- [ ] Geração de nó sob demanda a partir do ponto de leitura (§6).
-- [ ] Objetivos de aprendizagem gerados **junto** com o conteúdo do nó; rubric travado na criação; nota por objetivo em `{não demonstrado, parcial, demonstrado}`; ao menos um item de transferência não coberto no texto; exercício fundamentado no material original (§8).
-- [ ] UI "documento vivo": parágrafos + **conteúdo generativo** (prosa e, quando ensina melhor, visualização interativa) + exercício gerado dinamicamente cuja modalidade não se limita a checkbox/textbox (§4.4, §9); linha de leitura em destaque; seleção de texto + pergunta que **edita o próprio documento** com a resposta (§9).
-- [ ] **Remediação na falha (§8.2)**: em vez de avançar/regenerar em silêncio, abrir conversa com o tutor no contexto do exercício (exemplo resolvido / passo a passo) + novo problema similar cuja similaridade ao modelo **cresce a cada falha**; só avança quando o objetivo fica `demonstrado`.
-- [ ] **Calibração de nível de abstração (§6.2)**: subir abstração quando o usuário avança sem errar/perguntar; baixar quando trava — por conceito.
-- [ ] Perfil mínimo: registrar interações e alimentar o contexto recente do próximo nó (sem compactação de longo prazo ainda) (§7).
-- [ ] Disparo automático do próximo nó ao avaliar o exercício, com pausa/redirecionamento pelo usuário (§9).
+- [~] **Cold start (§6.1)**: pergunta única "O que vamos aprender?" → gera outline. Falta: o agente decidir por abrir conversa de negociação de escopo em vez de iniciar direto.
+- [x] Geração de outline inicial a partir do tema (§6).
+- [x] Geração de nó sob demanda (§6).
+- [~] Objetivos gerados **junto** com o conteúdo; rubric travado na criação (server-only); nota por objetivo em `{não demonstrado, parcial, demonstrado}`; item de transferência. Falta: fundamentar o exercício em fonte real (§8, depende da aquisição §11.1).
+- [~] UI "documento vivo": prosa streamada + exercício interativo em sandbox + outline (§4.4, §9). Falta: linha de leitura em destaque e seleção de texto + pergunta que edita o documento (§9).
+- [x] **Remediação na falha (§8.2)**: thread de tutor append-only no contexto do exercício, com similaridade crescente por tentativa; só avança quando `demonstrado`.
+- [ ] **Calibração de nível de abstração (§6.2)**: subir/baixar abstração por conceito conforme erro+pergunta.
+- [ ] Perfil mínimo: registrar interações e alimentar o contexto recente do próximo nó (§7).
+- [x] Avanço ao avaliar o exercício (botão "próximo"); pausa/redirecionamento fino é refino posterior (§9).
 
 **Responsividade nesta fase (a Fase 1 tem que ser prazerosa, senão não cumpre seu propósito) (§14):**
-- [ ] Streaming token-a-token no documento com foco em **time-to-first-token** (alvo ~1s até estar lendo), não tempo até completar.
-- [ ] **Prefetch preditivo** do(s) provável(is) próximo(s) nó(s) sobre o outline enquanto o usuário lê/responde — cost-aware/ajustável (§6).
-- [ ] Pipeline dentro do nó: prosa primeiro, exercício + rubric em paralelo (rubric travado antes da submissão, §8).
-- [ ] Model tiering básico: modelo leve para exercício/correção/resumo, robusto para prosa (§12.1) — camada de modelo roteada por sub-tarefa e trocável.
+- [x] Streaming token-a-token no documento com foco em **time-to-first-token**, não tempo até completar.
+- [ ] **Prefetch preditivo** do(s) próximo(s) nó(s) sobre o outline enquanto o usuário lê/responde — cost-aware (§6).
+- [x] Pipeline dentro do nó: prosa (robusto) streama primeiro; exercício + rubric numa chamada separada (rubric travado antes da submissão, §8).
+- [x] Model tiering básico: leve para exercício/correção, robusto para prosa (§12.1) — roteado por sub-tarefa e trocável.
 - [ ] UI otimista: ação do usuário reflete na hora no documento, sem modal bloqueante.
 
 **Setup de provedor/modelo nesta fase (§12, §12.1):**
-- [ ] **OpenRouter OAuth como opção padrão**; BYOK direto como opção.
+- [~] **OpenRouter OAuth como opção padrão**; BYOK direto como opção. Seleção via ambiente hoje; falta a tela de setup.
 - [ ] Escolha por **intenção** (gratuito vs pago), não por nome de modelo; pairing recomendado aplicado automaticamente.
-- [ ] Degradação graciosa: um só modelo serve os dois tiers (tiering nunca bloqueia começar).
+- [x] Degradação graciosa: um só modelo serve os dois tiers (`Models::single`) — tiering nunca bloqueia começar.
 - [ ] Controle de custo básico (§12.2): exibir gasto corrente + um limite simples que estrangula o prefetch antes de pausar a geração.
 
 **Fundamentação de fonte nesta fase (crawl desde o início):**
