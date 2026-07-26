@@ -17,7 +17,8 @@
          img-src data:). -->
     <style>
       :root {
-        color-scheme: dark;
+        /* Nord palette (fixed). The Polar Night (0-3) and Snow Storm (4-6)
+           halves swap roles between the dark and light themes below. */
         --nord0: #2e3440;
         --nord1: #3b4252;
         --nord2: #434c5e;
@@ -36,6 +37,73 @@
         --mono: "Ubuntu Mono", "JetBrains Mono", "Fira Code", Consolas,
           "Liberation Mono", Menlo, Courier, monospace;
       }
+
+      /* Dark theme (default): semantic role tokens. The rules below only ever
+         reference these, so switching themes = swapping this token block. */
+      :root,
+      html[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: linear-gradient(
+          135deg,
+          var(--nord0) 0%,
+          var(--nord1) 50%,
+          var(--nord2) 100%
+        );
+        --fg: var(--nord4);
+        --heading: var(--nord6);
+        --heading-2: var(--nord5);
+        --nav-bg: rgba(46, 52, 64, 0.95);
+        --card-bg: rgba(59, 66, 82, 0.6);
+        --card-border: var(--nord3);
+        --card-shadow: rgba(46, 52, 64, 0.4);
+        --link: var(--nord8);
+        --link-hover: var(--nord7);
+        --muted: var(--nord9);
+        --accent: var(--nord8);
+        --code-bg: var(--nord1);
+        --code-fg: var(--nord13);
+        --pre-bg: var(--nord0);
+        --field-bg: rgba(76, 86, 106, 0.6);
+        --field-fg: var(--nord6);
+        --btn-bg: var(--nord10);
+        --btn-hover: var(--nord9);
+        --btn-fg: var(--nord6);
+        --star-filter: none;
+        --star-opacity: 1;
+      }
+
+      /* Light theme: Snow Storm backgrounds, Polar Night text, darker accents
+         for contrast. */
+      html[data-theme="light"] {
+        color-scheme: light;
+        --bg: linear-gradient(
+          135deg,
+          var(--nord6) 0%,
+          var(--nord5) 50%,
+          var(--nord4) 100%
+        );
+        --fg: var(--nord1);
+        --heading: var(--nord0);
+        --heading-2: var(--nord1);
+        --nav-bg: rgba(236, 239, 244, 0.9);
+        --card-bg: rgba(255, 255, 255, 0.72);
+        --card-border: var(--nord4);
+        --card-shadow: rgba(76, 86, 106, 0.15);
+        --link: var(--nord10);
+        --link-hover: var(--nord9);
+        --muted: var(--nord3);
+        --accent: var(--nord10);
+        --code-bg: var(--nord5);
+        --code-fg: var(--nord10);
+        --pre-bg: var(--nord5);
+        --field-bg: rgba(255, 255, 255, 0.85);
+        --field-fg: var(--nord0);
+        --btn-bg: var(--nord10);
+        --btn-hover: var(--nord9);
+        --btn-fg: var(--nord6);
+        --star-filter: invert(1);
+        --star-opacity: 0.35;
+      }
       * {
         box-sizing: border-box;
       }
@@ -44,17 +112,12 @@
         min-height: 100vh;
         font-family: var(--mono);
         line-height: 1.5;
-        color: var(--nord4);
-        background: linear-gradient(
-          135deg,
-          var(--nord0) 0%,
-          var(--nord1) 50%,
-          var(--nord2) 100%
-        );
+        color: var(--fg);
+        background: var(--bg);
         background-attachment: fixed;
       }
 
-      /* Animated starfield (the blog's signature). */
+      /* Animated starfield (the blog's signature). Inverted + dimmed in light. */
       #stars,
       #stars2,
       #stars3 {
@@ -62,6 +125,8 @@
         inset: 0;
         pointer-events: none;
         z-index: -1;
+        opacity: var(--star-opacity);
+        filter: var(--star-filter);
       }
       #stars {
         background: transparent
@@ -104,9 +169,9 @@
         width: 100%;
         z-index: 1000;
         padding: 0.6rem 0;
-        background: rgba(46, 52, 64, 0.95);
+        background: var(--nav-bg);
         backdrop-filter: blur(10px);
-        border-bottom: 1px solid var(--nord3);
+        border-bottom: 1px solid var(--card-border);
       }
       .nav-container {
         display: flex;
@@ -114,18 +179,37 @@
         justify-content: space-between;
         padding: 0 2rem;
       }
+      .nav-right {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+      }
       .nav-title {
-        color: var(--nord6);
+        color: var(--heading);
         text-decoration: none;
         font-weight: 700;
         font-size: 1.2rem;
       }
       .nav-title:hover {
-        color: var(--nord8);
+        color: var(--link);
       }
       .nav-tag {
-        color: var(--nord9);
+        color: var(--muted);
         font-size: 0.9rem;
+      }
+      /* Ghost button so the toggle sits quietly in the nav. */
+      .theme-toggle {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--card-border);
+        padding: 0.3rem 0.55rem;
+        font-size: 1rem;
+        line-height: 1;
+      }
+      .theme-toggle:hover:not(:disabled) {
+        background: transparent;
+        color: var(--accent);
+        border-color: var(--accent);
       }
 
       /* Central content column. */
@@ -137,10 +221,10 @@
 
       /* Translucent card (.blog-content style). */
       .card {
-        background: rgba(59, 66, 82, 0.6);
-        border: 1px solid var(--nord3);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
         border-radius: var(--roundness);
-        box-shadow: 0 10px 40px rgba(46, 52, 64, 0.4);
+        box-shadow: 0 10px 40px var(--card-shadow);
         backdrop-filter: blur(10px);
         padding: 2rem 2.5rem 2.5rem;
       }
@@ -151,44 +235,44 @@
       h1 {
         font-size: 2rem;
         font-weight: 700;
-        color: var(--nord6);
+        color: var(--heading);
         margin: 0 0 1rem;
       }
       h2 {
-        color: var(--nord5);
+        color: var(--heading-2);
         margin: 1.5rem 0 0.8rem;
       }
       h3 {
-        color: var(--nord5);
+        color: var(--heading-2);
       }
       a {
-        color: var(--nord8);
+        color: var(--link);
         text-decoration: none;
       }
       a:hover {
-        color: var(--nord7);
+        color: var(--link-hover);
         text-decoration: underline;
       }
       code {
-        background: var(--nord1);
-        color: var(--nord13);
+        background: var(--code-bg);
+        color: var(--code-fg);
         padding: 0.15rem 0.4rem;
         border-radius: 4px;
         font-size: 0.9em;
       }
       pre {
-        background: var(--nord0);
+        background: var(--pre-bg);
         border-radius: var(--roundness);
         padding: 0.75rem 1rem;
         overflow-x: auto;
       }
       pre code {
         background: none;
-        color: var(--nord4);
+        color: var(--fg);
         padding: 0;
       }
       blockquote {
-        border-left: 4px solid var(--nord8);
+        border-left: 4px solid var(--accent);
         margin: 1rem 0;
         padding-left: 1rem;
         font-style: italic;
@@ -199,29 +283,29 @@
         width: 100%;
         font: inherit;
         padding: 0.6rem;
-        color: var(--nord6);
-        background: rgba(76, 86, 106, 0.6);
-        border: 1px solid var(--nord3);
+        color: var(--field-fg);
+        background: var(--field-bg);
+        border: 1px solid var(--card-border);
         border-radius: var(--roundness);
       }
       textarea:focus {
         outline: none;
-        border-color: var(--nord8);
-        box-shadow: 0 0 0 1px var(--nord8);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
       }
       button {
         font: inherit;
         padding: 0.5rem 1rem;
         cursor: pointer;
-        color: var(--nord6);
-        background: var(--nord10);
-        border: 1px solid var(--nord10);
+        color: var(--btn-fg);
+        background: var(--btn-bg);
+        border: 1px solid var(--btn-bg);
         border-radius: var(--roundness);
         transition: background 0.2s ease, border-color 0.2s ease;
       }
       button:hover:not(:disabled) {
-        background: var(--nord9);
-        border-color: var(--nord9);
+        background: var(--btn-hover);
+        border-color: var(--btn-hover);
       }
       button:disabled {
         opacity: 0.5;
@@ -230,26 +314,26 @@
 
       #outline {
         font-size: 0.9rem;
-        color: var(--nord9);
+        color: var(--muted);
         margin: 0 0 1.5rem;
         padding-left: 1.2rem;
       }
       #outline li.current {
         font-weight: 700;
-        color: var(--nord8);
+        color: var(--accent);
       }
       #prose {
         min-height: 2rem;
       }
       iframe.sandbox {
         width: 100%;
-        border: 1px solid var(--nord3);
+        border: 1px solid var(--card-border);
         border-radius: var(--roundness);
         min-height: 8rem;
-        background: var(--nord1);
+        background: var(--field-bg);
       }
       .grade {
-        border-left: 3px solid var(--nord3);
+        border-left: 3px solid var(--card-border);
         padding-left: 0.75rem;
         margin: 0.5rem 0;
       }
@@ -263,13 +347,26 @@
         border-color: var(--nord11);
       }
       .muted {
-        color: var(--nord9);
+        color: var(--muted);
         font-size: 0.9rem;
       }
       .error {
         color: var(--nord11);
       }
     </style>
+    <!-- Set the theme before first paint (no flash): saved choice, else the OS
+         preference. The toggle is wired in the main script below. -->
+    <script>
+      (function () {
+        var t = localStorage.getItem("learnive-theme");
+        if (t !== "light" && t !== "dark") {
+          t = matchMedia("(prefers-color-scheme: light)").matches
+            ? "light"
+            : "dark";
+        }
+        document.documentElement.dataset.theme = t;
+      })();
+    </script>
   </head>
   <body>
     <!-- Starfield (decorative, behind everything). -->
@@ -280,7 +377,16 @@
     <nav class="top-nav">
       <div class="nav-container">
         <a href="/" class="nav-title">learnive</a>
-        <span class="nav-tag">living document</span>
+        <div class="nav-right">
+          <span class="nav-tag">living document</span>
+          <button
+            id="themeToggle"
+            class="theme-toggle"
+            type="button"
+            aria-label="Toggle light/dark theme"
+            title="Toggle light/dark theme"
+          ></button>
+        </div>
       </div>
     </nav>
 
@@ -326,6 +432,22 @@
 
       const el = (id) => document.getElementById(id);
       const state = { docId: null, titles: [], index: 0, nodeId: null };
+
+      // --- Theme toggle -----------------------------------------------------
+      // The head script already applied the theme; here we wire the switch and
+      // persist the choice. The icon shows the mode you'd switch TO.
+      const currentTheme = () =>
+        document.documentElement.dataset.theme === "light" ? "light" : "dark";
+      function syncThemeToggle() {
+        el("themeToggle").textContent = currentTheme() === "light" ? "☾" : "☀";
+      }
+      el("themeToggle").addEventListener("click", () => {
+        const next = currentTheme() === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem("learnive-theme", next);
+        syncThemeToggle();
+      });
+      syncThemeToggle();
 
       // --- Cold start -------------------------------------------------------
       el("startForm").addEventListener("submit", async (e) => {
@@ -412,15 +534,22 @@
         iframe.className = "sandbox";
         iframe.title = "Exercise";
         iframe.setAttribute("sandbox", "allow-scripts");
+        // Nord base matching the current theme so the exercise blends in; the
+        // generated HTML can still override. Literal colors — the sandbox can't
+        // see the page's CSS vars. (Built at render time; toggling theme
+        // mid-exercise restyles on the next node.)
+        const c =
+          currentTheme() === "light"
+            ? { scheme: "light", bg: "#eceff4", fg: "#2e3440", field: "#ffffff", border: "#d8dee9", link: "#5e81ac" }
+            : { scheme: "dark", bg: "#3b4252", fg: "#d8dee9", field: "#434c5e", border: "#4c566a", link: "#88c0d0" };
         iframe.srcdoc =
           '<!doctype html><meta charset="utf-8">' +
-          // Nord base so the exercise matches the page; the generated HTML can
-          // still override it. Literal colors (the iframe can't see the page vars).
-          "<style>:root{color-scheme:dark}body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;margin:.6rem;background:#3b4252;color:#d8dee9;line-height:1.5}" +
+          "<style>:root{color-scheme:" + c.scheme + "}" +
+          "body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;margin:.6rem;background:" + c.bg + ";color:" + c.fg + ";line-height:1.5}" +
           "button{font:inherit;padding:.4rem .8rem;border-radius:3px;border:1px solid #5e81ac;background:#5e81ac;color:#eceff4;cursor:pointer}" +
           "button:hover{background:#81a1c1;border-color:#81a1c1}" +
-          "input,textarea,select{font:inherit;background:#434c5e;color:#eceff4;border:1px solid #4c566a;border-radius:3px;padding:.35rem}" +
-          "a{color:#88c0d0}label{display:inline-block}</style>" +
+          "input,textarea,select{font:inherit;background:" + c.field + ";color:" + c.fg + ";border:1px solid " + c.border + ";border-radius:3px;padding:.35rem}" +
+          "a{color:" + c.link + "}label{display:inline-block}</style>" +
           "<body>" +
           html +
           '<p><button id="__submit" type="button">Submit answer</button></p>' +
