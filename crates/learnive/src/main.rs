@@ -41,16 +41,54 @@ async fn main() {
         }
     };
 
+    let url = format!("http://127.0.0.1:{port}/?token={}", state.token);
     println!("learnive running.");
-    println!(
-        "Open in your browser: http://127.0.0.1:{port}/?token={}",
-        state.token
-    );
+    println!("Open in your browser: {url}");
     println!("The session token is required on every request (§3.1).");
+
+    // Open the frontend automatically. The listener is already bound and
+    // listening, so the browser's connection is accepted into the backlog even
+    // before `serve` starts processing — no race. Opt out with LEARNIVE_NO_OPEN.
+    if std::env::var_os("LEARNIVE_NO_OPEN").is_none() {
+        open_browser(&url);
+    }
 
     if let Err(e) = axum::serve(listener, router).await {
         eprintln!("server exited with error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Opens `url` in the user's default browser. Dependency-free per platform:
+/// `xdg-open` on Linux/BSD, `open` on macOS, `cmd /C start` on Windows. Spawned
+/// and not awaited; failure is non-fatal (the URL is already printed as a
+/// fallback). The token is in the URL so the opened tab is authenticated (§3.1).
+fn open_browser(url: &str) {
+    use std::process::{Command, Stdio};
+
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(target_os = "windows") {
+        // The first quoted `start` argument is the window title, so pass an empty one.
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+
+    // Detach stdio so the browser launcher never noises up our console.
+    let spawned = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if spawned.is_err() {
+        eprintln!("could not open the browser automatically — open the URL above manually.");
     }
 }
 

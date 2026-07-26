@@ -21,11 +21,13 @@ Phase 1 — the minimum end-to-end loop works: cold start → outline → stream
 cargo run
 ```
 
-Then open the printed URL — it includes the session token, which is required on every request (§3.1):
+It opens your default browser at the token-authenticated URL automatically. The token is required on every request (§3.1); if the browser doesn't open, use the URL printed to the console:
 
 ```
 http://127.0.0.1:7420/?token=<generated-token>
 ```
+
+Set `LEARNIVE_NO_OPEN=1` to skip auto-opening (useful for headless/dev runs).
 
 Type a topic into "What are we learning?" and the loop begins. With no API key configured, you get **demo mode** (canned content) so the loop still closes end to end.
 
@@ -50,6 +52,7 @@ cargo run
 | `LEARNIVE_MODEL_ROBUST` | `openai/gpt-4o` | Robust tier: explanatory prose, confrontation (§12.1). |
 | `LEARNIVE_PORT` | `7420` | Port to bind on `127.0.0.1`. |
 | `LEARNIVE_DATA_DIR` | `learnive-data` | Where living documents are stored (§4). |
+| `LEARNIVE_NO_OPEN` | *(unset → auto-open)* | Set to any value to skip opening the browser on startup. |
 
 Tiering is an optimization, never a barrier: a single model can serve both tiers, and demo mode needs no model at all.
 
