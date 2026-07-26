@@ -412,6 +412,10 @@
         <ol id="outline"></ol>
         <article id="prose"></article>
         <div id="exercise"></div>
+        <!-- Append-only interaction layer (§4.3): attempts + remediation
+             accumulate here and are never overwritten within a node. -->
+        <div id="interactions"></div>
+        <!-- Transient status only (evaluating…, errors). -->
         <div id="result"></div>
         <div id="controls"></div>
       </main>
@@ -507,6 +511,7 @@
         el("prose").innerHTML = "";
         el("exercise").innerHTML = "";
         exerciseFrame = null;
+        el("interactions").innerHTML = "";
         el("result").innerHTML = "";
         el("controls").innerHTML = '<p class="muted">generating…</p>';
 
@@ -621,6 +626,7 @@
       // --- Answer → grading → remediation/advance (§8, §8.2) ----------------
       async function submitAnswer(answer) {
         if (!state.nodeId) return;
+        // Transient status only — never wipes the interaction log below.
         el("result").innerHTML = '<p class="muted">evaluating…</p>';
         try {
           const resp = await postJson(
@@ -629,7 +635,8 @@
           );
           if (!resp.ok) throw new Error(await resp.text());
           const data = await resp.json();
-          renderGrades(data.grades);
+          el("result").innerHTML = "";
+          appendGrades(data.grades);
           if (data.advance) {
             const next = state.index + 1;
             if (next < state.titles.length) {
@@ -641,27 +648,7 @@
                 '<p class="muted">You have completed the current outline.</p>';
             }
           } else if (data.remediation_html) {
-            // Also LLM-generated → sanitize before the app origin (§3.1). The
-            // remediation explains and proposes a NEW similar problem (§8.2), but
-            // sanitized prose can't carry a form — so we append our own answer box
-            // wired back into the same grading loop. Re-submitting hits the same
-            // /answer endpoint: it re-grades against the locked rubric and either
-            // advances or remediates again (attempt count grows server-side).
-            el("result").innerHTML +=
-              '<div class="remediation"><h3>Let\'s review</h3>' +
-              sanitizeHtml(data.remediation_html) +
-              '<form id="remForm" class="rem-answer">' +
-              '<textarea id="remAnswer" rows="4" ' +
-              'placeholder="Your answer to the new problem…"></textarea>' +
-              '<p><button type="submit">Submit answer</button></p>' +
-              "</form></div>";
-            const remForm = el("remForm");
-            remForm.addEventListener("submit", (e) => {
-              e.preventDefault();
-              submitAnswer(
-                JSON.stringify({ answer: el("remAnswer").value }),
-              );
-            });
+            appendRemediation(data.remediation_html);
           }
         } catch (err) {
           el("result").innerHTML =
@@ -669,8 +656,12 @@
         }
       }
 
-      function renderGrades(grades) {
-        el("result").innerHTML = (grades || [])
+      // Append-only interaction layer (§4.3): each attempt's grades and each
+      // remediation stay in the document, never overwritten within a node.
+      function appendGrades(grades) {
+        const div = document.createElement("div");
+        div.className = "grades";
+        div.innerHTML = (grades || [])
           .map(
             (g) =>
               '<div class="grade ' +
@@ -682,6 +673,40 @@
               "</div>",
           )
           .join("");
+        el("interactions").appendChild(div);
+      }
+
+      // Remediation is LLM-generated → sanitize before the app origin (§3.1). It
+      // explains and proposes a NEW similar problem (§8.2), but sanitized prose
+      // can't carry a form — so we append our own answer box wired back into the
+      // same grading loop. Re-submitting hits the same /answer endpoint: it
+      // re-grades against the locked rubric and either advances or remediates
+      // again (attempt count grows server-side).
+      function appendRemediation(html) {
+        // Freeze earlier answer boxes so the log reads as history — only the
+        // latest remediation is answerable.
+        document
+          .querySelectorAll("#interactions .rem-answer :is(textarea,button)")
+          .forEach((x) => (x.disabled = true));
+        const wrap = document.createElement("div");
+        wrap.className = "remediation";
+        wrap.innerHTML =
+          "<h3>Let's review</h3>" +
+          sanitizeHtml(html) +
+          '<form class="rem-answer">' +
+          '<textarea rows="4" placeholder="Your answer to the new problem…">' +
+          "</textarea>" +
+          '<p><button type="submit">Submit answer</button></p>' +
+          "</form>";
+        const form = wrap.querySelector(".rem-answer");
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          submitAnswer(
+            JSON.stringify({ answer: form.querySelector("textarea").value }),
+          );
+        });
+        el("interactions").appendChild(wrap);
+        form.querySelector("textarea").focus();
       }
 
       // --- SSE parser over fetch (POST) -------------------------------------
