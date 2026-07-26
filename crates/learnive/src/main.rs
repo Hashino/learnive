@@ -44,7 +44,6 @@ async fn main() {
     let url = format!("http://127.0.0.1:{port}/?token={}", state.token);
     println!("learnive running.");
     println!("Open in your browser: {url}");
-    println!("The session token is required on every request (§3.1).");
 
     // Open the frontend automatically. The listener is already bound and
     // listening, so the browser's connection is accepted into the backlog even
