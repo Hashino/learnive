@@ -80,6 +80,9 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 - [ ] Preferência de formato **EPUB > PDF > DJVU**; normalização de qualquer formato para a representação interna (texto extraído + dialeto HTML).
 - [ ] Viewer da fonte **só-leitura**; seleção na fonte roteia trecho citado para o documento vivo (§11).
 
+**Serialização canônica do nó (§4, §4.3):**
+- [ ] Ordem de atributo estável na reemissão do HTML do nó (o `inner_html` do `scraper` não preserva ordem byte a byte) — para diffs limpos no espírito "arquivos legíveis por humano" da §4. Hoje o conteúdo é normalizado na ingestão e congelado; falta canonicalizar a saída.
+
 **Grafo de conceitos versionado (§5):**
 - [ ] Revisão não-destrutiva: revisitar conceito gera novo nó de versão; original intacto com anotações ancoradas.
 - [ ] Cadeia de versão via front-matter/nome sequencial; referências futuras apontam para a ponta mais recente.

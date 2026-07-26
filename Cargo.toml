@@ -1,13 +1,8 @@
-[package]
-name = "learnive"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-rand = "0.8"
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+# Workspace root. `learnive-core` holds the node data contract (§4.3) and the
+# anchoring logic with no server deps, so it can also be compiled to wasm and
+# shared with the client (§3, §4.3 "written once in Rust, no JS drift").
+# `learnive` is the axum binary.
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/learnive"]
+default-members = ["crates/learnive"]

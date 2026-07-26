@@ -1,0 +1,10 @@
+[package]
+name = "learnive-core"
+version = "0.1.0"
+edition = "2024"
+
+# Kept deliberately free of tokio/axum so this crate compiles to wasm32 and the
+# §4.3 anchoring can run identically on server and client.
+[dependencies]
+scraper = "0.21"
+serde = { version = "1", features = ["derive"] }
