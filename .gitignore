@@ -1,2 +1,5 @@
 /target
 learnive-data/
+
+# Playwright MCP scratch (screenshots, console logs)
+.playwright-mcp/

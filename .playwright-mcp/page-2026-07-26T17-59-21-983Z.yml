@@ -1,9 +1,0 @@
-- generic [ref=f4e2]:
-  - heading "learnive" [level=1] [ref=f4e3]
-  - generic [ref=f4e4]:
-    - paragraph [ref=f4e5]:
-      - strong [ref=f4e7]: O que vamos aprender?
-    - textbox "O que vamos aprender?" [active] [ref=f4e8]
-    - paragraph [ref=f4e9]:
-      - button "Começar" [ref=f4e10] [cursor=pointer]
-  - paragraph
