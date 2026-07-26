@@ -265,6 +265,42 @@ pub mod prompt {
     use super::Rubric;
     use crate::ai::ChatMessage;
 
+    /// Contrato de HTML para superfícies **sanitizadas** (prosa, remediação):
+    /// esse conteúdo é inserido na origem da app e passa pelo `sanitizeHtml` do
+    /// cliente (`assets/index.html`), que REMOVE silenciosamente o que estiver
+    /// fora do contrato. Informar o modelo evita que ele gere algo que suma na
+    /// renderização (§3.1/§4.4). **Mantenha em sincronia com o sanitizador** —
+    /// a lista de tags/atributos bloqueados aqui espelha a de lá.
+    pub const PROSE_HTML_CONTRACT: &str = "\
+Regras de HTML (o conteúdo é sanitizado — o que violar some na renderização):\n\
+- Use SÓ HTML semântico estático: <h2>-<h4>, <p>, <ul>/<ol>/<li>, <table>/<tr>/\
+<td>, <code>/<pre>, <blockquote>, <strong>/<em>, <a href> (só http(s), mailto: \
+ou #) e <img> (só src https: ou data:image/).\n\
+- NUNCA use: <script>, <style>, <form>, <iframe>, <object>, <embed>, <link>, \
+<meta>, <base>; nem atributos on* (onclick, onerror...), nem atributo style \
+inline, nem URLs javascript:. Tudo isso é descartado.\n\
+- Não gere atributos id/data-* — o servidor os atribui.\n\
+- Precisa de interatividade, visualização dinâmica, JS ou CSS próprio? Isso NÃO \
+cabe na prosa (seria removido); vai no bloco de exercício, que roda isolado num \
+iframe sandbox.";
+
+    /// Contrato do bloco de exercício: roda isolado num `<iframe sandbox>`
+    /// (§4.4) — SEM same-origin, não vê o token nem o DOM da página — então
+    /// NÃO é sanitizado e pode usar JS/CSS/SVG à vontade. Em troca precisa
+    /// devolver a resposta pelo protocolo postMessage (§8: artefato estruturado
+    /// travado junto com o rubric).
+    pub const EXERCISE_HTML_CONTRACT: &str = "\
+O exercise_html roda isolado num iframe sandbox (allow-scripts, SEM same-origin): \
+não vê o token nem a página. Logo, pode usar HTML/CSS/JS/SVG à vontade — inclusive \
+visualizações interativas, não só campos de texto.\n\
+Como a resposta volta (§8):\n\
+- Caso simples: inclua um <form> (ou um <input>/<textarea>) — a página injeta o \
+botão \"Enviar\" e coleta os campos automaticamente.\n\
+- Caso interativo/custom: quando o aluno concluir, chame você mesmo \
+parent.postMessage({type:'learnive-answer', answer: JSON.stringify(ARTEFATO)}, '*'), \
+onde ARTEFATO é um JSON estruturado que o rubric consiga avaliar.\n\
+Nunca escreva os critérios de avaliação dentro do exercise_html (são server-only).";
+
     pub fn outline(topic: &str) -> Vec<ChatMessage> {
         vec![
             ChatMessage::system(
@@ -278,12 +314,12 @@ pub mod prompt {
 
     pub fn prose(topic: &str, item_title: &str, context: &str) -> Vec<ChatMessage> {
         vec![
-            ChatMessage::system(
+            ChatMessage::system(format!(
                 "Você é um tutor. Escreva blocos curtos de prosa explicativa em HTML \
-                 semântico simples (<h2>, <p>, <ul>...), SEM atributos de id (o \
-                 servidor atribui). Seja atômico: explique só este conceito e pare \
-                 antes de qualquer exercício. Não gere <form> nem pergunta aqui.",
-            ),
+                 semântico. Seja atômico: explique só este conceito e pare antes de \
+                 qualquer exercício (a checagem vem numa etapa separada).\n\n\
+                 {PROSE_HTML_CONTRACT}"
+            )),
             ChatMessage::user(format!(
                 "Tema geral: {topic}\nConceito deste nó: {item_title}\n\
                  Contexto do que já foi ensinado: {context}"
@@ -293,16 +329,16 @@ pub mod prompt {
 
     pub fn exercise_rubric(topic: &str, item_title: &str, prose: &str) -> Vec<ChatMessage> {
         vec![
-            ChatMessage::system(
+            ChatMessage::system(format!(
                 "Gere uma checagem de compreensão para o conceito e seu rubric de \
                  avaliação, JUNTOS (§8). Responda APENAS com JSON no formato: \
-                 {\"exercise_html\":\"<form>...</form>\",\"objectives\":[{\"id\":\"o1\",\
+                 {{\"exercise_html\":\"<form>...</form>\",\"objectives\":[{{\"id\":\"o1\",\
                  \"kind\":\"knowledge|application|synthesis\",\"description\":\"...\",\
-                 \"criteria\":\"o que conta como demonstrado\",\"transfer\":true|false}]}. \
+                 \"criteria\":\"o que conta como demonstrado\",\"transfer\":true|false}}]}}. \
                  Todo objetivo 'application' deve ter ao menos um item de transferência \
-                 (transfer=true) para um cenário NÃO coberto no texto. O exercise_html \
-                 pode usar qualquer modalidade interativa; não inclua os critérios nele.",
-            ),
+                 (transfer=true) para um cenário NÃO coberto no texto.\n\n\
+                 {EXERCISE_HTML_CONTRACT}"
+            )),
             ChatMessage::user(format!(
                 "Tema: {topic}\nConceito: {item_title}\nProsa do nó:\n{prose}"
             )),
@@ -322,8 +358,8 @@ pub mod prompt {
                  conceito NO CONTEXTO do exercício: dê um exemplo resolvido / passo a \
                  passo, e proponha um novo problema similar. Esta é a tentativa \
                  {attempt}: quanto maior, MAIS similar ao exemplo resolvido o novo \
-                 problema deve ser (scaffolding por proximidade crescente). Responda \
-                 em HTML semântico simples."
+                 problema deve ser (scaffolding por proximidade crescente).\n\n\
+                 {PROSE_HTML_CONTRACT}"
             )),
             ChatMessage::user(format!(
                 "Conceito: {item_title}\nExercício: {exercise_html}\n\
@@ -522,6 +558,23 @@ mod tests {
         let ex = node.content.exercise.unwrap();
         assert_eq!(ex.exercise_id, "ex1");
         assert_eq!(ex.rubric_id.as_deref(), Some("ru1"));
+    }
+
+    #[test]
+    fn sanitized_surfaces_carry_the_prose_contract() {
+        // Prosa e remediação vão para a origem da app e são sanitizadas, então
+        // o modelo precisa ser avisado do contrato (senão gera algo que some).
+        let prose_sys = &prompt::prose("t", "c", "ctx")[0].content;
+        assert!(prose_sys.contains("NUNCA use"));
+        assert!(prose_sys.contains("<script>"));
+
+        let rem_sys = &prompt::remediation("c", "<form></form>", "a", "o1: x", 2)[0].content;
+        assert!(rem_sys.contains(prompt::PROSE_HTML_CONTRACT));
+
+        // O exercício roda no sandbox: contrato oposto (pode JS, deve postMessage).
+        let ex_sys = &prompt::exercise_rubric("t", "c", "prosa")[0].content;
+        assert!(ex_sys.contains("postMessage"));
+        assert!(ex_sys.contains("sandbox"));
     }
 
     #[tokio::test]

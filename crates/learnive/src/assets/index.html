@@ -315,6 +315,10 @@
       // scripts não rodam), então removemos elementos perigosos, atributos de
       // evento (on*) e URLs não-http de href/src. Blocos interativos de verdade
       // não passam por aqui — eles rodam isolados no iframe sandbox.
+      //
+      // A lista BLOCKED/atributos abaixo é a contraparte de fiscalização do
+      // PROSE_HTML_CONTRACT em engine.rs, que informa o modelo do mesmo limite.
+      // Ao mudar uma, mude a outra — senão o modelo gera algo que some aqui.
       function sanitizeHtml(html) {
         const tpl = document.createElement("template");
         tpl.innerHTML = html;
