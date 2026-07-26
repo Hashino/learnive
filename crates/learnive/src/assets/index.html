@@ -326,10 +326,13 @@
         min-height: 2rem;
       }
       iframe.sandbox {
+        display: block;
         width: 100%;
         border: 1px solid var(--card-border);
         border-radius: var(--roundness);
-        min-height: 8rem;
+        /* Height is set by JS from the iframe's reported content height (no
+           internal scroll). Small min just covers the brief pre-measure moment. */
+        min-height: 2.5rem;
         background: var(--field-bg);
       }
       .grade {
@@ -432,6 +435,8 @@
 
       const el = (id) => document.getElementById(id);
       const state = { docId: null, titles: [], index: 0, nodeId: null };
+      // The current exercise's sandbox iframe (for height + theme messages).
+      let exerciseFrame = null;
 
       // --- Theme toggle -----------------------------------------------------
       // The head script already applied the theme; here we wire the switch and
@@ -446,6 +451,13 @@
         document.documentElement.dataset.theme = next;
         localStorage.setItem("learnive-theme", next);
         syncThemeToggle();
+        // Re-theme a live exercise iframe (sandboxed → only reachable by message).
+        if (exerciseFrame && exerciseFrame.contentWindow) {
+          exerciseFrame.contentWindow.postMessage(
+            { type: "learnive-theme", theme: next },
+            "*",
+          );
+        }
       });
       syncThemeToggle();
 
@@ -491,6 +503,7 @@
         renderOutline();
         el("prose").innerHTML = "";
         el("exercise").innerHTML = "";
+        exerciseFrame = null;
         el("result").innerHTML = "";
         el("controls").innerHTML = '<p class="muted">generating…</p>';
 
@@ -534,34 +547,60 @@
         iframe.className = "sandbox";
         iframe.title = "Exercise";
         iframe.setAttribute("sandbox", "allow-scripts");
-        // Nord base matching the current theme so the exercise blends in; the
-        // generated HTML can still override. Literal colors — the sandbox can't
-        // see the page's CSS vars. (Built at render time; toggling theme
-        // mid-exercise restyles on the next node.)
-        const c =
-          currentTheme() === "light"
-            ? { scheme: "light", bg: "#eceff4", fg: "#2e3440", field: "#ffffff", border: "#d8dee9", link: "#5e81ac" }
-            : { scheme: "dark", bg: "#3b4252", fg: "#d8dee9", field: "#434c5e", border: "#4c566a", link: "#88c0d0" };
+        // Nord base for both themes, keyed on a `data-t` attribute on <body>.
+        // Literal colors — the sandbox can't see the page's CSS vars. The initial
+        // theme is baked from the page; the harness updates it on `learnive-theme`
+        // messages (from the toggle) and reports its content height so the parent
+        // can size the box to fit — no internal scroll.
         iframe.srcdoc =
           '<!doctype html><meta charset="utf-8">' +
-          "<style>:root{color-scheme:" + c.scheme + "}" +
-          "body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;margin:.6rem;background:" + c.bg + ";color:" + c.fg + ";line-height:1.5}" +
+          "<style>" +
+          "html,body{margin:0}" +
+          "body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;padding:.6rem;line-height:1.5;background:#3b4252;color:#d8dee9}" +
+          "body[data-t='light']{background:#eceff4;color:#2e3440}" +
           "button{font:inherit;padding:.4rem .8rem;border-radius:3px;border:1px solid #5e81ac;background:#5e81ac;color:#eceff4;cursor:pointer}" +
           "button:hover{background:#81a1c1;border-color:#81a1c1}" +
-          "input,textarea,select{font:inherit;background:" + c.field + ";color:" + c.fg + ";border:1px solid " + c.border + ";border-radius:3px;padding:.35rem}" +
-          "a{color:" + c.link + "}label{display:inline-block}</style>" +
-          "<body>" +
+          "input,textarea,select{font:inherit;background:#434c5e;color:#d8dee9;border:1px solid #4c566a;border-radius:3px;padding:.35rem}" +
+          "textarea{width:100%;box-sizing:border-box}" +
+          "body[data-t='light'] input,body[data-t='light'] textarea,body[data-t='light'] select{background:#fff;color:#2e3440;border-color:#d8dee9}" +
+          "a{color:#88c0d0}body[data-t='light'] a{color:#5e81ac}" +
+          "label{display:inline-block}" +
+          "</style>" +
+          "<body data-t='" + currentTheme() + "'>" +
           html +
           '<p><button id="__submit" type="button">Submit answer</button></p>' +
-          "<script>(function(){function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
-          "document.getElementById('__submit').addEventListener('click',function(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});" +
-          "document.addEventListener('submit',function(e){e.preventDefault();parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});})();<\/script>";
+          "<script>(function(){" +
+          "function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
+          "function send(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');}" +
+          "function reportHeight(){parent.postMessage({type:'learnive-height',height:document.documentElement.scrollHeight},'*');}" +
+          "function applyTheme(t){document.body.setAttribute('data-t',t);document.documentElement.style.colorScheme=t;reportHeight();}" +
+          "document.getElementById('__submit').addEventListener('click',send);" +
+          "document.addEventListener('submit',function(e){e.preventDefault();send();});" +
+          "window.addEventListener('message',function(e){var d=e.data;if(d&&d.type==='learnive-theme')applyTheme(d.theme==='light'?'light':'dark');});" +
+          "if(window.ResizeObserver){new ResizeObserver(reportHeight).observe(document.body);}" +
+          "window.addEventListener('load',reportHeight);setTimeout(reportHeight,60);" +
+          "if(document.fonts&&document.fonts.ready)document.fonts.ready.then(reportHeight);" +
+          "applyTheme(document.body.getAttribute('data-t'));" +
+          "})();<\/script>";
         el("exercise").replaceChildren(iframe);
+        exerciseFrame = iframe;
       }
 
-      // Answer coming from the sandbox iframe (§4.4 result protocol).
+      // Messages from the sandbox iframe (§4.4): the answer artifact, and the
+      // reported content height used to size the box to fit (no internal scroll).
       window.addEventListener("message", (e) => {
-        if (e.data && e.data.type === "learnive-answer") submitAnswer(e.data.answer);
+        const d = e.data;
+        if (!d) return;
+        if (d.type === "learnive-answer") {
+          submitAnswer(d.answer);
+        } else if (
+          d.type === "learnive-height" &&
+          exerciseFrame &&
+          e.source === exerciseFrame.contentWindow &&
+          typeof d.height === "number"
+        ) {
+          exerciseFrame.style.height = Math.max(d.height + 2, 40) + "px";
+        }
       });
 
       // --- Answer → grading → remediation/advance (§8, §8.2) ----------------
