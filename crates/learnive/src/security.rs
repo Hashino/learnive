@@ -1,19 +1,19 @@
-//! Segurança do servidor local (§3.1).
+//! Local-server security (§3.1).
 //!
-//! O servidor guarda as chaves de API do usuário e é alcançável por qualquer
-//! aba do navegador, então precisa se defender de CSRF e DNS-rebinding:
+//! The server holds the user's API keys and is reachable by any browser tab, so
+//! it must defend against CSRF and DNS-rebinding:
 //!
-//! - Bind só em 127.0.0.1 (feito em `main`).
-//! - Token de sessão obrigatório em toda requisição (estilo Jupyter): aceito no
-//!   cabeçalho `X-Learnive-Token` ou na query `?token=` (para a navegação
-//!   inicial pela barra de endereço). O token nunca vai em cookie — cookies são
-//!   enviados cross-site e reabririam o vetor de CSRF.
-//! - `Origin` validado contra uma allowlist quando presente (nunca `*`).
-//! - `Host` validado contra uma allowlist (defesa de DNS-rebinding: o ataque
-//!   resolve um domínio do atacante para 127.0.0.1, mas o `Host` continua sendo
-//!   o domínio do atacante).
-//! - Mutações nunca respondem a GET — isso é garantido pelo roteamento (rotas
-//!   que mudam estado só existem como POST), não por esta camada.
+//! - Bind only to 127.0.0.1 (done in `main`).
+//! - Mandatory session token on every request (Jupyter style): accepted in the
+//!   `X-Learnive-Token` header or the `?token=` query (for the initial
+//!   navigation from the address bar). The token never goes in a cookie —
+//!   cookies are sent cross-site and would reopen the CSRF vector.
+//! - `Origin` validated against an allowlist when present (never `*`).
+//! - `Host` validated against an allowlist (DNS-rebinding defense: the attack
+//!   resolves an attacker domain to 127.0.0.1, but the `Host` stays the
+//!   attacker's domain).
+//! - Mutations never respond to GET — that is guaranteed by routing (routes that
+//!   change state exist only as POST), not by this layer.
 
 use axum::{
     extract::{Request, State},
@@ -25,8 +25,8 @@ use rand::{Rng, distributions::Alphanumeric};
 
 use crate::app::AppState;
 
-/// Gera um token de sessão aleatório (43 chars alfanuméricos, ~256 bits),
-/// no mesmo espírito do token do Jupyter.
+/// Generates a random session token (43 alphanumeric chars, ~256 bits), in the
+/// same spirit as Jupyter's token.
 pub fn generate_token() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -35,7 +35,7 @@ pub fn generate_token() -> String {
         .collect()
 }
 
-/// Middleware aplicado a todas as rotas. Ordem: Host → Origin → token.
+/// Middleware applied to every route. Order: Host → Origin → token.
 pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> Response {
     // Host allowlist (DNS-rebinding).
     let host_ok = req
@@ -45,11 +45,11 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
         .map(|h| state.allowed_hosts.contains(h))
         .unwrap_or(false);
     if !host_ok {
-        return (StatusCode::FORBIDDEN, "host não permitido").into_response();
+        return (StatusCode::FORBIDDEN, "host not allowed").into_response();
     }
 
-    // Origin allowlist quando presente (CSRF / rebinding). Navegação de topo não
-    // envia Origin — por isso só validamos quando o cabeçalho existe.
+    // Origin allowlist when present (CSRF / rebinding). Top-level navigation does
+    // not send Origin — that is why we only validate when the header exists.
     if let Some(origin) = req.headers().get(header::ORIGIN) {
         let ok = origin
             .to_str()
@@ -57,26 +57,21 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
             .map(|o| state.allowed_origins.contains(o))
             .unwrap_or(false);
         if !ok {
-            return (StatusCode::FORBIDDEN, "origin não permitido").into_response();
+            return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
         }
     }
 
-    // Token de sessão (cabeçalho ou query).
+    // Session token (header or query).
     if !token_valid(&req, &state) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "token de sessão inválido ou ausente",
-        )
-            .into_response();
+        return (StatusCode::UNAUTHORIZED, "invalid or missing session token").into_response();
     }
 
-    // CSP restritiva (§3.1) como defesa em profundidade além do sanitizador do
-    // cliente: `connect-src 'self'` impede exfiltrar o token para outra origem;
-    // `object-src`/`base-uri 'none'` fecham vetores clássicos. Blocos
-    // interativos rodam em `<iframe sandbox srcdoc>` (§4.4), coberto por
-    // `frame-src 'self'`. `'unsafe-inline'` ainda é necessário porque o script
-    // e os estilos da página são inline — externalizá-los para remover isso é
-    // um endurecimento posterior.
+    // Restrictive CSP (§3.1) as defense in depth beyond the client sanitizer:
+    // `connect-src 'self'` prevents exfiltrating the token to another origin;
+    // `object-src`/`base-uri 'none'` close classic vectors. Interactive blocks
+    // run in an `<iframe sandbox srcdoc>` (§4.4), covered by `frame-src 'self'`.
+    // `'unsafe-inline'` is still needed because the page's script and styles are
+    // inline — externalizing them to drop it is a later hardening.
     let mut response = next.run(req).await;
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
@@ -85,12 +80,12 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
     response
 }
 
-/// Política de segurança de conteúdo aplicada a todas as respostas.
+/// Content-security policy applied to every response.
 const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; \
      img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
      script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'";
 
-/// Confere o token vindo do cabeçalho `X-Learnive-Token` ou da query `?token=`.
+/// Checks the token from the `X-Learnive-Token` header or the `?token=` query.
 fn token_valid(req: &Request, state: &AppState) -> bool {
     if let Some(header_token) = req
         .headers()
@@ -104,7 +99,7 @@ fn token_valid(req: &Request, state: &AppState) -> bool {
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some(value) = pair.strip_prefix("token=") {
-                // O token é alfanumérico, então não há percent-encoding a desfazer.
+                // The token is alphanumeric, so there is no percent-encoding to undo.
                 if constant_time_eq(value, &state.token) {
                     return true;
                 }
@@ -115,8 +110,8 @@ fn token_valid(req: &Request, state: &AppState) -> bool {
     false
 }
 
-/// Comparação em tempo (quase) constante para não vazar o token por timing.
-/// O comprimento é fixo e conhecido, então revelá-lo não é problema.
+/// (Near-)constant-time comparison to avoid leaking the token by timing. The
+/// length is fixed and known, so revealing it is not a problem.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {

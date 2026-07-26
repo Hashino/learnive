@@ -1,21 +1,21 @@
-//! Armazenamento em arquivos (§4, §4.1).
+//! File storage (§4, §4.1).
 //!
-//! **Arquivos são a fonte da verdade** — sem banco binário proprietário, no
-//! espírito Obsidian. Layout:
+//! **Files are the source of truth** — no proprietary binary database, in the
+//! Obsidian spirit. Layout:
 //!
 //! ```text
 //! <root>/
-//!   <doc-id>/            # um diretório por documento vivo
-//!     <node-id>.html     # um arquivo HTML por nó de conceito (§4.1)
+//!   <doc-id>/            # one directory per living document
+//!     <node-id>.html     # one HTML file per concept node (§4.1)
 //! ```
 //!
-//! O diretório serve só para navegação humana solta; as relações reais do grafo
-//! vivem em `[[links]]`/atributos *dentro* do conteúdo (§4), não na posição no
-//! filesystem. Escrita é atômica (tmp + rename) para não corromper um nó se um
-//! stream/geração for interrompido (§16, resumabilidade).
+//! The directory only serves loose human navigation; the real graph
+//! relationships live in `[[links]]`/attributes *inside* the content (§4), not
+//! in the filesystem position. Writes are atomic (tmp + rename) so a node is not
+//! corrupted if a stream/generation is interrupted (§16, resumability).
 //!
-//! Ainda não consumido em runtime — o loop de currículo (Fase 1) usa este
-//! módulo; por isso o `allow(dead_code)` temporário.
+//! Not yet consumed at runtime by everything — the curriculum loop (Phase 1)
+//! uses this module; hence the temporary `allow(dead_code)`.
 #![allow(dead_code)]
 
 use std::fs;
@@ -24,26 +24,26 @@ use std::path::{Path, PathBuf};
 
 use learnive_core::{Node, ParseError};
 
-/// Erros do armazenamento.
+/// Storage errors.
 #[derive(Debug)]
 pub enum StoreError {
-    /// ID com caractere inseguro (defesa contra path traversal).
+    /// ID with an unsafe character (path-traversal defense).
     InvalidId(String),
-    /// Documento ou nó inexistente.
+    /// Nonexistent document or node.
     NotFound(PathBuf),
-    /// Falha de I/O.
+    /// I/O failure.
     Io(io::Error),
-    /// HTML de nó malformado.
+    /// Malformed node HTML.
     Parse(ParseError),
 }
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreError::InvalidId(id) => write!(f, "identificador inseguro: {id:?}"),
-            StoreError::NotFound(p) => write!(f, "não encontrado: {}", p.display()),
-            StoreError::Io(e) => write!(f, "erro de I/O: {e}"),
-            StoreError::Parse(e) => write!(f, "nó malformado: {e}"),
+            StoreError::InvalidId(id) => write!(f, "unsafe identifier: {id:?}"),
+            StoreError::NotFound(p) => write!(f, "not found: {}", p.display()),
+            StoreError::Io(e) => write!(f, "I/O error: {e}"),
+            StoreError::Parse(e) => write!(f, "malformed node: {e}"),
         }
     }
 }
@@ -64,28 +64,28 @@ impl From<ParseError> for StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-/// Armazenamento enraizado em um diretório de dados.
+/// Storage rooted at a data directory.
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
 }
 
 impl Store {
-    /// Abre (criando se preciso) o armazenamento na raiz dada.
+    /// Opens (creating if needed) the storage at the given root.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
         Ok(Self { root })
     }
 
-    /// Cria o diretório de um documento vivo. Idempotente.
+    /// Creates a living document's directory. Idempotent.
     pub fn create_document(&self, doc_id: &str) -> Result<()> {
         ensure_safe_id(doc_id)?;
         fs::create_dir_all(self.doc_dir(doc_id))?;
         Ok(())
     }
 
-    /// Lista os IDs de documentos vivos (subdiretórios da raiz).
+    /// Lists the living-document IDs (subdirectories of the root).
     pub fn list_documents(&self) -> Result<Vec<String>> {
         let mut docs = Vec::new();
         for entry in fs::read_dir(&self.root)? {
@@ -100,8 +100,8 @@ impl Store {
         Ok(docs)
     }
 
-    /// Grava um nó em `<doc>/<node>.html` (escrita atômica). Cria o diretório do
-    /// documento se ainda não existir.
+    /// Writes a node to `<doc>/<node>.html` (atomic write). Creates the document
+    /// directory if it does not exist yet.
     pub fn write_node(&self, node: &Node) -> Result<()> {
         ensure_safe_id(&node.doc_id)?;
         ensure_safe_id(&node.node_id)?;
@@ -113,7 +113,7 @@ impl Store {
         Ok(())
     }
 
-    /// Lê e faz o parse de um nó.
+    /// Reads and parses a node.
     pub fn read_node(&self, doc_id: &str, node_id: &str) -> Result<Node> {
         ensure_safe_id(doc_id)?;
         ensure_safe_id(node_id)?;
@@ -128,7 +128,7 @@ impl Store {
         Ok(Node::parse(&html)?)
     }
 
-    /// Lista os IDs de nós de um documento (arquivos `*.html`).
+    /// Lists a document's node IDs (the `*.html` files).
     pub fn list_nodes(&self, doc_id: &str) -> Result<Vec<String>> {
         ensure_safe_id(doc_id)?;
         let dir = self.doc_dir(doc_id);
@@ -151,8 +151,8 @@ impl Store {
         Ok(nodes)
     }
 
-    /// Conveniência append-only (§4.3): carrega o nó, acrescenta um item de
-    /// interação e regrava. Nunca toca na camada de conteúdo.
+    /// Append-only convenience (§4.3): loads the node, appends an interaction
+    /// item, and rewrites. Never touches the content layer.
     pub fn append_interaction(
         &self,
         doc_id: &str,
@@ -164,9 +164,9 @@ impl Store {
         self.write_node(&node)
     }
 
-    /// Grava um arquivo auxiliar **server-only** dentro do diretório do
-    /// documento (ex.: `outline.json`, `<node>.rubric.json`). Nunca é servido ao
-    /// cliente — é o que mantém o rubric travado (§8) invisível ao aluno.
+    /// Writes a **server-only** sidecar file inside the document's directory
+    /// (e.g. `outline.json`, `<node>.rubric.json`). Never served to the client —
+    /// it is what keeps the locked rubric (§8) invisible to the student.
     pub fn write_doc_file(&self, doc_id: &str, filename: &str, contents: &str) -> Result<()> {
         ensure_safe_id(doc_id)?;
         ensure_safe_filename(filename)?;
@@ -175,7 +175,7 @@ impl Store {
         Ok(())
     }
 
-    /// Lê um arquivo auxiliar do diretório do documento.
+    /// Reads a sidecar file from the document's directory.
     pub fn read_doc_file(&self, doc_id: &str, filename: &str) -> Result<String> {
         ensure_safe_id(doc_id)?;
         ensure_safe_filename(filename)?;
@@ -196,8 +196,8 @@ impl Store {
     }
 }
 
-/// Rejeita IDs que poderiam escapar do diretório de dados ou colidir com o
-/// sufixo de arquivo. Só ASCII alfanumérico, `-` e `_`.
+/// Rejects IDs that could escape the data directory or collide with the file
+/// suffix. ASCII alphanumeric, `-` and `_` only.
 fn ensure_safe_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id
@@ -210,8 +210,8 @@ fn ensure_safe_id(id: &str) -> Result<()> {
     }
 }
 
-/// Como `ensure_safe_id`, mas permite um único sufixo de extensão (ex.:
-/// `outline.json`, `n1.rubric.json`). Continua bloqueando `/` e `..`.
+/// Like `ensure_safe_id`, but allows a single extension suffix (e.g.
+/// `outline.json`, `n1.rubric.json`). Still blocks `/` and `..`.
 fn ensure_safe_filename(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && !name.starts_with('.')
@@ -226,8 +226,8 @@ fn ensure_safe_filename(name: &str) -> Result<()> {
     }
 }
 
-/// Escreve gravando num arquivo temporário e renomeando por cima — rename é
-/// atômico no mesmo filesystem, então nunca fica um arquivo meio-escrito.
+/// Writes by saving to a temporary file and renaming over the target — rename is
+/// atomic on the same filesystem, so a half-written file never remains.
 fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -245,7 +245,7 @@ mod tests {
     fn sample_node(doc_id: &str, node_id: &str) -> Node {
         let html = format!(
             r#"<article data-node-id="{node_id}" data-doc-id="{doc_id}">
-  <section data-layer="content"><p data-block-id="b1">conteúdo</p></section>
+  <section data-layer="content"><p data-block-id="b1">content</p></section>
   <section data-layer="interaction"></section>
 </article>"#
         );
@@ -273,9 +273,9 @@ mod tests {
 
         store.write_node(&sample_node("algebra", "n1")).unwrap();
         store.write_node(&sample_node("algebra", "n2")).unwrap();
-        store.write_node(&sample_node("historia", "n1")).unwrap();
+        store.write_node(&sample_node("history", "n1")).unwrap();
 
-        assert_eq!(store.list_documents().unwrap(), vec!["algebra", "historia"]);
+        assert_eq!(store.list_documents().unwrap(), vec!["algebra", "history"]);
         assert_eq!(store.list_nodes("algebra").unwrap(), vec!["n1", "n2"]);
     }
 
@@ -293,7 +293,7 @@ mod tests {
                 InteractionItem::Annotation {
                     id: "a1".to_string(),
                     anchor: Anchor::block("b1"),
-                    body_html: "<p>nota</p>".to_string(),
+                    body_html: "<p>note</p>".to_string(),
                 },
             )
             .unwrap();
@@ -330,7 +330,7 @@ mod tests {
             r#"{"objectives":[]}"#
         );
 
-        // Sidecars não aparecem como nós.
+        // Sidecars do not show up as nodes.
         store.write_node(&sample_node("algebra", "n1")).unwrap();
         assert_eq!(store.list_nodes("algebra").unwrap(), vec!["n1"]);
 

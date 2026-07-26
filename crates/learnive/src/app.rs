@@ -1,7 +1,7 @@
-//! Montagem do estado da aplicação e do roteador HTTP.
+//! Application-state assembly and HTTP router.
 //!
-//! `build_router` é puro (recebe o estado, devolve o `Router`), separado de
-//! `main` para que os testes exercitem o roteador com `oneshot` sem abrir porta.
+//! `build_router` is pure (takes the state, returns the `Router`), separated from
+//! `main` so tests can exercise the router with `oneshot` without opening a port.
 
 use std::{collections::HashSet, convert::Infallible, sync::Arc};
 
@@ -21,23 +21,23 @@ use crate::ai::Ai;
 use crate::store::Store;
 use crate::{api, security};
 
-/// Estado compartilhado. Barato de clonar (tudo atrás de `Arc`/handles leves).
+/// Shared state. Cheap to clone (everything behind `Arc`/lightweight handles).
 #[derive(Clone)]
 pub struct AppState {
-    /// Token de sessão exigido em toda requisição (§3.1).
+    /// Session token required on every request (§3.1).
     pub token: Arc<str>,
-    /// Origins aceitos (ex.: `http://127.0.0.1:7420`). Nunca `*`.
+    /// Accepted origins (e.g. `http://127.0.0.1:7420`). Never `*`.
     pub allowed_origins: Arc<HashSet<String>>,
-    /// Hosts aceitos (ex.: `127.0.0.1:7420`) — defesa de DNS-rebinding.
+    /// Accepted hosts (e.g. `127.0.0.1:7420`) — DNS-rebinding defense.
     pub allowed_hosts: Arc<HashSet<String>>,
-    /// Armazenamento em arquivos (§4).
+    /// File storage (§4).
     pub store: Store,
-    /// Provedor de IA + tiering (§12).
+    /// AI provider + tiering (§12).
     pub ai: Arc<Ai>,
 }
 
 impl AppState {
-    /// Constrói o estado para uma dada porta, gerando um token novo.
+    /// Builds the state for a given port, generating a fresh token.
     pub fn new(port: u16) -> Self {
         let allowed_origins = HashSet::from([
             format!("http://127.0.0.1:{port}"),
@@ -48,7 +48,7 @@ impl AppState {
 
         let data_dir =
             std::env::var("LEARNIVE_DATA_DIR").unwrap_or_else(|_| "learnive-data".to_string());
-        let store = Store::open(&data_dir).expect("abrir armazenamento de dados");
+        let store = Store::open(&data_dir).expect("open data store");
 
         Self {
             token: Arc::from(security::generate_token()),
@@ -60,13 +60,13 @@ impl AppState {
     }
 }
 
-/// Monta o roteador com a camada de segurança (§3.1) por cima de tudo.
+/// Assembles the router with the security layer (§3.1) on top of everything.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
         .route("/events", get(events))
-        // Loop de currículo (§6, §8). Tudo POST — mutações nunca em GET (§3.1).
+        // Curriculum loop (§6, §8). All POST — mutations never on GET (§3.1).
         .route("/api/documents", post(api::create_document))
         .route(
             "/api/documents/{doc}/nodes/{index}/generate",
@@ -83,19 +83,19 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Página inicial: injeta o token na meta tag para o cliente reenviá-lo como
-/// cabeçalho (nunca cookie) nas requisições seguintes.
+/// Home page: injects the token into the meta tag so the client resends it as a
+/// header (never a cookie) on subsequent requests.
 async fn index(State(state): State<AppState>) -> Html<String> {
     Html(include_str!("assets/index.html").replace("{{TOKEN}}", &state.token))
 }
 
-/// Liveness. Não expõe nada sensível; ainda assim exige token pela camada.
+/// Liveness. Exposes nothing sensitive; still requires the token via the layer.
 async fn health() -> &'static str {
     "ok"
 }
 
-/// Esqueleto de SSE (§3): canal servidor→cliente por onde o conteúdo gerado
-/// será streamado token-a-token nas fases seguintes.
+/// SSE skeleton (§3): the server→client channel over which generated content
+/// will be streamed token by token in later phases.
 async fn events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = tokio_stream::iter([Ok(Event::default()
         .event("hello")
@@ -108,14 +108,14 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use tower::ServiceExt; // para `oneshot`
+    use tower::ServiceExt; // for `oneshot`
 
     const TOKEN: &str = "testtoken";
     const HOST: &str = "127.0.0.1:7420";
     const ORIGIN: &str = "http://127.0.0.1:7420";
 
     fn test_state() -> AppState {
-        // Store em diretório temporário único; IA em modo demo (mock scriptado).
+        // Store in a unique temp directory; AI in demo mode (scripted mock).
         let dir = std::env::temp_dir().join(format!("learnive-test-{}", crate::engine::new_id()));
         AppState {
             token: Arc::from(TOKEN),
@@ -158,7 +158,7 @@ mod tests {
             .unwrap();
         let (status, body) = send(req).await;
         assert_eq!(status, StatusCode::OK);
-        // O token foi injetado na página.
+        // The token was injected into the page.
         assert!(body.contains(TOKEN));
     }
 
@@ -225,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_bad_host() {
-        // Host do atacante (DNS-rebinding) rejeitado mesmo com token válido.
+        // Attacker host (DNS-rebinding) rejected even with a valid token.
         let req = Request::builder()
             .uri("/health")
             .header("host", "evil.example")
@@ -238,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn responses_carry_csp_header() {
-        // Defesa em profundidade §3.1: toda resposta leva CSP.
+        // Defense in depth §3.1: every response carries a CSP.
         let req = Request::builder()
             .uri("/health")
             .header("host", HOST)
@@ -257,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutating_endpoint_rejects_get() {
-        // Nenhuma mutação responde a GET (§3.1): /api/documents só existe como POST.
+        // No mutation responds to GET (§3.1): /api/documents exists only as POST.
         let req = Request::builder()
             .uri("/api/documents")
             .header("host", HOST)
@@ -268,9 +268,9 @@ mod tests {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    /// O loop inteiro fecha em modo demo: cria documento → gera nó (stream) →
-    /// responde → avança (§6, §8). Uma única `AppState` compartilhada entre as
-    /// requisições (mesmo store + IA).
+    /// The whole loop closes in demo mode: create document → generate node
+    /// (stream) → answer → advance (§6, §8). A single `AppState` shared across the
+    /// requests (same store + AI).
     #[tokio::test]
     async fn full_loop_closes_in_demo_mode() {
         let state = test_state();
@@ -284,14 +284,15 @@ mod tests {
             }
         };
 
-        // 1. Cold start: tema → outline.
-        let (status, body) = call(authed("POST", "/api/documents", r#"{"topic":"frações"}"#)).await;
+        // 1. Cold start: topic → outline.
+        let (status, body) =
+            call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
         assert_eq!(status, StatusCode::OK);
         let created: serde_json::Value = serde_json::from_str(&body).unwrap();
         let doc_id = created["doc_id"].as_str().unwrap().to_string();
         assert!(!created["titles"].as_array().unwrap().is_empty());
 
-        // 2. Geração do nó 0 — streama e termina com `done`.
+        // 2. Node 0 generation — streams and ends with `done`.
         let (status, body) = call(authed(
             "POST",
             &format!("/api/documents/{doc_id}/nodes/0/generate"),
@@ -299,14 +300,14 @@ mod tests {
         ))
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("event: token"), "deve streamar prosa");
-        assert!(body.contains("event: done"), "deve concluir a geração");
+        assert!(body.contains("event: token"), "should stream prose");
+        assert!(body.contains("event: done"), "should finish generation");
 
-        // 3. Resposta ao exercício → avança (demo grada como demonstrado).
+        // 3. Answer the exercise → advance (demo grades as demonstrated).
         let (status, body) = call(authed(
             "POST",
             &format!("/api/documents/{doc_id}/nodes/n0/answer"),
-            r#"{"answer":"aplico o conceito a um caso novo assim..."}"#,
+            r#"{"answer":"I apply the concept to a new case like this..."}"#,
         ))
         .await;
         assert_eq!(status, StatusCode::OK);

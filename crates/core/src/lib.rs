@@ -1,16 +1,16 @@
-//! learnive-core — contrato de dados do nó (§4.3) e ancoragem.
+//! learnive-core — node data contract (§4.3) and anchoring.
 //!
-//! De propósito **sem** dependências de servidor (tokio/axum): este crate
-//! compila para `wasm32`, então a lógica de ancoragem roda idêntica no servidor
-//! e no cliente (§3, §4.3 — escrita uma vez em Rust, sem reimplementar em JS e
-//! sem drift).
+//! Deliberately **free** of server dependencies (tokio/axum): this crate
+//! compiles to `wasm32`, so the anchoring logic runs identically on the server
+//! and the client (§3, §4.3 — written once in Rust, no JS reimplementation and
+//! no drift).
 //!
-//! Um nó é um arquivo HTML no dialeto da app (§4.2) com duas camadas lógicas:
+//! A node is an HTML file in the app dialect (§4.2) with two logical layers:
 //!
-//! - **conteúdo** — congelado na criação, todo bloco endereçável com
-//!   `data-block-id` estável;
-//! - **interação** — append-only (anotações, threads de Q&A/remediação) que
-//!   *referenciam* IDs da camada de conteúdo, nunca a alteram.
+//! - **content** — frozen at creation, every block addressable by a stable
+//!   `data-block-id`;
+//! - **interaction** — append-only (annotations, Q&A/remediation threads) that
+//!   *reference* content-layer IDs and never mutate them.
 
 pub mod anchor;
 pub mod assemble;

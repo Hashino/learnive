@@ -1,114 +1,314 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- Token de sessão injetado pelo servidor; enviado como cabeçalho
-         X-Learnive-Token em toda requisição, nunca em cookie (§3.1). -->
+    <!-- Session token injected by the server; sent as the X-Learnive-Token
+         header on every request, never in a cookie (§3.1). -->
     <meta name="learnive-token" content="{{TOKEN}}" />
-    <!-- favicon inline vazio: evita um GET /favicon.ico que a camada de
-         segurança rejeita com 401 (§3.1) e sujaria o console. -->
+    <!-- Empty inline favicon: avoids a GET /favicon.ico that the security layer
+         rejects with 401 (§3.1) and that would clutter the console. -->
     <link rel="icon" href="data:," />
     <title>learnive</title>
+    <!-- Style from the author's blog (https://hashino.github.io): Nord palette,
+         monospace font, translucent blurred cards and a starfield. Fonts are
+         local (no external @import) to respect the §3.1 CSP and §15 offline
+         portability; the starfield uses SVG in a data: URI (covered by
+         img-src data:). -->
     <style>
       :root {
-        color-scheme: light dark;
+        color-scheme: dark;
+        --nord0: #2e3440;
+        --nord1: #3b4252;
+        --nord2: #434c5e;
+        --nord3: #4c566a;
+        --nord4: #d8dee9;
+        --nord5: #e5e9f0;
+        --nord6: #eceff4;
+        --nord7: #8fbcbb;
+        --nord8: #88c0d0;
+        --nord9: #81a1c1;
+        --nord10: #5e81ac;
+        --nord11: #bf616a;
+        --nord13: #ebcb8b;
+        --nord14: #a3be8c;
+        --roundness: 3px;
+        --mono: "Ubuntu Mono", "JetBrains Mono", "Fira Code", Consolas,
+          "Liberation Mono", Menlo, Courier, monospace;
+      }
+      * {
+        box-sizing: border-box;
       }
       body {
-        font-family: system-ui, sans-serif;
-        max-width: 44rem;
-        margin: 2.5rem auto;
-        padding: 0 1rem;
-        line-height: 1.6;
+        margin: 0;
+        min-height: 100vh;
+        font-family: var(--mono);
+        line-height: 1.5;
+        color: var(--nord4);
+        background: linear-gradient(
+          135deg,
+          var(--nord0) 0%,
+          var(--nord1) 50%,
+          var(--nord2) 100%
+        );
+        background-attachment: fixed;
       }
-      h1 {
+
+      /* Animated starfield (the blog's signature). */
+      #stars,
+      #stars2,
+      #stars3 {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: -1;
+      }
+      #stars {
+        background: transparent
+          url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><circle cx="75" cy="75" r="1" fill="white" opacity="0.8"/><circle cx="150" cy="30" r="1" fill="white" opacity="0.6"/><circle cx="225" cy="180" r="1" fill="white" opacity="0.9"/><circle cx="50" cy="200" r="1" fill="white" opacity="0.7"/><circle cx="280" cy="120" r="1" fill="white" opacity="0.5"/></svg>')
+          repeat;
+        animation: moveStars 15s linear infinite;
+      }
+      #stars2 {
+        background: transparent
+          url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><circle cx="100" cy="50" r="0.8" fill="white" opacity="0.4"/><circle cx="40" cy="120" r="0.8" fill="white" opacity="0.6"/><circle cx="160" cy="170" r="0.8" fill="white" opacity="0.3"/></svg>')
+          repeat;
+        animation: moveStars 45s linear infinite;
+      }
+      #stars3 {
+        background: transparent
+          url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250"><circle cx="200" cy="100" r="0.6" fill="white" opacity="0.8"/><circle cx="80" cy="200" r="0.6" fill="white" opacity="0.4"/><circle cx="20" cy="50" r="0.6" fill="white" opacity="0.7"/></svg>')
+          repeat;
+        animation: moveStars 90s linear infinite;
+      }
+      @keyframes moveStars {
+        from {
+          transform: translateY(0);
+        }
+        to {
+          transform: translateY(-300px);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #stars,
+        #stars2,
+        #stars3 {
+          animation: none;
+        }
+      }
+
+      /* Fixed navigation bar. */
+      .top-nav {
+        position: fixed;
+        top: 0;
+        width: 100%;
+        z-index: 1000;
+        padding: 0.6rem 0;
+        background: rgba(46, 52, 64, 0.95);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--nord3);
+      }
+      .nav-container {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 2rem;
+      }
+      .nav-title {
+        color: var(--nord6);
+        text-decoration: none;
         font-weight: 700;
+        font-size: 1.2rem;
       }
+      .nav-title:hover {
+        color: var(--nord8);
+      }
+      .nav-tag {
+        color: var(--nord9);
+        font-size: 0.9rem;
+      }
+
+      /* Central content column. */
+      .main-container {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 100px 2rem 3rem;
+      }
+
+      /* Translucent card (.blog-content style). */
+      .card {
+        background: rgba(59, 66, 82, 0.6);
+        border: 1px solid var(--nord3);
+        border-radius: var(--roundness);
+        box-shadow: 0 10px 40px rgba(46, 52, 64, 0.4);
+        backdrop-filter: blur(10px);
+        padding: 2rem 2.5rem 2.5rem;
+      }
+      .card + .card {
+        margin-top: 1.5rem;
+      }
+
+      h1 {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--nord6);
+        margin: 0 0 1rem;
+      }
+      h2 {
+        color: var(--nord5);
+        margin: 1.5rem 0 0.8rem;
+      }
+      h3 {
+        color: var(--nord5);
+      }
+      a {
+        color: var(--nord8);
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--nord7);
+        text-decoration: underline;
+      }
+      code {
+        background: var(--nord1);
+        color: var(--nord13);
+        padding: 0.15rem 0.4rem;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+      pre {
+        background: var(--nord0);
+        border-radius: var(--roundness);
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+      }
+      pre code {
+        background: none;
+        color: var(--nord4);
+        padding: 0;
+      }
+      blockquote {
+        border-left: 4px solid var(--nord8);
+        margin: 1rem 0;
+        padding-left: 1rem;
+        font-style: italic;
+        opacity: 0.9;
+      }
+
       textarea {
         width: 100%;
         font: inherit;
         padding: 0.6rem;
-        box-sizing: border-box;
+        color: var(--nord6);
+        background: rgba(76, 86, 106, 0.6);
+        border: 1px solid var(--nord3);
+        border-radius: var(--roundness);
+      }
+      textarea:focus {
+        outline: none;
+        border-color: var(--nord8);
+        box-shadow: 0 0 0 1px var(--nord8);
       }
       button {
         font: inherit;
         padding: 0.5rem 1rem;
         cursor: pointer;
-        border-radius: 6px;
-        border: 1px solid currentColor;
-        background: transparent;
+        color: var(--nord6);
+        background: var(--nord10);
+        border: 1px solid var(--nord10);
+        border-radius: var(--roundness);
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+      button:hover:not(:disabled) {
+        background: var(--nord9);
+        border-color: var(--nord9);
       }
       button:disabled {
         opacity: 0.5;
         cursor: default;
       }
+
       #outline {
         font-size: 0.9rem;
-        opacity: 0.8;
-        margin-bottom: 1.5rem;
+        color: var(--nord9);
+        margin: 0 0 1.5rem;
+        padding-left: 1.2rem;
       }
       #outline li.current {
         font-weight: 700;
-        opacity: 1;
+        color: var(--nord8);
       }
       #prose {
         min-height: 2rem;
       }
       iframe.sandbox {
         width: 100%;
-        border: 1px solid #8884;
-        border-radius: 6px;
+        border: 1px solid var(--nord3);
+        border-radius: var(--roundness);
         min-height: 8rem;
-        background: canvas;
+        background: var(--nord1);
       }
       .grade {
-        border-left: 3px solid #8888;
+        border-left: 3px solid var(--nord3);
         padding-left: 0.75rem;
         margin: 0.5rem 0;
       }
       .grade.demonstrated {
-        border-color: #2a9d3f;
+        border-color: var(--nord14);
       }
       .grade.partial {
-        border-color: #d9a520;
+        border-color: var(--nord13);
       }
       .grade.not_demonstrated {
-        border-color: #d94a4a;
+        border-color: var(--nord11);
       }
       .muted {
-        opacity: 0.7;
+        color: var(--nord9);
         font-size: 0.9rem;
       }
       .error {
-        color: #d94a4a;
+        color: var(--nord11);
       }
     </style>
   </head>
   <body>
-    <!-- Cold start (§6.1): uma única pergunta genérica. -->
-    <section id="coldstart">
-      <h1>learnive</h1>
-      <form id="startForm">
-        <p><label for="topic"><strong>O que vamos aprender?</strong></label></p>
-        <textarea id="topic" rows="3" autofocus></textarea>
-        <p><button type="submit">Começar</button></p>
-      </form>
-      <p id="startStatus" class="muted"></p>
-    </section>
+    <!-- Starfield (decorative, behind everything). -->
+    <div id="stars"></div>
+    <div id="stars2"></div>
+    <div id="stars3"></div>
 
-    <!-- Documento vivo (§9). -->
-    <main id="doc" hidden>
-      <ol id="outline"></ol>
-      <article id="prose"></article>
-      <div id="exercise"></div>
-      <div id="result"></div>
-      <div id="controls"></div>
-    </main>
+    <nav class="top-nav">
+      <div class="nav-container">
+        <a href="/" class="nav-title">learnive</a>
+        <span class="nav-tag">living document</span>
+      </div>
+    </nav>
+
+    <div class="main-container">
+      <!-- Cold start (§6.1): a single generic question. -->
+      <section id="coldstart" class="card">
+        <h1>What are we learning?</h1>
+        <form id="startForm">
+          <textarea id="topic" rows="3" autofocus></textarea>
+          <p><button type="submit">Start</button></p>
+        </form>
+        <p id="startStatus" class="muted"></p>
+      </section>
+
+      <!-- Living document (§9). -->
+      <main id="doc" hidden class="card">
+        <ol id="outline"></ol>
+        <article id="prose"></article>
+        <div id="exercise"></div>
+        <div id="result"></div>
+        <div id="controls"></div>
+      </main>
+    </div>
 
     <script>
       const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
 
-      // Toda requisição carrega o token no cabeçalho (§3.1).
+      // Every request carries the token in the header (§3.1).
       function api(path, options = {}) {
         const headers = Object.assign(
           { "X-Learnive-Token": TOKEN },
@@ -132,7 +332,7 @@
         e.preventDefault();
         const topic = el("topic").value.trim();
         if (!topic) return;
-        el("startStatus").textContent = "planejando o currículo…";
+        el("startStatus").textContent = "planning the curriculum…";
         try {
           const resp = await postJson("/api/documents", { topic });
           if (!resp.ok) throw new Error(await resp.text());
@@ -145,7 +345,7 @@
           generateNode(0);
         } catch (err) {
           el("startStatus").innerHTML =
-            '<span class="error">falhou: ' + escapeHtml(String(err)) + "</span>";
+            '<span class="error">failed: ' + escapeHtml(String(err)) + "</span>";
         }
       });
 
@@ -162,7 +362,7 @@
           .join("");
       }
 
-      // --- Geração de nó com streaming (§6, §14) ----------------------------
+      // --- Node generation with streaming (§6, §14) -------------------------
       async function generateNode(index) {
         state.index = index;
         state.nodeId = null;
@@ -170,7 +370,7 @@
         el("prose").innerHTML = "";
         el("exercise").innerHTML = "";
         el("result").innerHTML = "";
-        el("controls").innerHTML = '<p class="muted">gerando…</p>';
+        el("controls").innerHTML = '<p class="muted">generating…</p>';
 
         let prose = "";
         try {
@@ -181,10 +381,10 @@
           if (!resp.ok) throw new Error(await resp.text());
           await readSse(resp, (event, data) => {
             if (event === "token") {
-              // Re-render acumulado tolera tags parciais durante o stream.
-              // Sanitizado: prosa gerada por LLM vai para a origem da app, então
-              // NÃO pode carregar script/handlers (§3.1/§4.4). Só blocos
-              // interativos rodam — e apenas no iframe sandbox.
+              // Re-rendering the accumulated text tolerates partial tags during
+              // the stream. Sanitized: LLM-generated prose goes to the app
+              // origin, so it must NOT carry script/handlers (§3.1/§4.4). Only
+              // interactive blocks run — and only inside the sandbox iframe.
               prose += data;
               el("prose").innerHTML = sanitizeHtml(prose);
             } else if (event === "exercise") {
@@ -198,41 +398,47 @@
           });
         } catch (err) {
           el("controls").innerHTML =
-            '<p class="error">erro na geração: ' +
+            '<p class="error">generation error: ' +
             escapeHtml(String(err)) +
             "</p>";
         }
       }
 
-      // Renderiza o exercício gerado num iframe SANDBOX (§3.1/§4.4): sem
-      // allow-same-origin, então o HTML gerado nunca vê o token nem o DOM pai;
-      // devolve a resposta só por postMessage.
+      // Renders the generated exercise in a SANDBOX iframe (§3.1/§4.4): no
+      // allow-same-origin, so the generated HTML never sees the token or the
+      // parent DOM; it returns the answer only via postMessage.
       function renderExercise(html) {
         const iframe = document.createElement("iframe");
         iframe.className = "sandbox";
-        iframe.title = "Exercício";
+        iframe.title = "Exercise";
         iframe.setAttribute("sandbox", "allow-scripts");
         iframe.srcdoc =
           '<!doctype html><meta charset="utf-8">' +
-          "<style>body{font-family:system-ui;margin:.5rem}button{font:inherit}</style>" +
+          // Nord base so the exercise matches the page; the generated HTML can
+          // still override it. Literal colors (the iframe can't see the page vars).
+          "<style>:root{color-scheme:dark}body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;margin:.6rem;background:#3b4252;color:#d8dee9;line-height:1.5}" +
+          "button{font:inherit;padding:.4rem .8rem;border-radius:3px;border:1px solid #5e81ac;background:#5e81ac;color:#eceff4;cursor:pointer}" +
+          "button:hover{background:#81a1c1;border-color:#81a1c1}" +
+          "input,textarea,select{font:inherit;background:#434c5e;color:#eceff4;border:1px solid #4c566a;border-radius:3px;padding:.35rem}" +
+          "a{color:#88c0d0}label{display:inline-block}</style>" +
           "<body>" +
           html +
-          '<p><button id="__submit" type="button">Enviar resposta</button></p>' +
+          '<p><button id="__submit" type="button">Submit answer</button></p>' +
           "<script>(function(){function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
           "document.getElementById('__submit').addEventListener('click',function(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});" +
           "document.addEventListener('submit',function(e){e.preventDefault();parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');});})();<\/script>";
         el("exercise").replaceChildren(iframe);
       }
 
-      // Resposta vinda do iframe sandbox (§4.4 result protocol).
+      // Answer coming from the sandbox iframe (§4.4 result protocol).
       window.addEventListener("message", (e) => {
         if (e.data && e.data.type === "learnive-answer") submitAnswer(e.data.answer);
       });
 
-      // --- Resposta → correção → remediação/avanço (§8, §8.2) ---------------
+      // --- Answer → grading → remediation/advance (§8, §8.2) ----------------
       async function submitAnswer(answer) {
         if (!state.nodeId) return;
-        el("result").innerHTML = '<p class="muted">avaliando…</p>';
+        el("result").innerHTML = '<p class="muted">evaluating…</p>';
         try {
           const resp = await postJson(
             `/api/documents/${state.docId}/nodes/${state.nodeId}/answer`,
@@ -245,22 +451,22 @@
             const next = state.index + 1;
             if (next < state.titles.length) {
               el("controls").innerHTML =
-                '<button id="next">Próximo conceito →</button>';
+                '<button id="next">Next concept →</button>';
               el("next").addEventListener("click", () => generateNode(next));
             } else {
               el("controls").innerHTML =
-                '<p class="muted">Você concluiu o outline atual.</p>';
+                '<p class="muted">You have completed the current outline.</p>';
             }
           } else if (data.remediation_html) {
-            // Também gerado por LLM → sanitizar antes da origem da app (§3.1).
+            // Also LLM-generated → sanitize before the app origin (§3.1).
             el("result").innerHTML +=
-              '<div class="remediation"><h3>Vamos revisar</h3>' +
+              '<div class="remediation"><h3>Let\'s review</h3>' +
               sanitizeHtml(data.remediation_html) +
               "</div>";
           }
         } catch (err) {
           el("result").innerHTML =
-            '<p class="error">erro: ' + escapeHtml(String(err)) + "</p>";
+            '<p class="error">error: ' + escapeHtml(String(err)) + "</p>";
         }
       }
 
@@ -279,7 +485,7 @@
           .join("");
       }
 
-      // --- Parser de SSE sobre fetch (POST) ---------------------------------
+      // --- SSE parser over fetch (POST) -------------------------------------
       async function readSse(response, onEvent) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -310,15 +516,16 @@
         );
       }
 
-      // Sanitiza HTML gerado por LLM antes de inseri-lo na origem da app (§3.1,
-      // §4.4). O parse acontece num <template> inerte (imagens não carregam,
-      // scripts não rodam), então removemos elementos perigosos, atributos de
-      // evento (on*) e URLs não-http de href/src. Blocos interativos de verdade
-      // não passam por aqui — eles rodam isolados no iframe sandbox.
+      // Sanitizes LLM-generated HTML before inserting it into the app origin
+      // (§3.1, §4.4). Parsing happens in an inert <template> (images don't load,
+      // scripts don't run), then we remove dangerous elements, event attributes
+      // (on*) and non-http href/src URLs. Real interactive blocks don't go
+      // through here — they run isolated in the sandbox iframe.
       //
-      // A lista BLOCKED/atributos abaixo é a contraparte de fiscalização do
-      // PROSE_HTML_CONTRACT em engine.rs, que informa o modelo do mesmo limite.
-      // Ao mudar uma, mude a outra — senão o modelo gera algo que some aqui.
+      // The BLOCKED/attributes list below is the enforcement counterpart of
+      // PROSE_HTML_CONTRACT in engine.rs, which tells the model the same limit.
+      // Change one, change the other — otherwise the model generates something
+      // that disappears here.
       function sanitizeHtml(html) {
         const tpl = document.createElement("template");
         tpl.innerHTML = html;

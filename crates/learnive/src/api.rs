@@ -1,14 +1,14 @@
-//! Endpoints do loop de currículo (§6, §8, §8.2).
+//! Curriculum-loop endpoints (§6, §8, §8.2).
 //!
-//! Fluxo: cold start (POST cria documento + outline) → geração de nó (POST que
-//! **streama** a prosa token-a-token no formato SSE) → resposta (POST corrige
-//! contra o rubric travado; na falha abre remediação §8.2; no sucesso sinaliza
-//! avançar).
+//! Flow: cold start (POST creates document + outline) → node generation (POST
+//! that **streams** the prose token by token in SSE format) → answer (POST grades
+//! against the locked rubric; on failure opens remediation §8.2; on success
+//! signals to advance).
 //!
-//! Sobre streaming e §3.1: a §3 pede SSE, mas `EventSource` do navegador não
-//! envia cabeçalho de token nem faz POST, e a §3.1 proíbe mutação em GET. Então
-//! streamamos o **formato de fio SSE sobre um POST** (lido via `fetch`): mantém
-//! a semântica da §3 e honra a §3.1 (POST + token no cabeçalho + Origin).
+//! On streaming and §3.1: §3 asks for SSE, but the browser's `EventSource` does
+//! not send a token header nor POST, and §3.1 forbids state-changing GET. So we
+//! stream the **SSE wire format over a POST** (read via `fetch`): it keeps the §3
+//! semantics and honors §3.1 (POST + header token + Origin).
 
 use axum::{
     Json,
@@ -27,7 +27,7 @@ use crate::app::AppState;
 use crate::engine::{self, ObjectiveGrade, Outline, Rubric};
 use crate::store::StoreError;
 
-/// Erro de API mapeado para status HTTP.
+/// API error mapped to an HTTP status.
 pub enum ApiError {
     Engine(engine::EngineError),
     Store(StoreError),
@@ -37,15 +37,14 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
-            // Falha do provedor ou saída ilegível do modelo: gateway ruim.
+            // Provider failure or unreadable model output: bad gateway.
             ApiError::Engine(e) => (StatusCode::BAD_GATEWAY, e.to_string()),
             ApiError::Store(StoreError::NotFound(_)) => {
-                (StatusCode::NOT_FOUND, "não encontrado".to_string())
+                (StatusCode::NOT_FOUND, "not found".to_string())
             }
-            ApiError::Store(StoreError::InvalidId(_)) => (
-                StatusCode::BAD_REQUEST,
-                "identificador inválido".to_string(),
-            ),
+            ApiError::Store(StoreError::InvalidId(_)) => {
+                (StatusCode::BAD_REQUEST, "invalid identifier".to_string())
+            }
             ApiError::Store(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
         };
@@ -64,8 +63,8 @@ impl From<StoreError> for ApiError {
     }
 }
 
-/// Arquivo auxiliar server-only do nó: rubric travado + o exercício + contexto
-/// para a correção/remediação. Nunca servido ao cliente (§8).
+/// The node's server-only sidecar: locked rubric + the exercise + context for
+/// grading/remediation. Never served to the client (§8).
 #[derive(Serialize, Deserialize)]
 struct RubricSidecar {
     rubric: Rubric,
@@ -75,7 +74,7 @@ struct RubricSidecar {
 }
 
 // ---------------------------------------------------------------------------
-// Cold start (§6.1): tema → outline.
+// Cold start (§6.1): topic → outline.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -94,7 +93,7 @@ pub async fn create_document(
     Json(body): Json<CreateReq>,
 ) -> Result<Json<CreateResp>, ApiError> {
     if body.topic.trim().is_empty() {
-        return Err(ApiError::BadRequest("tema vazio".to_string()));
+        return Err(ApiError::BadRequest("empty topic".to_string()));
     }
     let outline = engine::generate_outline(&state.ai, &body.topic).await?;
     let doc_id = engine::new_id();
@@ -111,18 +110,18 @@ pub async fn create_document(
 }
 
 // ---------------------------------------------------------------------------
-// Geração de nó (§6) com streaming de prosa (§14).
+// Node generation (§6) with prose streaming (§14).
 // ---------------------------------------------------------------------------
 
-/// Streama o formato SSE sobre um POST. Eventos: `token` (prosa, repetido),
-/// `exercise` (form, após a prosa), `done` (node_id), `error`.
+/// Streams the SSE format over a POST. Events: `token` (prose, repeated),
+/// `exercise` (form, after the prose), `done` (node_id), `error`.
 pub async fn generate_node(
     State(state): State<AppState>,
     Path((doc_id, index)): Path<(String, usize)>,
 ) -> Response {
-    // O trabalho falível que não emite tokens fica em `prepare`/`finalize`; o
-    // gerador só contém os `yield` (async_stream não reescreve `yield` através
-    // de um macro aninhado).
+    // The fallible work that emits no tokens lives in `prepare`/`finalize`; the
+    // generator only holds the `yield`s (async_stream does not rewrite `yield`
+    // through a nested macro).
     let stream = async_stream::stream! {
         let prep = match prepare(&state, &doc_id, index).await {
             Ok(p) => p,
@@ -132,7 +131,7 @@ pub async fn generate_node(
             }
         };
 
-        // Prosa: robusto, streamada token-a-token (TTFT, §14).
+        // Prose: robust, streamed token by token (TTFT, §14).
         let mut prose = String::new();
         let prose_prompt = engine::prompt::prose(&prep.topic, &prep.title, &prep.context);
         match state.ai.stream(Tier::Robust, prose_prompt).await {
@@ -156,7 +155,7 @@ pub async fn generate_node(
             }
         }
 
-        // Exercício + rubric numa chamada separada, montar e persistir (§8/§14).
+        // Exercise + rubric in a separate call, assemble and persist (§8/§14).
         match finalize(&state, &doc_id, &prep, &prose).await {
             Ok(exercise_html) => {
                 yield Ok(sse_frame("exercise", &exercise_html));
@@ -173,10 +172,10 @@ pub async fn generate_node(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
-        .expect("resposta de stream válida")
+        .expect("valid stream response")
 }
 
-/// Dados prontos para gerar um nó.
+/// Data ready to generate a node.
 struct NodePrep {
     topic: String,
     title: String,
@@ -184,7 +183,7 @@ struct NodePrep {
     node_id: String,
 }
 
-/// Carrega o outline e resolve o item pedido (trabalho falível sem `yield`).
+/// Loads the outline and resolves the requested item (fallible work, no `yield`).
 async fn prepare(state: &AppState, doc_id: &str, index: usize) -> Result<NodePrep, String> {
     let outline_json = state
         .store
@@ -195,7 +194,7 @@ async fn prepare(state: &AppState, doc_id: &str, index: usize) -> Result<NodePre
         .items
         .get(index)
         .cloned()
-        .ok_or_else(|| "índice fora do outline".to_string())?;
+        .ok_or_else(|| "index out of the outline".to_string())?;
     let context = outline.items[..index]
         .iter()
         .map(|i| i.title.as_str())
@@ -209,8 +208,9 @@ async fn prepare(state: &AppState, doc_id: &str, index: usize) -> Result<NodePre
     })
 }
 
-/// Gera exercício + rubric, monta o nó e persiste (nó + sidecar server-only).
-/// Devolve o HTML do exercício para o cliente. Idempotente por `node_id` (§16).
+/// Generates exercise + rubric, assembles the node and persists (node +
+/// server-only sidecar). Returns the exercise HTML to the client. Idempotent by
+/// `node_id` (§16).
 async fn finalize(
     state: &AppState,
     doc_id: &str,
@@ -254,7 +254,7 @@ async fn finalize(
 }
 
 // ---------------------------------------------------------------------------
-// Resposta → correção (§8) → remediação (§8.2) ou avanço.
+// Answer → grading (§8) → remediation (§8.2) or advance.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -289,7 +289,7 @@ pub async fn answer(
     )
     .await?;
 
-    // Avançar exige todos demonstrados (§8).
+    // Advancing requires every objective demonstrated (§8).
     if assessment.all_demonstrated() {
         return Ok(Json(AnswerResp {
             grades: assessment.grades,
@@ -298,7 +298,7 @@ pub async fn answer(
         }));
     }
 
-    // Remediação (§8.2): a similaridade cresce com o número de tentativas.
+    // Remediation (§8.2): similarity grows with the number of attempts.
     let node = state.store.read_node(&doc_id, &node_id)?;
     let attempt = node
         .interaction
@@ -324,7 +324,7 @@ pub async fn answer(
     )
     .await?;
 
-    // Append-only na camada de interação (§4.3), ancorado no exercício.
+    // Append-only in the interaction layer (§4.3), anchored to the exercise.
     let anchor = node
         .content
         .exercise
@@ -348,19 +348,19 @@ pub async fn answer(
     }))
 }
 
-/// Formata um quadro SSE com `data` JSON-encodado (evita problemas de newline).
+/// Formats an SSE frame with JSON-encoded `data` (avoids newline problems).
 fn sse_frame(event: &str, data: &str) -> Bytes {
     let json = serde_json::to_string(data).unwrap_or_else(|_| "\"\"".to_string());
     Bytes::from(format!("event: {event}\ndata: {json}\n\n"))
 }
 
 // ---------------------------------------------------------------------------
-// Seleção de provedor (§12) — OpenRouter default quando há chave; senão modo
-// demo offline para o loop rodar sem chave.
+// Provider selection (§12) — OpenRouter default when a key is present; otherwise
+// an offline demo mode so the loop runs without a key.
 // ---------------------------------------------------------------------------
 
-/// Constrói o `Ai` a partir do ambiente. OpenRouter (default, §12) quando
-/// `LEARNIVE_OPENROUTER_KEY` está setada; senão cai no modo demo.
+/// Builds the `Ai` from the environment. OpenRouter (default, §12) when
+/// `LEARNIVE_OPENROUTER_KEY` is set; otherwise falls back to demo mode.
 pub fn build_ai() -> Ai {
     match std::env::var("LEARNIVE_OPENROUTER_KEY") {
         Ok(key) if !key.is_empty() => {
@@ -375,16 +375,16 @@ pub fn build_ai() -> Ai {
         }
         _ => {
             eprintln!(
-                "Nenhuma chave de IA configurada — rodando em MODO DEMO (conteúdo canned). \
-                 Configure OpenRouter no setup para conteúdo real."
+                "No AI key configured — running in DEMO MODE (canned content). \
+                 Configure OpenRouter at setup for real content."
             );
             demo_ai()
         }
     }
 }
 
-/// `Ai` em modo demo: um mock que responde diferente por sub-tarefa, fechando o
-/// loop inteiro offline.
+/// Demo-mode `Ai`: a mock that answers differently per sub-task, closing the
+/// whole loop offline.
 pub fn demo_ai() -> Ai {
     Ai::new(
         Provider::Mock(MockProvider::scripted(demo_responder)),
@@ -400,17 +400,19 @@ fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    if text.contains("array JSON de strings") {
-        r#"["Introdução ao tema", "Conceito central", "Aplicação prática"]"#.to_string()
+    // Branch on distinctive phrases from each prompt (engine::prompt). Keep these
+    // in sync with the prompt wording.
+    if text.contains("JSON array of strings") {
+        r#"["Introduction to the topic", "Core concept", "Practical application"]"#.to_string()
     } else if text.contains("exercise_html") {
-        r#"{"exercise_html":"<form><p>Explique o conceito com suas palavras e aplique-o a um caso novo:</p><textarea name=\"resposta\" rows=\"4\"></textarea></form>","objectives":[{"id":"o1","kind":"application","description":"Aplicar o conceito a um caso novo","criteria":"A resposta transfere o conceito a um cenário não coberto no texto","transfer":true}]}"#.to_string()
-    } else if text.contains("Corrija a resposta") {
-        // Demo: sempre demonstrado, para o loop avançar de ponta a ponta.
-        r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"Boa transferência do conceito para um caso novo."}]}"#.to_string()
-    } else if text.contains("remediação") {
-        "<p>Vamos revisar com um exemplo resolvido e um novo problema parecido.</p>".to_string()
+        r#"{"exercise_html":"<form><p>Explain the concept in your own words and apply it to a new case:</p><textarea name=\"answer\" rows=\"4\"></textarea></form>","objectives":[{"id":"o1","kind":"application","description":"Apply the concept to a new case","criteria":"The answer transfers the concept to a scenario not covered in the text","transfer":true}]}"#.to_string()
+    } else if text.contains("locked rubric") {
+        // Demo: always demonstrated, so the loop advances end to end.
+        r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"Good transfer of the concept to a new case."}]}"#.to_string()
+    } else if text.contains("Remediation session") {
+        "<p>Let's review with a worked example and a new, similar problem.</p>".to_string()
     } else {
-        // Prosa (default).
-        "<h2>Conceito central</h2><p>Este é um parágrafo explicativo gerado em <strong>modo demo</strong> (sem chave de IA). Configure um provedor para conteúdo real, fundamentado em fontes.</p><p>Cada nó é atômico e termina numa checagem de compreensão.</p>".to_string()
+        // Prose (default).
+        "<h2>Core concept</h2><p>This is an explanatory paragraph generated in <strong>demo mode</strong> (no AI key). Configure a provider for real content, grounded in sources.</p><p>Each node is atomic and ends in a comprehension check.</p>".to_string()
     }
 }

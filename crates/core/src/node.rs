@@ -1,26 +1,26 @@
-//! O nó e suas duas camadas (§4.3), com parsing/serialização do dialeto HTML
-//! (§4.2) via `scraper`.
+//! The node and its two layers (§4.3), with parsing/serialization of the HTML
+//! dialect (§4.2) via `scraper`.
 //!
-//! Invariante central: a **camada de conteúdo é congelada**. Nós guardamos o
-//! HTML do conteúdo (`ContentLayer::html`, normalizado pelo parser na ingestão)
-//! e nunca o regeneramos a partir das partes estruturadas — só *lemos*
-//! blocos/objetivos/citações dele. Interação é um `Vec` **append-only**;
-//! `to_html` reemite o conteúdo congelado seguido dos itens de interação, sem
-//! jamais tocar no primeiro.
+//! Central invariant: the **content layer is frozen**. We store the content HTML
+//! (`ContentLayer::html`, normalized by the parser at ingestion) and never
+//! regenerate it from the structured parts — we only *read* blocks/objectives/
+//! citations from it. Interaction is an **append-only** `Vec`; `to_html` re-emits
+//! the frozen content followed by the interaction items, never touching the
+//! former.
 //!
-//! Nota: `inner_html()` do `scraper` não preserva a ordem dos atributos byte a
-//! byte, então `ContentLayer::html` é a forma *normalizada na ingestão*, não uma
-//! cópia crua da fonte. O que é garantido (e testado) é estrutural — IDs de
-//! bloco, texto, objetivos, exercício — e que o append de interação nunca altera
-//! o conteúdo. Uma serialização canônica (ordem de atributo estável, p/ diffs
-//! limpos no espírito "arquivos legíveis" §4) fica para depois.
+//! Note: `scraper`'s `inner_html()` does not preserve attribute order byte for
+//! byte, so `ContentLayer::html` is the form *normalized at ingestion*, not a raw
+//! copy of the source. What is guaranteed (and tested) is structural — block IDs,
+//! text, objectives, exercise — and that appending interaction never alters the
+//! content. A canonical serialization (stable attribute order, for clean diffs in
+//! the spirit of "human-readable files" §4) is left for later.
 
 use scraper::{ElementRef, Html, Selector, node::Element};
 use serde::{Deserialize, Serialize};
 
 use crate::anchor::{Anchor, QuoteSelector, ResolvedAnchor, resolve_quote};
 
-/// Tipo de objetivo de aprendizagem (§8).
+/// Learning-objective type (§8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ObjectiveType {
@@ -29,7 +29,7 @@ pub enum ObjectiveType {
     Synthesis,
 }
 
-/// Objetivo de aprendizagem associado a um trecho do conteúdo.
+/// Learning objective associated with a span of the content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Objective {
     pub id: String,
@@ -37,8 +37,8 @@ pub struct Objective {
     pub text: String,
 }
 
-/// Marcador de citação de fonte (livro/capítulo via `source_id`+`locator`, ou
-/// web via `source_url`) — §11.
+/// Source-citation marker (book/chapter via `source_id`+`locator`, or web via
+/// `source_url`) — §11.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Citation {
     pub source_id: Option<String>,
@@ -47,28 +47,28 @@ pub struct Citation {
     pub text: String,
 }
 
-/// Um bloco endereçável da camada de conteúdo.
+/// An addressable block of the content layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentBlock {
     pub id: String,
-    /// Bloco interativo gerado (§4.4) rodando em sandbox.
+    /// Generated interactive block (§4.4) running in a sandbox.
     pub interactive: bool,
-    /// Texto do bloco (para ancoragem por citação).
+    /// Block text (for quote anchoring).
     pub text: String,
 }
 
-/// Exercício do nó; o `rubric_id` liga ao rubric travado na criação (§8).
+/// The node's exercise; `rubric_id` links to the rubric locked at creation (§8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exercise {
     pub exercise_id: String,
     pub rubric_id: Option<String>,
 }
 
-/// Camada de conteúdo — congelada (§4.3).
+/// Content layer — frozen (§4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentLayer {
-    /// HTML do conteúdo, congelado na ingestão (normalizado pelo parser). Nunca
-    /// editado depois; o append de interação jamais o altera.
+    /// Content HTML, frozen at ingestion (normalized by the parser). Never edited
+    /// afterwards; appending interaction never alters it.
     pub html: String,
     pub blocks: Vec<ContentBlock>,
     pub objectives: Vec<Objective>,
@@ -77,8 +77,8 @@ pub struct ContentLayer {
 }
 
 impl ContentLayer {
-    /// Resolve uma âncora contra esta camada: acha o bloco por ID e, se houver
-    /// citação, o intervalo do trecho no texto do bloco.
+    /// Resolves an anchor against this layer: finds the block by ID and, if a
+    /// quote is present, the span range in the block text.
     pub fn resolve(&self, anchor: &Anchor) -> Option<ResolvedAnchor> {
         let block = self.blocks.iter().find(|b| b.id == anchor.block_id)?;
         let range = match &anchor.quote {
@@ -92,7 +92,7 @@ impl ContentLayer {
     }
 }
 
-/// Tipo de thread na camada de interação (§4.3, §8.2).
+/// Thread kind in the interaction layer (§4.3, §8.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreadKind {
@@ -100,8 +100,8 @@ pub enum ThreadKind {
     Remediation,
 }
 
-/// Item da camada de interação (append-only). Sempre *referencia* IDs de
-/// conteúdo, nunca os altera.
+/// An interaction-layer item (append-only). Always *references* content IDs,
+/// never alters them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractionItem {
     Annotation {
@@ -117,18 +117,18 @@ pub enum InteractionItem {
     },
 }
 
-/// Um nó do documento vivo.
+/// A node of the living document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub node_id: String,
     pub doc_id: String,
-    /// Ponteiro para a versão anterior na cadeia (§5), se houver.
+    /// Pointer to the previous version in the chain (§5), if any.
     pub prev_version: Option<String>,
     pub content: ContentLayer,
     pub interaction: Vec<InteractionItem>,
 }
 
-/// Erros de parsing do dialeto de nó.
+/// Node-dialect parse errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     MissingArticle,
@@ -139,11 +139,11 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::MissingArticle => write!(f, "elemento <article data-node-id> ausente"),
+            ParseError::MissingArticle => write!(f, "missing <article data-node-id> element"),
             ParseError::MissingContentSection => {
-                write!(f, "seção <section data-layer=\"content\"> ausente")
+                write!(f, "missing <section data-layer=\"content\"> section")
             }
-            ParseError::MissingAttr(name) => write!(f, "atributo obrigatório ausente: {name}"),
+            ParseError::MissingAttr(name) => write!(f, "missing required attribute: {name}"),
         }
     }
 }
@@ -151,7 +151,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl Node {
-    /// Lê um nó a partir do HTML do dialeto (§4.2/§4.3).
+    /// Reads a node from the dialect HTML (§4.2/§4.3).
     pub fn parse(html: &str) -> Result<Node, ParseError> {
         let fragment = Html::parse_fragment(html);
 
@@ -184,8 +184,8 @@ impl Node {
         })
     }
 
-    /// Serializa o nó de volta para o dialeto. O conteúdo congelado é reemitido
-    /// verbatim; a interação é renderizada em ordem de acréscimo.
+    /// Serializes the node back to the dialect. The frozen content is re-emitted
+    /// verbatim; interaction is rendered in append order.
     pub fn to_html(&self) -> String {
         let mut s = String::new();
         s.push_str("<article");
@@ -212,13 +212,13 @@ impl Node {
         s
     }
 
-    /// Acrescenta um item à camada de interação (append-only, §4.3). Nunca toca
-    /// na camada de conteúdo.
+    /// Appends an item to the interaction layer (append-only, §4.3). Never
+    /// touches the content layer.
     pub fn push_interaction(&mut self, item: InteractionItem) {
         self.interaction.push(item);
     }
 
-    /// Resolve uma âncora contra a camada de conteúdo deste nó.
+    /// Resolves an anchor against this node's content layer.
     pub fn resolve(&self, anchor: &Anchor) -> Option<ResolvedAnchor> {
         self.content.resolve(anchor)
     }
@@ -302,7 +302,7 @@ fn parse_interaction(article: &ElementRef) -> Vec<InteractionItem> {
         return Vec::new();
     };
 
-    // Itera os filhos em ordem de documento para preservar a ordem de acréscimo.
+    // Iterate the children in document order to preserve append order.
     inter_el
         .children()
         .filter_map(ElementRef::wrap)
@@ -417,7 +417,7 @@ fn required_attr(el: &ElementRef, name: &'static str) -> Result<String, ParseErr
 }
 
 fn sel(s: &str) -> Selector {
-    Selector::parse(s).expect("seletor estático válido")
+    Selector::parse(s).expect("valid static selector")
 }
 
 fn push_attr(s: &mut String, name: &str, value: &str) {
@@ -448,8 +448,8 @@ mod tests {
 
     const SAMPLE: &str = r#"<article data-node-id="n1" data-doc-id="d1">
   <section data-layer="content">
-    <p data-block-id="b1">Primeiro parágrafo sobre limites.</p>
-    <p data-block-id="b2">Segundo bloco com <span data-objective-id="o1" data-objective-type="application">transferência</span> e uma <cite data-source-id="s1" data-locator="chap:3;p:42">fonte</cite>.</p>
+    <p data-block-id="b1">First paragraph about limits.</p>
+    <p data-block-id="b2">Second block with <span data-objective-id="o1" data-objective-type="application">transfer</span> and a <cite data-source-id="s1" data-locator="chap:3;p:42">source</cite>.</p>
     <form data-exercise-id="e1" data-rubric-id="r1"></form>
   </section>
   <section data-layer="interaction">
@@ -495,18 +495,18 @@ mod tests {
             anchor: Anchor {
                 block_id: "b1".to_string(),
                 quote: Some(QuoteSelector {
-                    exact: "limites".to_string(),
+                    exact: "limits".to_string(),
                     prefix: None,
                     suffix: None,
                 }),
             },
-            body_html: "<p>minha nota</p>".to_string(),
+            body_html: "<p>my note</p>".to_string(),
         });
 
-        // Invariante real (§4.3): o append não toca no conteúdo congelado.
+        // Real invariant (§4.3): the append never touches the frozen content.
         assert_eq!(node.content.html, frozen);
 
-        // A interação sobrevive ao round-trip; os blocos de conteúdo idem.
+        // The interaction survives the round-trip; the content blocks too.
         let reparsed = Node::parse(&node.to_html()).unwrap();
         assert_eq!(reparsed.interaction.len(), 1);
         assert_eq!(reparsed.content.blocks, node.content.blocks);
@@ -514,9 +514,9 @@ mod tests {
             InteractionItem::Annotation { id, anchor, .. } => {
                 assert_eq!(id, "a1");
                 assert_eq!(anchor.block_id, "b1");
-                assert_eq!(anchor.quote.as_ref().unwrap().exact, "limites");
+                assert_eq!(anchor.quote.as_ref().unwrap().exact, "limits");
             }
-            _ => panic!("esperava anotação"),
+            _ => panic!("expected annotation"),
         }
     }
 
@@ -527,12 +527,12 @@ mod tests {
             id: "t1".to_string(),
             kind: ThreadKind::Remediation,
             anchor_block: Some("b2".to_string()),
-            body_html: "<p>remediação</p>".to_string(),
+            body_html: "<p>remediation</p>".to_string(),
         });
         node.push_interaction(InteractionItem::Annotation {
             id: "a2".to_string(),
             anchor: Anchor::block("b1"),
-            body_html: "<p>depois</p>".to_string(),
+            body_html: "<p>after</p>".to_string(),
         });
 
         let reparsed = Node::parse(&node.to_html()).unwrap();
@@ -542,11 +542,11 @@ mod tests {
                 assert_eq!(id, "t1");
                 assert_eq!(*kind, ThreadKind::Remediation);
             }
-            _ => panic!("esperava thread primeiro"),
+            _ => panic!("expected thread first"),
         }
         match &reparsed.interaction[1] {
             InteractionItem::Annotation { id, .. } => assert_eq!(id, "a2"),
-            _ => panic!("esperava anotação segundo"),
+            _ => panic!("expected annotation second"),
         }
     }
 
@@ -554,17 +554,17 @@ mod tests {
     fn resolve_block_and_quote() {
         let node = Node::parse(SAMPLE).unwrap();
 
-        // Bloco inteiro.
+        // Whole block.
         let r = node.resolve(&Anchor::block("b1")).unwrap();
         assert_eq!(r.block_id, "b1");
         assert!(r.range.is_none());
 
-        // Trecho por citação.
+        // Span by quote.
         let r = node
             .resolve(&Anchor {
                 block_id: "b1".to_string(),
                 quote: Some(QuoteSelector {
-                    exact: "limites".to_string(),
+                    exact: "limits".to_string(),
                     prefix: None,
                     suffix: None,
                 }),
@@ -572,9 +572,9 @@ mod tests {
             .unwrap();
         let (s, e) = r.range.unwrap();
         let block_text = &node.content.blocks[0].text;
-        assert_eq!(&block_text[s..e], "limites");
+        assert_eq!(&block_text[s..e], "limits");
 
-        // Bloco inexistente.
+        // Nonexistent block.
         assert!(node.resolve(&Anchor::block("nope")).is_none());
     }
 

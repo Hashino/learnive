@@ -1,5 +1,8 @@
 /target
 learnive-data/
 
+# Chaves de API locais (§12) — NUNCA versionar. Use .env.example como molde.
+.env
+
 # Playwright MCP scratch (screenshots, console logs)
 .playwright-mcp/

@@ -1,12 +1,12 @@
-//! Provedor de IA como seam trocável (§12, §14 — "knob roteado por sub-tarefa e
-//! trocável, não dependência").
+//! AI provider as a swappable seam (§12, §14 — "a knob routed per sub-task and
+//! swappable, not a dependency").
 //!
-//! OpenRouter (default, §12), OpenAI/OpenCode Zen diretos e a maioria dos
-//! provedores compatíveis falam o mesmo formato `chat/completions` da OpenAI —
-//! então um único `OpenAiCompat` cobre todos variando `base_url` + auth. O
-//! `Mock` permite rodar o loop sem chave e testar sem rede.
+//! OpenRouter (default, §12), direct OpenAI/OpenCode Zen, and most compatible
+//! providers speak the same OpenAI `chat/completions` format — so a single
+//! `OpenAiCompat` covers all of them by varying `base_url` + auth. The `Mock`
+//! lets the loop run without a key and be tested without a network.
 //!
-//! Consumido pelo loop (Fase 1, Task #5); daí o `allow(dead_code)` temporário.
+//! Consumed by the loop (Phase 1, Task #5); hence the temporary `allow(dead_code)`.
 #![allow(dead_code)]
 
 use std::pin::Pin;
@@ -14,29 +14,29 @@ use std::pin::Pin;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
-/// Stream de deltas de texto (§14 — streaming token-a-token para TTFT baixo).
+/// Stream of text deltas (§14 — token-by-token streaming for low TTFT).
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> + Send>>;
 
 #[derive(Debug)]
 pub enum ProviderError {
-    /// Falha de transporte HTTP.
+    /// HTTP transport failure.
     Http(String),
-    /// A API respondeu com status de erro.
+    /// The API responded with an error status.
     Api { status: u16, body: String },
 }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProviderError::Http(e) => write!(f, "erro HTTP: {e}"),
-            ProviderError::Api { status, body } => write!(f, "erro da API ({status}): {body}"),
+            ProviderError::Http(e) => write!(f, "HTTP error: {e}"),
+            ProviderError::Api { status, body } => write!(f, "API error ({status}): {body}"),
         }
     }
 }
 
 impl std::error::Error for ProviderError {}
 
-/// Papel de uma mensagem no formato de chat.
+/// Role of a message in the chat format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -45,7 +45,7 @@ pub enum Role {
     Assistant,
 }
 
-/// Uma mensagem de chat.
+/// A chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -73,7 +73,7 @@ impl ChatMessage {
     }
 }
 
-/// Uma requisição de completion.
+/// A completion request.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
@@ -81,8 +81,8 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
 }
 
-/// Enum de provedores (dispatch por enum evita a não-object-safety de async fn
-/// em trait; adicionar um provedor = nova variante).
+/// Provider enum (enum dispatch avoids the non-object-safety of `async fn` in a
+/// trait; adding a provider = a new variant).
 pub enum Provider {
     OpenAiCompat(OpenAiCompat),
     Mock(MockProvider),
@@ -97,7 +97,7 @@ impl Provider {
     }
 }
 
-/// Cliente para qualquer endpoint compatível com OpenAI `chat/completions`.
+/// Client for any endpoint compatible with OpenAI `chat/completions`.
 pub struct OpenAiCompat {
     http: reqwest::Client,
     base_url: String,
@@ -113,7 +113,7 @@ impl OpenAiCompat {
         }
     }
 
-    /// OpenRouter — o caminho default (§12).
+    /// OpenRouter — the default path (§12).
     pub fn openrouter(api_key: Option<String>) -> Self {
         Self::new("https://openrouter.ai/api/v1", api_key)
     }
@@ -165,7 +165,7 @@ impl OpenAiCompat {
                     }
                 };
                 buf.push_str(&String::from_utf8_lossy(&chunk));
-                // Processa cada linha completa (a API delimita eventos SSE por linha).
+                // Process each complete line (the API delimits SSE events by line).
                 while let Some(pos) = buf.find('\n') {
                     let line: String = buf.drain(..=pos).collect();
                     match parse_sse_line(line.trim_end()) {
@@ -181,16 +181,16 @@ impl OpenAiCompat {
     }
 }
 
-/// Provedor falso: streama uma resposta token-a-token (palavra a palavra) —
-/// para rodar o loop sem chave e para testes sem rede. A resposta pode ser
-/// constante (`new`) ou decidida a partir da requisição (`scripted`), o que
-/// permite um modo demo offline que responde diferente por sub-tarefa.
+/// Fake provider: streams a response token by token (word by word) — to run the
+/// loop without a key and for network-free tests. The response can be constant
+/// (`new`) or decided from the request (`scripted`), which enables an offline
+/// demo mode that answers differently per sub-task.
 pub struct MockProvider {
     responder: Box<dyn Fn(&ChatRequest) -> String + Send + Sync>,
 }
 
 impl MockProvider {
-    /// Sempre responde a mesma string.
+    /// Always responds with the same string.
     pub fn new(reply: impl Into<String>) -> Self {
         let reply = reply.into();
         Self {
@@ -198,8 +198,8 @@ impl MockProvider {
         }
     }
 
-    /// Decide a resposta a partir da requisição (ex.: por palavra-chave do
-    /// prompt), para simular o loop inteiro offline.
+    /// Decides the response from the request (e.g. by a prompt keyword), to
+    /// simulate the whole loop offline.
     pub fn scripted<F>(f: F) -> Self
     where
         F: Fn(&ChatRequest) -> String + Send + Sync + 'static,
@@ -221,14 +221,14 @@ impl MockProvider {
     }
 }
 
-/// Um evento de linha SSE do provedor.
+/// A single SSE line event from the provider.
 enum SseEvent {
     Delta(String),
     Done,
     Ignore,
 }
 
-/// Faz o parse de uma linha `data: {...}` do stream. Pura e testável.
+/// Parses a `data: {...}` line from the stream. Pure and testable.
 fn parse_sse_line(line: &str) -> SseEvent {
     let Some(data) = line.strip_prefix("data:") else {
         return SseEvent::Ignore;
@@ -273,10 +273,10 @@ mod tests {
 
     #[test]
     fn parses_delta_line() {
-        let line = r#"data: {"choices":[{"delta":{"content":"olá"}}]}"#;
+        let line = r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#;
         match parse_sse_line(line) {
-            SseEvent::Delta(t) => assert_eq!(t, "olá"),
-            _ => panic!("esperava delta"),
+            SseEvent::Delta(t) => assert_eq!(t, "hello"),
+            _ => panic!("expected delta"),
         }
     }
 
@@ -290,18 +290,18 @@ mod tests {
 
     #[tokio::test]
     async fn mock_streams_tokens_that_reassemble() {
-        let provider = Provider::Mock(MockProvider::new("um dois três"));
+        let provider = Provider::Mock(MockProvider::new("one two three"));
         let stream = provider
             .stream(ChatRequest {
                 model: "mock".to_string(),
-                messages: vec![ChatMessage::user("oi")],
+                messages: vec![ChatMessage::user("hi")],
                 temperature: None,
             })
             .await
             .unwrap();
 
         let tokens: Vec<String> = stream.map(|r| r.unwrap()).collect().await;
-        assert!(tokens.len() > 1, "deve streamar em múltiplos tokens");
-        assert_eq!(tokens.concat(), "um dois três");
+        assert!(tokens.len() > 1, "should stream in multiple tokens");
+        assert_eq!(tokens.concat(), "one two three");
     }
 }

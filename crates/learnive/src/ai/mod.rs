@@ -1,7 +1,7 @@
-//! Camada de IA: provedor trocável (§12), OAuth PKCE do OpenRouter e tiering de
-//! modelo por intenção (§12.1).
+//! AI layer: swappable provider (§12), OpenRouter OAuth PKCE, and model tiering
+//! by intent (§12.1).
 //!
-//! Consumido pelo loop (Fase 1, Task #5); daí os `allow` temporários.
+//! Consumed by the loop (Phase 1, Task #5); hence the temporary `allow`s.
 #![allow(dead_code, unused_imports)]
 
 pub mod pkce;
@@ -12,18 +12,18 @@ pub use provider::{
     TokenStream,
 };
 
-/// Tier de modelo (§12.1, §14). O sistema roteia por *intenção da sub-tarefa*,
-/// não por nome de modelo escolhido pelo usuário.
+/// Model tier (§12.1, §14). The system routes by *sub-task intent*, not by a
+/// model name chosen by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Leve/rápido: exercício, correção contra rubric, resumos, cross-ref.
+    /// Light/fast: exercises, grading against the rubric, summaries, cross-ref.
     Fast,
-    /// Robusto: prosa explicativa e confrontação adversarial.
+    /// Robust: explanatory prose and adversarial confrontation.
     Robust,
 }
 
-/// Par de modelos fast/robusto. Derivado de uma única escolha de intenção
-/// (gratuito vs pago) no setup — o usuário não escolhe modelos por nome (§12.1).
+/// A fast/robust model pair. Derived from a single intent choice (free vs paid)
+/// at setup — the user does not pick models by name (§12.1).
 #[derive(Debug, Clone)]
 pub struct Models {
     pub fast: String,
@@ -38,8 +38,8 @@ impl Models {
         }
     }
 
-    /// Degradação graciosa (§12.1): um só modelo serve os dois tiers. Tiering é
-    /// otimização, nunca barreira para começar.
+    /// Graceful degradation (§12.1): a single model serves both tiers. Tiering is
+    /// an optimization, never a barrier to start.
     pub fn single(model: impl Into<String>) -> Self {
         let model = model.into();
         Self {
@@ -56,8 +56,8 @@ impl Models {
     }
 }
 
-/// Fachada que junta provedor + tiering: o resto do app pede geração por
-/// *intenção* (tier), sem saber de nomes de modelo.
+/// Facade that joins provider + tiering: the rest of the app asks for generation
+/// by *intent* (tier), without knowing model names.
 pub struct Ai {
     provider: Provider,
     models: Models,
@@ -68,7 +68,7 @@ impl Ai {
         Self { provider, models }
     }
 
-    /// Streama uma completion no tier pedido.
+    /// Streams a completion in the requested tier.
     pub async fn stream(
         &self,
         tier: Tier,
@@ -106,11 +106,11 @@ mod tests {
     async fn ai_streams_via_provider() {
         use futures_util::StreamExt;
         let ai = Ai::new(
-            Provider::Mock(MockProvider::new("resposta gerada")),
+            Provider::Mock(MockProvider::new("generated answer")),
             Models::single("mock"),
         );
         let stream = ai
-            .stream(Tier::Robust, vec![ChatMessage::user("oi")])
+            .stream(Tier::Robust, vec![ChatMessage::user("hi")])
             .await
             .unwrap();
         let out: String = stream
@@ -118,6 +118,6 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .concat();
-        assert_eq!(out, "resposta gerada");
+        assert_eq!(out, "generated answer");
     }
 }

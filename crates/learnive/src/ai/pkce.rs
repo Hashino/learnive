@@ -1,25 +1,25 @@
-//! OAuth PKCE para o OpenRouter — o caminho de provedor default (§12).
+//! OAuth PKCE for OpenRouter — the default provider path (§12).
 //!
-//! Fluxo: geramos um `verifier` aleatório e seu `challenge` (S256), abrimos a
-//! URL de autorização no navegador do usuário, e no callback trocamos o `code`
-//! (mais o `verifier`) por uma chave de API que o próprio usuário controla.
-//! Assim o default não pede copiar/colar chave.
+//! Flow: we generate a random `verifier` and its `challenge` (S256), open the
+//! authorization URL in the user's browser, and at the callback exchange the
+//! `code` (plus the `verifier`) for an API key that the user controls. This way
+//! the default path does not require copy/pasting a key.
 //!
-//! A geração/troca é pura e testável aqui; o round-trip pelo navegador e o
-//! armazenamento da chave no keychain vêm com a tela de setup (§12).
+//! Generation/exchange is pure and testable here; the browser round-trip and
+//! storing the key in the keychain come with the setup screen (§12).
 #![allow(dead_code)]
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{Rng, distributions::Alphanumeric};
 use sha2::{Digest, Sha256};
 
-/// Par verifier/challenge PKCE.
+/// PKCE verifier/challenge pair.
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
 }
 
-/// Gera um novo par PKCE (verifier de 64 chars, challenge S256 em base64url).
+/// Generates a new PKCE pair (64-char verifier, S256 challenge in base64url).
 pub fn generate() -> Pkce {
     let verifier: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -33,14 +33,14 @@ pub fn generate() -> Pkce {
     }
 }
 
-/// Deriva o code challenge S256 de um verifier.
+/// Derives the S256 code challenge from a verifier.
 pub fn challenge_for(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// Monta a URL de autorização do OpenRouter. `callback_url` é um endpoint do
-/// próprio servidor local que recebe o `?code=`.
+/// Builds the OpenRouter authorization URL. `callback_url` is an endpoint on the
+/// local server itself that receives the `?code=`.
 pub fn authorize_url(challenge: &str, callback_url: &str) -> String {
     reqwest::Url::parse_with_params(
         "https://openrouter.ai/auth",
@@ -50,11 +50,11 @@ pub fn authorize_url(challenge: &str, callback_url: &str) -> String {
             ("code_challenge_method", "S256"),
         ],
     )
-    .expect("URL base válida")
+    .expect("valid base URL")
     .to_string()
 }
 
-/// Troca o `code` recebido no callback pela chave de API do usuário.
+/// Exchanges the `code` received at the callback for the user's API key.
 pub async fn exchange_code(
     http: &reqwest::Client,
     code: &str,
@@ -105,9 +105,9 @@ mod tests {
     fn challenge_is_s256_of_verifier() {
         let pkce = generate();
         assert_eq!(pkce.verifier.len(), 64);
-        // O challenge deve ser reproduzível a partir do verifier.
+        // The challenge must be reproducible from the verifier.
         assert_eq!(challenge_for(&pkce.verifier), pkce.challenge);
-        // base64url sem padding: sem '+', '/' ou '='.
+        // base64url without padding: no '+', '/' or '='.
         assert!(!pkce.challenge.contains(['+', '/', '=']));
     }
 
@@ -117,7 +117,7 @@ mod tests {
         assert!(url.starts_with("https://openrouter.ai/auth?"));
         assert!(url.contains("code_challenge=chal123"));
         assert!(url.contains("code_challenge_method=S256"));
-        // callback deve estar percent-encoded.
+        // callback must be percent-encoded.
         assert!(url.contains("callback_url=http%3A%2F%2F127.0.0.1%3A7420"));
     }
 }

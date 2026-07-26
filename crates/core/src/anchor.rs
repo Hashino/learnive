@@ -1,30 +1,30 @@
-//! Ancoragem (§4.3).
+//! Anchoring (§4.3).
 //!
-//! Primária: por **ID de bloco estável** — resolve deterministicamente porque a
-//! camada de conteúdo é congelada. Sub-bloco (um trecho dentro de um bloco):
-//! âncora **fuzzy por citação** — quote exato + prefixo/sufixo de contexto
-//! (estilo W3C Web Annotation / hypothes.is). Como o texto do bloco é imutável,
-//! o fuzzy é só robustez contra normalização mínima de espaço em branco.
+//! Primary: by **stable block ID** — resolves deterministically because the
+//! content layer is frozen. Sub-block (a span inside a block): **fuzzy quote**
+//! anchor — exact quote + prefix/suffix context (W3C Web Annotation /
+//! hypothes.is style). Since the block text is immutable, the fuzzy path is only
+//! robustness against minimal whitespace normalization.
 //!
-//! Toda a resolução é pura e sem I/O — é exatamente o que será compilado para
-//! wasm e reutilizado no cliente.
+//! All resolution is pure and I/O-free — exactly what gets compiled to wasm and
+//! reused on the client.
 
 use serde::{Deserialize, Serialize};
 
-/// Seletor de citação para ancorar um trecho dentro de um bloco.
+/// Quote selector for anchoring a span inside a block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuoteSelector {
-    /// Trecho exato selecionado.
+    /// Exact selected span.
     pub exact: String,
-    /// Contexto imediatamente antes, para desambiguar ocorrências repetidas.
+    /// Context immediately before, to disambiguate repeated occurrences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
-    /// Contexto imediatamente depois, para desambiguar ocorrências repetidas.
+    /// Context immediately after, to disambiguate repeated occurrences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suffix: Option<String>,
 }
 
-/// Âncora: um bloco, opcionalmente refinada para um trecho por citação.
+/// Anchor: a block, optionally refined to a span by quote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {
     pub block_id: String,
@@ -33,7 +33,7 @@ pub struct Anchor {
 }
 
 impl Anchor {
-    /// Âncora de bloco inteiro (sem trecho).
+    /// Whole-block anchor (no span).
     pub fn block(block_id: impl Into<String>) -> Self {
         Self {
             block_id: block_id.into(),
@@ -42,20 +42,20 @@ impl Anchor {
     }
 }
 
-/// Resultado da resolução: o bloco e, quando houver citação, o intervalo de
-/// bytes `[start, end)` dentro do texto do bloco.
+/// Resolution result: the block and, when a quote is present, the byte range
+/// `[start, end)` within the block text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedAnchor {
     pub block_id: String,
     pub range: Option<(usize, usize)>,
 }
 
-/// Resolve uma citação contra o texto (congelado) de um bloco, devolvendo o
-/// intervalo de bytes no texto original.
+/// Resolves a quote against the (frozen) text of a block, returning the byte
+/// range in the original text.
 ///
-/// Estratégia: (1) match exato — se único, pronto; (2) se houver múltiplos
-/// exatos, desambigua por prefixo/sufixo; (3) se não houver exato, busca
-/// flexível a espaço em branco (robustez §4.3).
+/// Strategy: (1) exact match — if unique, done; (2) if multiple exact matches,
+/// disambiguate by prefix/suffix; (3) if no exact match, whitespace-flexible
+/// search (§4.3 robustness).
 pub fn resolve_quote(text: &str, quote: &QuoteSelector) -> Option<(usize, usize)> {
     if quote.exact.is_empty() {
         return None;
@@ -75,7 +75,7 @@ pub fn resolve_quote(text: &str, quote: &QuoteSelector) -> Option<(usize, usize)
     }
 }
 
-/// Índices de byte de todas as ocorrências (não sobrepostas) de `needle`.
+/// Byte indices of every (non-overlapping) occurrence of `needle`.
 fn find_all(hay: &str, needle: &str) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
@@ -90,7 +90,7 @@ fn find_all(hay: &str, needle: &str) -> Vec<usize> {
     out
 }
 
-/// Escolhe entre múltiplas ocorrências exatas usando prefixo/sufixo.
+/// Picks among multiple exact occurrences using prefix/suffix.
 fn disambiguate(text: &str, matches: &[usize], quote: &QuoteSelector) -> Option<usize> {
     let end_of = |start: usize| start + quote.exact.len();
     let mut candidates = matches.iter().copied().filter(|&start| {
@@ -109,9 +109,9 @@ fn disambiguate(text: &str, matches: &[usize], quote: &QuoteSelector) -> Option<
     candidates.next()
 }
 
-/// Busca em que cada corrida de espaço em branco no texto casa com um único
-/// espaço no `needle` normalizado. Devolve o intervalo de bytes no texto
-/// original. Usada quando o match exato falha (ex.: espaço colapsado no reflow).
+/// Search where each run of whitespace in the text matches a single space in the
+/// normalized `needle`. Returns the byte range in the original text. Used when
+/// the exact match fails (e.g. whitespace collapsed on reflow).
 fn find_flexible(hay: &str, needle: &str) -> Option<(usize, usize)> {
     let normalized = collapse_ws(needle.trim());
     if normalized.is_empty() {
@@ -128,8 +128,8 @@ fn find_flexible(hay: &str, needle: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Tenta casar `needle` (normalizado) a partir de `start` em `hay`. Espaço no
-/// needle casa com uma ou mais posições de espaço em branco no hay.
+/// Tries to match `needle` (normalized) starting at `start` in `hay`. A space in
+/// the needle matches one or more whitespace positions in the hay.
 fn try_match_at(
     hay: &[(usize, char)],
     start: usize,
@@ -158,8 +158,8 @@ fn try_match_at(
     Some(if hi < hay.len() { hay[hi].0 } else { hay_len })
 }
 
-/// Colapsa corridas de espaço em branco em um único espaço. Não apara as pontas
-/// (quem chama apara o `needle` antes).
+/// Collapses runs of whitespace into a single space. Does not trim the ends (the
+/// caller trims the `needle` first).
 fn collapse_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_ws = false;
@@ -191,23 +191,23 @@ mod tests {
 
     #[test]
     fn exact_single_match() {
-        let text = "Primeiro parágrafo sobre limites.";
-        let (s, e) = resolve_quote(text, &q("limites")).unwrap();
-        assert_eq!(&text[s..e], "limites");
+        let text = "First paragraph about limits.";
+        let (s, e) = resolve_quote(text, &q("limits")).unwrap();
+        assert_eq!(&text[s..e], "limits");
     }
 
     #[test]
     fn missing_quote_is_none() {
-        let text = "nada aqui";
-        assert!(resolve_quote(text, &q("ausente")).is_none());
+        let text = "nothing here";
+        assert!(resolve_quote(text, &q("absent")).is_none());
     }
 
     #[test]
     fn whitespace_flexible_fallback() {
-        let text = "Primeiro parágrafo sobre limites.";
-        // O quote pede dois espaços; o texto tem um só — match flexível.
-        let (s, e) = resolve_quote(text, &q("parágrafo  sobre")).unwrap();
-        assert_eq!(collapse_ws(&text[s..e]), "parágrafo sobre");
+        let text = "First paragraph about limits.";
+        // The quote asks for two spaces; the text has only one — flexible match.
+        let (s, e) = resolve_quote(text, &q("paragraph  about")).unwrap();
+        assert_eq!(collapse_ws(&text[s..e]), "paragraph about");
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod tests {
             suffix: None,
         };
         let (s, e) = resolve_quote(text, &quote).unwrap();
-        assert_eq!(s, 5); // segundo caractere após "alfa "
+        assert_eq!(s, 5); // second character after "alfa "
         assert_eq!(&text[s..e], "X");
     }
 
@@ -233,7 +233,7 @@ mod tests {
         };
         let (s, e) = resolve_quote(text, &quote).unwrap();
         assert_eq!(&text[s..e], "X");
-        // Deve ser a segunda ocorrência (a seguida de " gama").
+        // Must be the second occurrence (the one followed by " gama").
         assert_eq!(&text[..s], "alfa X beta ");
     }
 }

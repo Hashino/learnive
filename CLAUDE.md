@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Phase 1 in progress: the minimum end-to-end loop is functional. **`README.md` is the authoritative specification** (in Portuguese) and defines the architecture the implementation must follow — read it before writing anything non-trivial. **`PLAN.md`** holds the living, phased build plan (Phase 1: minimum end-to-end loop, LibGen crawl included from the start; Phase 2: full-depth single living document; Phase 3: multiple cross-referenced documents) — check it for what's in/out of the current phase. Sections below are cross-cutting decisions that require reading multiple spec sections to grasp.
+Phase 1 in progress: the minimum end-to-end loop is functional. **`SPEC.md` is the authoritative specification** (in English) and defines the architecture the implementation must follow — read it before writing anything non-trivial. **`README.md`** is the user-facing description + usage/setup instructions. **`PLAN.md`** holds the living, phased build plan (Phase 1: minimum end-to-end loop, LibGen crawl included from the start; Phase 2: full-depth single living document; Phase 3: multiple cross-referenced documents) — check it for what's in/out of the current phase. Sections below are cross-cutting decisions that require reading multiple spec sections to grasp.
+
+The whole repo — code, comments, prompts, UI, docs — is in **English**. The generation prompts are English, so the app produces English learning content.
 
 **Workspace layout:** `crates/core` (`learnive-core`) holds the §4.3 node data contract + anchoring, deliberately free of tokio/axum so it compiles to wasm and is shared with the client; `crates/learnive` is the axum binary (`security`, `store`, `ai`, `engine`, `api`, `app`). `cargo run` runs the binary via `default-members`.
 
-**What works today:** secure server (§3.1); node parse/serialize + anchoring (§4.3); file store (§4); swappable provider with streaming + tiering + OpenRouter PKCE (§12); the loop — cold start → outline → streamed node generation → locked-rubric grading → remediation/advance (§6/§8/§8.2) — usable in the browser. Runs keyless in a **demo mode** (prompt-aware mock) when `LEARNIVE_OPENROUTER_KEY` is unset. Env: `LEARNIVE_PORT`, `LEARNIVE_DATA_DIR`, `LEARNIVE_OPENROUTER_KEY`, `LEARNIVE_MODEL_FAST`/`_ROBUST`.
+**What works today:** secure server (§3.1); node parse/serialize + anchoring (§4.3); file store (§4); swappable provider with streaming + tiering + OpenRouter PKCE (§12); the loop — cold start → outline → streamed node generation → locked-rubric grading → remediation/advance (§6/§8/§8.2) — usable in the browser. Runs keyless in a **demo mode** (prompt-aware mock) when `LEARNIVE_OPENROUTER_KEY` is unset. Env: `LEARNIVE_PORT`, `LEARNIVE_DATA_DIR`, `LEARNIVE_OPENROUTER_KEY`, `LEARNIVE_MODEL_FAST`/`_ROBUST` — loaded at startup from a local, gitignored `.env` if present (`.env.example` is the template); the real environment wins over the file.
 
 **Not yet built (Phase 1 remainder):** source acquisition (LibGen/arXiv/web §11.1), profile/memory (§7), abstraction calibration (§6.2), predictive prefetch (§14), setup UI + keychain + live OAuth round-trip (§12), the wasm anchoring build + HTMX vendoring, scroll reading-line (§9), text-selection→document routing (§7/§9), cost control (§12.2).
 
@@ -20,19 +22,19 @@ Phase 1 in progress: the minimum end-to-end loop is functional. **`README.md` is
 - Single test: `cargo test <name>` (or `cargo test <module>::<name>` to disambiguate)
 - Lint: `cargo clippy --all-targets` and `cargo fmt`
 
-## Objetivo e princípios
+## Objective and principles
 
-Learnive transforma qualquer tema, ideia ou problema que o usuário queira explorar em um currículo adaptativo, construído progressivamente como um **"livro vivo"** — um documento que cresce e se ajusta conforme a compreensão real do usuário é avaliada, em vez de entregar material fixo de antemão.
+learnive turns any topic, idea, or problem the user wants to explore into an adaptive curriculum, built progressively as a **"living document"** — a document that grows and adjusts as the user's real understanding is assessed, instead of delivering fixed material up front.
 
-Princípios que devem guiar cada decisão de implementação (não são metas soltas — restringem como as features são construídas):
+Principles that must guide every implementation decision (they are not loose goals — they constrain how features are built):
 
-- **A sofisticação do sistema acompanha a do usuário** — calibração contínua e local (por conceito/objetivo) de ritmo e interesse, nunca um nível fixado uma vez.
-- **Aprendizado é holístico, não atômico** — todo conceito novo se integra ao que já foi aprendido (ver exercícios de síntese/"integração" §8 e o grafo entre documentos §10).
-- **Avaliação usa objetivos travados no momento da geração do conteúdo**, não julgamento posterior — evita a leniência natural de um avaliador sem critério pré-definido (§8).
-- **Discordância legítima do usuário não é erro de compreensão** — o sistema confronta ideias dialeticamente, sem bajular (§7).
-- **Conhecimento nunca é editado destrutivamente** — revisão gera novas versões, preservando a trajetória de aprendizado (§5).
-- **O ciclo aprendizado → feedback é o mais curto possível** — geração em blocos pequenos e atômicos sempre que o conceito permitir, cada bloco terminando numa checagem de compreensão (§6).
-- **A interação do próprio usuário é o sinal mais valioso** — o que pergunta, onde seleciona, o que erra realimenta diretamente o que vem a seguir; nunca é registrada como conversa lateral desconectada (§7).
+- **The system's sophistication follows the user's** — continuous, local calibration (per concept/objective) of pace and interest, never a level fixed once.
+- **Learning is holistic, not atomic** — every new concept integrates with what has already been learned (see the synthesis/"integration" exercises §8 and the graph across documents §10).
+- **Assessment uses objectives locked at the moment the content is generated**, not later judgment — it avoids the natural leniency of an evaluator with no pre-defined criterion (§8).
+- **The user's legitimate disagreement is not a comprehension failure** — the system confronts ideas dialectically, without flattering (§7).
+- **Knowledge is never destructively edited** — revision generates new versions, preserving the learning trajectory (§5).
+- **The learning → feedback cycle is as short as possible** — generation in small, atomic blocks whenever the concept allows, each block ending in a comprehension check (§6).
+- **The user's own interaction is the most valuable signal** — what they ask, where they select, what they get wrong feeds directly into what comes next; it is never recorded as disconnected side chat (§7).
 
 ## Architecture (from the spec)
 
@@ -60,7 +62,7 @@ Decisions that constrain how features must be built:
 
 - **Failure → remediation conversation (§8.2), not silent retry.** On a failed check, the node opens a tutor conversation in its interaction layer: explain the concept *in the exercise's context* (worked example / step-by-step of the failed problem), then propose a new similar problem whose similarity to the worked example **increases with each successive failure** (scaffolding converges toward the demonstrated solution, then difficulty ramps back up). Which explanation finally landed is high-signal for the profile (§7). Next node only fires once the objective is `demonstrated`.
 
-- **Cold start (§6.1):** one generic prompt ("O que vamos aprender?") + textbox. The agent decides from the input whether to start the living document directly or open a scope-negotiation conversation until the outline is defined.
+- **Cold start (§6.1):** one generic prompt ("What are we learning?") + textbox. The agent decides from the input whether to start the living document directly or open a scope-negotiation conversation until the outline is defined.
 
 - **Abstraction calibration is the concrete hook for §2 (§6.2).** Signal = error+question rate per concept. Advancing with no errors/questions ⇒ abstraction too low ⇒ richer language, more superficial explanation, harder atomic+integration exercises. Inverse when struggling. Continuous and local per concept, driven by the profile (§7), parameterizes generation (§6).
 
@@ -70,7 +72,7 @@ Decisions that constrain how features must be built:
 
 - **Files are the source of truth; indexes are rebuildable derived caches (§4, §10, §7.1).** Retrieval at scale needs a binary index (embedded vector store / sqlite) — this does NOT violate the "no proprietary DB" stance because the index is always reconstructible from the files; deleting it only forces reindex. Same retrieval layer serves both cross-document context (§10) and profile memory (§7.1).
 
-- **Source grounding via swappable acquisition module (§11, §11.1).** Node content is grounded in real sources cited by book+chapter or article. Acquisition is agent-driven, not manual: **LibGen** (books) + **arXiv** (papers), each an implementation behind one swappable acquisition interface (LibGen is *not* welded in — matters for the §15 hosting endgame and §16 legal risk). Fallback chain, **explicit to the user**: LibGen/arXiv → if no adequate source, internet search; web-grounded content is attributed inline ("segundo o site X ...") and its links tracked in a `SOURCES.md`. Preferred format when several exist: **EPUB > PDF > DJVU**. Regardless of format, ingestion **normalizes** everything to one internal representation (extracted text + the app's HTML dialect), so source format is an acquisition detail. Sources join the immutable corpus (§4), are fetched once and reused, and feed citation + the retrieval/embeddings layer (§10).
+- **Source grounding via swappable acquisition module (§11, §11.1).** Node content is grounded in real sources cited by book+chapter or article. Acquisition is agent-driven, not manual: **LibGen** (books) + **arXiv** (papers), each an implementation behind one swappable acquisition interface (LibGen is *not* welded in — matters for the §15 hosting endgame and §16 legal risk). Fallback chain, **explicit to the user**: LibGen/arXiv → if no adequate source, internet search; web-grounded content is attributed inline ("according to site X ...") and its links tracked in a `SOURCES.md`. Preferred format when several exist: **EPUB > PDF > DJVU**. Regardless of format, ingestion **normalizes** everything to one internal representation (extracted text + the app's HTML dialect), so source format is an acquisition detail. Sources join the immutable corpus (§4), are fetched once and reused, and feed citation + the retrieval/embeddings layer (§10).
 
 - **The living document is the only place for user notes (§9, §11).** The source viewer is **read-only** — no annotation on the source (it's immutable). Selecting text in the source is interaction, not a persistent mark: it routes into the living document (inserted/answered there, already cited by book+chapter). This keeps a single notes store and ensures user marks stay high-signal for §7, never trapped on a static source. Because the viewer is read-only, EPUB's reflow view has no downside — no need for a pixel-faithful page.
 

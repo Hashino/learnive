@@ -1,10 +1,10 @@
-//! learnive — servidor local do documento vivo.
+//! learnive — local server for the living document.
 //!
-//! Topologia (§3): backend Rust como servidor HTTP local, renderizado no
-//! navegador real do usuário. Toda I/O de arquivo é do backend; o navegador só
-//! fala com o backend por localhost. Segurança do servidor local em `security`
-//! (§3.1): bind só em 127.0.0.1, token de sessão obrigatório, Origin/Host
-//! restritos, nenhuma mutação em GET.
+//! Topology (§3): a Rust backend as a local HTTP server, rendered in the user's
+//! real browser. All filesystem I/O is the backend's; the browser only talks to
+//! the backend over localhost. Local-server security lives in `security` (§3.1):
+//! bind only to 127.0.0.1, mandatory session token, restricted Origin/Host, no
+//! state-changing GET.
 
 mod ai;
 mod api;
@@ -17,7 +17,11 @@ use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
-    // Porta fixa amigável por padrão; sobrescrevível por env para dev/testes.
+    // Load a local `.env` (if present) before reading any variable. The user's
+    // API keys (§12) live here in dev; the file is gitignored.
+    load_dotenv(".env");
+
+    // Friendly fixed port by default; overridable via env for dev/tests.
     let port: u16 = std::env::var("LEARNIVE_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -26,26 +30,60 @@ async fn main() {
     let state = app::AppState::new(port);
     let router = app::build_router(state.clone());
 
-    // Bind exclusivamente em 127.0.0.1, nunca 0.0.0.0 (§3.1).
+    // Bind exclusively to 127.0.0.1, never 0.0.0.0 (§3.1).
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("não foi possível ligar em http://127.0.0.1:{port}: {e}");
-            eprintln!("defina LEARNIVE_PORT para escolher outra porta.");
+            eprintln!("could not bind http://127.0.0.1:{port}: {e}");
+            eprintln!("set LEARNIVE_PORT to choose another port.");
             std::process::exit(1);
         }
     };
 
-    println!("learnive rodando.");
+    println!("learnive running.");
     println!(
-        "Abra no navegador: http://127.0.0.1:{port}/?token={}",
+        "Open in your browser: http://127.0.0.1:{port}/?token={}",
         state.token
     );
-    println!("O token de sessão é obrigatório em toda requisição (§3.1).");
+    println!("The session token is required on every request (§3.1).");
 
     if let Err(e) = axum::serve(listener, router).await {
-        eprintln!("servidor encerrou com erro: {e}");
+        eprintln!("server exited with error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Loads variables from a `.env` file (`KEY=VALUE` per line) into the process
+/// environment. Deliberately minimal (no dependency): ignores blank lines and
+/// comments (`#`), strips surrounding single/double quotes from the value, and
+/// **does not override** variables already present — the real environment wins.
+/// A missing file is silent (demo mode runs without a key).
+fn load_dotenv(path: &str) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Tolerate an optional leading `export `.
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        // SAFETY: single-threaded startup, before any tokio thread.
+        unsafe { std::env::set_var(key, value) };
     }
 }

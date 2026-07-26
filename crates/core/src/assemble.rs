@@ -1,18 +1,18 @@
-//! Montagem do dialeto a partir de conteúdo gerado (§4.2/§4.3).
+//! Dialect assembly from generated content (§4.2/§4.3).
 //!
-//! O modelo gera blocos semânticos de prosa **sem** IDs; o servidor atribui um
-//! `data-block-id` estável a cada bloco de topo, garantindo controle e
-//! unicidade dos IDs (a ancoragem §4.3 depende deles). É lógica de dialeto, sem
-//! I/O, então mora no core wasm-safe.
+//! The model generates semantic prose blocks **without** IDs; the server assigns
+//! a stable `data-block-id` to each top-level block, guaranteeing control and
+//! uniqueness of the IDs (the §4.3 anchoring depends on them). It is dialect
+//! logic, I/O-free, so it lives in the wasm-safe core.
 
 use scraper::{Html, Selector};
 
-/// Atribui `data-block-id` sequencial (`{prefix}{n}`) a cada elemento de topo do
-/// HTML que ainda não tenha um. Reserializa via `scraper`.
+/// Assigns a sequential `data-block-id` (`{prefix}{n}`) to each top-level element
+/// of the HTML that does not already have one. Reserializes via `scraper`.
 pub fn ensure_block_ids(inner_html: &str, prefix: &str) -> String {
     let wrapped = format!(r#"<div id="__lv_root">{inner_html}</div>"#);
     let frag = Html::parse_fragment(&wrapped);
-    let sel = Selector::parse("#__lv_root > *").expect("seletor estático");
+    let sel = Selector::parse("#__lv_root > *").expect("static selector");
 
     let mut out = String::new();
     let mut n = 1;
@@ -29,7 +29,7 @@ pub fn ensure_block_ids(inner_html: &str, prefix: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Insere ` data-block-id="id"` logo após o nome da tag de abertura.
+/// Inserts ` data-block-id="id"` right after the opening tag name.
 fn inject_attr(html: &str, id: &str) -> String {
     let Some(rest) = html.strip_prefix('<') else {
         return html.to_string();
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn assigns_ids_to_idless_blocks() {
-        let inner = "<h2>Título</h2>\n<p>Parágrafo um.</p>\n<p>Parágrafo dois.</p>";
+        let inner = "<h2>Title</h2>\n<p>Paragraph one.</p>\n<p>Paragraph two.</p>";
         let out = ensure_block_ids(inner, "b");
         assert!(out.contains(r#"data-block-id="b1""#));
         assert!(out.contains(r#"data-block-id="b2""#));
