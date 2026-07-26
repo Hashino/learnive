@@ -355,32 +355,51 @@ fn sse_frame(event: &str, data: &str) -> Bytes {
 }
 
 // ---------------------------------------------------------------------------
-// Provider selection (§12) — OpenRouter default when a key is present; otherwise
-// an offline demo mode so the loop runs without a key.
+// Provider selection (§12) — any OpenAI-compatible endpoint is swappable. Order:
+// a custom base URL (generic BYOK), else OpenRouter (default), else offline demo.
 // ---------------------------------------------------------------------------
 
-/// Builds the `Ai` from the environment. OpenRouter (default, §12) when
-/// `LEARNIVE_OPENROUTER_KEY` is set; otherwise falls back to demo mode.
+/// Builds the `Ai` from the environment (§12). Precedence:
+/// 1. `LEARNIVE_API_BASE_URL` (+ optional `LEARNIVE_API_KEY`) — any OpenAI-compatible
+///    `chat/completions` endpoint: Inception's Mercury, OpenCode Zen, a local model.
+/// 2. `LEARNIVE_OPENROUTER_KEY` — the default OpenRouter path.
+/// 3. Otherwise, offline demo mode.
 pub fn build_ai() -> Ai {
+    // Generic OpenAI-compatible provider. `base_url` is the part before
+    // `/chat/completions` (e.g. `https://api.inceptionlabs.ai/v1`).
+    if let Ok(base_url) = std::env::var("LEARNIVE_API_BASE_URL")
+        && !base_url.is_empty()
+    {
+        let key = std::env::var("LEARNIVE_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        return Ai::new(
+            Provider::OpenAiCompat(OpenAiCompat::new(base_url, key)),
+            models_from_env(),
+        );
+    }
+
     match std::env::var("LEARNIVE_OPENROUTER_KEY") {
-        Ok(key) if !key.is_empty() => {
-            let fast = std::env::var("LEARNIVE_MODEL_FAST")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".into());
-            let robust =
-                std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "openai/gpt-4o".into());
-            Ai::new(
-                Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
-                Models::new(fast, robust),
-            )
-        }
+        Ok(key) if !key.is_empty() => Ai::new(
+            Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
+            models_from_env(),
+        ),
         _ => {
             eprintln!(
                 "No AI key configured — running in DEMO MODE (canned content). \
-                 Configure OpenRouter at setup for real content."
+                 Configure a provider (see .env.example) for real content."
             );
             demo_ai()
         }
     }
+}
+
+/// Reads the fast/robust model pair from the environment (§12.1). Defaults are
+/// OpenRouter model ids; for other providers set both explicitly (e.g. `mercury-2`).
+fn models_from_env() -> Models {
+    let fast = std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
+    let robust = std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "openai/gpt-4o".into());
+    Models::new(fast, robust)
 }
 
 /// Demo-mode `Ai`: a mock that answers differently per sub-task, closing the

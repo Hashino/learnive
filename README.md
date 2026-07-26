@@ -47,7 +47,9 @@ cargo run
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LEARNIVE_OPENROUTER_KEY` | *(unset → demo mode)* | OpenRouter API key (§12). |
+| `LEARNIVE_API_BASE_URL` | *(unset)* | Any OpenAI-compatible endpoint (before `/chat/completions`), e.g. Mercury/Inception, OpenCode Zen, a local model. Takes precedence over OpenRouter (§12). |
+| `LEARNIVE_API_KEY` | *(unset)* | API key for `LEARNIVE_API_BASE_URL`. |
+| `LEARNIVE_OPENROUTER_KEY` | *(unset → demo mode)* | OpenRouter API key, the default path (§12). |
 | `LEARNIVE_MODEL_FAST` | `openai/gpt-4o-mini` | Light/fast tier: exercises, grading, summaries (§12.1). |
 | `LEARNIVE_MODEL_ROBUST` | `openai/gpt-4o` | Robust tier: explanatory prose, confrontation (§12.1). |
 | `LEARNIVE_PORT` | `7420` | Port to bind on `127.0.0.1`. |
