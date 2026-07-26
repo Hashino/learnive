@@ -8,6 +8,7 @@
 
 mod ai;
 mod app;
+mod engine;
 mod security;
 mod store;
 

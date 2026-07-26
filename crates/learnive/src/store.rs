@@ -164,6 +164,29 @@ impl Store {
         self.write_node(&node)
     }
 
+    /// Grava um arquivo auxiliar **server-only** dentro do diretório do
+    /// documento (ex.: `outline.json`, `<node>.rubric.json`). Nunca é servido ao
+    /// cliente — é o que mantém o rubric travado (§8) invisível ao aluno.
+    pub fn write_doc_file(&self, doc_id: &str, filename: &str, contents: &str) -> Result<()> {
+        ensure_safe_id(doc_id)?;
+        ensure_safe_filename(filename)?;
+        fs::create_dir_all(self.doc_dir(doc_id))?;
+        write_atomic(&self.doc_dir(doc_id).join(filename), contents)?;
+        Ok(())
+    }
+
+    /// Lê um arquivo auxiliar do diretório do documento.
+    pub fn read_doc_file(&self, doc_id: &str, filename: &str) -> Result<String> {
+        ensure_safe_id(doc_id)?;
+        ensure_safe_filename(filename)?;
+        let path = self.doc_dir(doc_id).join(filename);
+        match fs::read_to_string(&path) {
+            Ok(s) => Ok(s),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound(path)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn doc_dir(&self, doc_id: &str) -> PathBuf {
         self.root.join(doc_id)
     }
@@ -184,6 +207,22 @@ fn ensure_safe_id(id: &str) -> Result<()> {
         Ok(())
     } else {
         Err(StoreError::InvalidId(id.to_string()))
+    }
+}
+
+/// Como `ensure_safe_id`, mas permite um único sufixo de extensão (ex.:
+/// `outline.json`, `n1.rubric.json`). Continua bloqueando `/` e `..`.
+fn ensure_safe_filename(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !name.contains("..");
+    if ok {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidId(name.to_string()))
     }
 }
 
@@ -274,6 +313,33 @@ mod tests {
         ));
         assert!(matches!(
             store.create_document("a/b"),
+            Err(StoreError::InvalidId(_))
+        ));
+    }
+
+    #[test]
+    fn doc_files_round_trip_and_reject_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+
+        store
+            .write_doc_file("algebra", "n1.rubric.json", r#"{"objectives":[]}"#)
+            .unwrap();
+        assert_eq!(
+            store.read_doc_file("algebra", "n1.rubric.json").unwrap(),
+            r#"{"objectives":[]}"#
+        );
+
+        // Sidecars não aparecem como nós.
+        store.write_node(&sample_node("algebra", "n1")).unwrap();
+        assert_eq!(store.list_nodes("algebra").unwrap(), vec!["n1"]);
+
+        assert!(matches!(
+            store.read_doc_file("algebra", "../secret"),
+            Err(StoreError::InvalidId(_))
+        ));
+        assert!(matches!(
+            store.write_doc_file("algebra", ".hidden", "x"),
             Err(StoreError::InvalidId(_))
         ));
     }

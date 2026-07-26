@@ -13,9 +13,11 @@
 //!   *referenciam* IDs da camada de conteúdo, nunca a alteram.
 
 pub mod anchor;
+pub mod assemble;
 pub mod node;
 
 pub use anchor::{Anchor, QuoteSelector, ResolvedAnchor, resolve_quote};
+pub use assemble::ensure_block_ids;
 pub use node::{
     Citation, ContentBlock, ContentLayer, Exercise, InteractionItem, Node, Objective,
     ObjectiveType, ParseError, ThreadKind,
