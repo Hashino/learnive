@@ -573,12 +573,21 @@
           "function send(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');}" +
           "function reportHeight(){parent.postMessage({type:'learnive-height',height:document.documentElement.scrollHeight},'*');}" +
           "function applyTheme(t){document.body.setAttribute('data-t',t);document.documentElement.style.colorScheme=t;reportHeight();}" +
-          // A form submit (Enter, or the exercise's own submit button) sends the answer.
+          // Submitting must always send — even with blank fields (blank → graded
+          // as fail → remediation §8.2). Disable native 'required' validation so a
+          // deliberate blank submit via Enter isn't silently blocked.
+          "var form=document.querySelector('form');if(form)form.setAttribute('novalidate','');" +
           "document.addEventListener('submit',function(e){e.preventDefault();send();});" +
-          // Only add a fallback submit button if the exercise provides none — the
-          // model is asked to include its own (in the content language), so this
-          // avoids the duplicate 'Enviar'/'Submit' buttons.
-          "if(!document.querySelector('button,input[type=submit],input[type=image]')){var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='Submit answer';b.addEventListener('click',send);p.appendChild(b);document.body.appendChild(p);}" +
+          // Wire the exercise's submit control directly so a click ALWAYS works —
+          // even if it's type=button, sits outside a form, or native validation
+          // would block a blank submit. In a simple exercise (a form or a single
+          // field) the sole button is treated as submit; interactive exercises
+          // (many buttons) are left to their own postMessage.
+          "var sb=document.querySelector('button[type=submit],input[type=submit]');" +
+          "if(!sb){var bs=document.querySelectorAll('button');if(bs.length===1&&(form||document.querySelector('input,textarea,select')))sb=bs[0];}" +
+          "if(sb){sb.addEventListener('click',function(e){e.preventDefault();send();});}" +
+          // No submit control at all → add a fallback button.
+          "else if(!document.querySelector('button,input[type=submit],input[type=image]')){var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='Submit answer';b.addEventListener('click',function(e){e.preventDefault();send();});p.appendChild(b);document.body.appendChild(p);}" +
           "window.addEventListener('message',function(e){var d=e.data;if(d&&d.type==='learnive-theme')applyTheme(d.theme==='light'?'light':'dark');});" +
           "if(window.ResizeObserver){new ResizeObserver(reportHeight).observe(document.body);}" +
           "window.addEventListener('load',reportHeight);setTimeout(reportHeight,60);" +

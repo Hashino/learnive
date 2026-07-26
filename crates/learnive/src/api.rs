@@ -424,7 +424,7 @@ fn demo_responder(req: &crate::ai::ChatRequest) -> String {
     if text.contains("JSON array of strings") {
         r#"["Introduction to the topic", "Core concept", "Practical application"]"#.to_string()
     } else if text.contains("exercise_html") {
-        r#"{"exercise_html":"<form><p>Explain the concept in your own words and apply it to a new case:</p><textarea name=\"answer\" rows=\"4\"></textarea></form>","objectives":[{"id":"o1","kind":"application","description":"Apply the concept to a new case","criteria":"The answer transfers the concept to a scenario not covered in the text","transfer":true}]}"#.to_string()
+        r#"{"exercise_html":"<form><p>Explain the concept in your own words and apply it to a new case:</p><textarea name=\"answer\" rows=\"4\" required></textarea><p><button type=\"submit\">Submit answer</button></p></form>","objectives":[{"id":"o1","kind":"application","description":"Apply the concept to a new case","criteria":"The answer transfers the concept to a scenario not covered in the text","transfer":true}]}"#.to_string()
     } else if text.contains("locked rubric") {
         // Demo: always demonstrated, so the loop advances end to end.
         r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"Good transfer of the concept to a new case."}]}"#.to_string()
