@@ -1,133 +1,133 @@
-# PLAN.md — learnive development plan
+# PLAN.md — Plano de desenvolvimento do learnive
 
-> Checkbox legend: `[x]` done · `[~]` partial (the essentials exist, the noted part is missing) · `[ ]` to do.
+> Legenda das checkboxes: `[x]` feito · `[~]` parcial (o essencial existe, falta o anotado) · `[ ]` a fazer.
 
-> Living document. This plan **can and should** change as development advances — especially because almost all of the project's risk is *calibration* (assessment quality, profile fidelity, cross-ref sensitivity), which is only learned by using. The `§N` references point to the sections of `SPEC.md` (the authoritative specification).
+> Documento vivo. Este plano **pode e deve** mudar conforme o desenvolvimento avança — especialmente porque quase todo o risco do projeto é de *calibração* (qualidade de avaliação, fidelidade do perfil, sensibilidade de cross-ref), coisa que só se aprende usando. As referências `§N` apontam para as seções do `SPEC.md` (especificação autoritativa).
 
-## Phasing principle
+## Princípio de faseamento
 
-The order is not "one complete subsystem at a time", it is **full loop first, depth later**. Phase 1 exercises the central thesis end to end with minimal depth; Phase 2 deepens each subsystem to the quality of the spec, still with **a single living document**; Phase 3 adds the graph across multiple documents. Each phase is genuinely usable when it is finished.
+A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro, profundidade depois**. A Fase 1 exercita a tese central ponta-a-ponta com o mínimo de profundidade; a Fase 2 aprofunda cada subsistema até a qualidade da spec, ainda com **um único documento vivo**; a Fase 3 adiciona o grafo entre múltiplos documentos. Cada fase é usável de verdade ao terminar.
 
 ---
 
-## Phase 1 — Minimum complete loop (vertical slice)
+## Fase 1 — Loop completo mínimo (fatia vertical)
 
-**Goal:** prove the central thesis with a working end-to-end path: a topic → node generated on demand → comprehension check with a locked rubric → grading fires the next node. Minimal depth in everything; what matters is that the *cycle* closes.
+**Objetivo:** provar a tese central com um caminho ponta-a-ponta funcionando: um tema → nó gerado sob demanda → checagem de compreensão com rubric travado → avaliação dispara o próximo nó. Profundidade mínima em tudo; o que importa é o *ciclo* fechar.
 
-**Minimal foundation (what the loop requires to exist):**
-- [x] `axum` server bound only to `127.0.0.1`; mandatory session token; strict `Origin`/CORS validation; no state-changing endpoint on GET (§3.1).
-- [x] Server→client streaming of generated content (§3) — the SSE format over a POST (read via `fetch`), because `EventSource` does not carry the token nor POST, and §3.1 forbids state-changing GET.
-- [~] **Frontend**: minimal vanilla JS + token-by-token streaming done. Missing: vendored HTMX, the **wasm** anchoring module, the scroll-based reading line, optimistic UI (§3).
-- [~] **Sandbox for generated interactive blocks (§3.1, §4.4)**: the exercise renders in an `<iframe sandbox>` (only `allow-scripts`, no `allow-same-origin`) and returns the answer via `postMessage`; prose/remediation (LLM HTML in the app origin) is **sanitized** on the client; a restrictive CSP on every response. The **HTML contract** (what the sanitizer allows/removes, and the sandbox freedom + `postMessage`) is told to the model in the prompts (`PROSE_HTML_CONTRACT`/`EXERCISE_HTML_CONTRACT` in `engine.rs`), mirroring the sanitizer so it does not generate something that disappears on render. Missing: an artifact schema locked together with the rubric and validated; server-side sanitization too (defense in depth, ideally derived from the same contract) and a CSP without `'unsafe-inline'` (externalize the inline JS).
-- [~] AI provider: swappable seam + OpenRouter path + OAuth PKCE primitives ready; runs in demo mode without a key. Missing: the OAuth browser round-trip + keychain (with the setup, §12).
-- [x] File storage: one directory = one living document, one HTML file per node (§4, §4.1).
-- [x] **Two-layer node contract (§4.3)**: frozen content with `data-block-id` + append-only interaction; anchoring by ID with a fuzzy quote fallback; v0 vocabulary.
+**Fundação mínima (o que o loop exige para existir):**
+- [x] Servidor `axum` bindado só em `127.0.0.1`; token de sessão obrigatório; validação de `Origin`/CORS restritiva; nenhum endpoint mutável em GET (§3.1).
+- [x] Streaming de conteúdo gerado servidor→cliente (§3) — formato SSE sobre um POST (lido via `fetch`), porque `EventSource` não carrega o token nem faz POST e a §3.1 proíbe mutação em GET.
+- [~] **Frontend**: JS vanilla mínimo + streaming token-a-token feitos. Falta: HTMX vendorizado, módulo **wasm** de ancoragem, linha de leitura por scroll, UI otimista (§3).
+- [~] **Sandbox de blocos interativos gerados (§3.1, §4.4)**: exercício renderiza em `<iframe sandbox>` (só `allow-scripts`, sem `allow-same-origin`) e devolve a resposta por `postMessage`; prosa/remediação (HTML de LLM na origem da app) é **sanitizada** no cliente; CSP restritiva em toda resposta. O **contrato de HTML** (o que o sanitizador permite/remove, e a liberdade+`postMessage` do sandbox) é informado ao modelo nos prompts (`PROSE_HTML_CONTRACT`/`EXERCISE_HTML_CONTRACT` em `engine.rs`), espelhando o sanitizador para ele não gerar algo que some na renderização. Falta: schema de artefato travado junto ao rubric e validado; sanitização também server-side (defesa em profundidade, idealmente derivando do mesmo contrato) e CSP sem `'unsafe-inline'` (externalizar o JS inline).
+- [~] Provedor de IA: seam trocável + caminho OpenRouter + primitivas OAuth PKCE prontos; roda em modo demo sem chave. Falta: round-trip OAuth pelo navegador + keychain (com o setup, §12).
+- [x] Armazenamento em arquivos: um diretório = um documento vivo, um arquivo HTML por nó (§4, §4.1).
+- [x] **Contrato do nó em duas camadas (§4.3)**: conteúdo congelado com `data-block-id` + interação append-only; ancoragem por ID com fallback fuzzy por quote; vocabulário v0.
 
 **Loop:**
-- [~] **Cold start (§6.1)**: single question "What are we learning?" → generates an outline. Missing: the agent deciding to open a scope-negotiation conversation instead of starting directly.
-- [x] Initial outline generation from the topic (§6).
-- [x] On-demand node generation (§6).
-- [~] Objectives generated **together** with the content; rubric locked at creation (server-only); per-objective grade in `{not demonstrated, partial, demonstrated}`; a transfer item. Missing: grounding the exercise in a real source (§8, depends on acquisition §11.1).
-- [~] "Living document" UI: streamed prose + sandboxed interactive exercise + outline (§4.4, §9). Missing: the highlighted reading line and text-selection + question that edits the document (§9).
-- [x] **Remediation on failure (§8.2)**: an append-only tutor thread in the exercise's context, with increasing similarity per attempt; only advances when `demonstrated`.
-- [ ] **Abstraction-level calibration (§6.2)**: raise/lower abstraction per concept based on error + question rate.
-- [ ] Minimal profile: record interactions and feed the recent context of the next node (§7).
-- [x] Advance on grading the exercise ("next" button); fine pause/redirect is a later refinement (§9).
+- [~] **Cold start (§6.1)**: pergunta única "O que vamos aprender?" → gera outline. Falta: o agente decidir por abrir conversa de negociação de escopo em vez de iniciar direto.
+- [x] Geração de outline inicial a partir do tema (§6).
+- [x] Geração de nó sob demanda (§6).
+- [~] Objetivos gerados **junto** com o conteúdo; rubric travado na criação (server-only); nota por objetivo em `{não demonstrado, parcial, demonstrado}`; item de transferência. Falta: fundamentar o exercício em fonte real (§8, depende da aquisição §11.1).
+- [~] UI "documento vivo": prosa streamada + exercício interativo em sandbox + outline (§4.4, §9). Falta: linha de leitura em destaque e seleção de texto + pergunta que edita o documento (§9).
+- [x] **Remediação na falha (§8.2)**: thread de tutor append-only no contexto do exercício, com similaridade crescente por tentativa; só avança quando `demonstrado`.
+- [ ] **Calibração de nível de abstração (§6.2)**: subir/baixar abstração por conceito conforme erro+pergunta.
+- [ ] Perfil mínimo: registrar interações e alimentar o contexto recente do próximo nó (§7).
+- [x] Avanço ao avaliar o exercício (botão "próximo"); pausa/redirecionamento fino é refino posterior (§9).
 
-**Responsiveness in this phase (Phase 1 must be pleasant, otherwise it fails its purpose) (§14):**
-- [x] Token-by-token streaming in the document focused on **time-to-first-token**, not time-to-complete.
-- [ ] **Predictive prefetch** of the next node(s) over the outline while the user reads/answers — cost-aware (§6).
-- [x] Pipeline within the node: prose (robust) streams first; exercise + rubric in a separate call (rubric locked before submission, §8).
-- [x] Basic model tiering: light for exercise/grading, robust for prose (§12.1) — routed per sub-task and swappable.
-- [ ] Optimistic UI: the user's action reflects in the document immediately, no blocking modal.
+**Responsividade nesta fase (a Fase 1 tem que ser prazerosa, senão não cumpre seu propósito) (§14):**
+- [x] Streaming token-a-token no documento com foco em **time-to-first-token**, não tempo até completar.
+- [ ] **Prefetch preditivo** do(s) próximo(s) nó(s) sobre o outline enquanto o usuário lê/responde — cost-aware (§6).
+- [x] Pipeline dentro do nó: prosa (robusto) streama primeiro; exercício + rubric numa chamada separada (rubric travado antes da submissão, §8).
+- [x] Model tiering básico: leve para exercício/correção, robusto para prosa (§12.1) — roteado por sub-tarefa e trocável.
+- [ ] UI otimista: ação do usuário reflete na hora no documento, sem modal bloqueante.
 
-**Provider/model setup in this phase (§12, §12.1):**
-- [~] **OpenRouter OAuth as the default option**; direct BYOK as an option. Selection via environment today; the setup screen is missing.
-- [ ] Choice by **intent** (free vs paid), not by model name; recommended pairing applied automatically.
-- [x] Graceful degradation: a single model serves both tiers (`Models::single`) — tiering never blocks starting.
-- [ ] Basic cost control (§12.2): show running spend + a simple limit that throttles prefetch before pausing generation.
+**Setup de provedor/modelo nesta fase (§12, §12.1):**
+- [~] **OpenRouter OAuth como opção padrão**; BYOK direto como opção. Seleção via ambiente hoje; falta a tela de setup.
+- [ ] Escolha por **intenção** (gratuito vs pago), não por nome de modelo; pairing recomendado aplicado automaticamente.
+- [x] Degradação graciosa: um só modelo serve os dois tiers (`Models::single`) — tiering nunca bloqueia começar.
+- [ ] Controle de custo básico (§12.2): exibir gasto corrente + um limite simples que estrangula o prefetch antes de pausar a geração.
 
-**Source grounding in this phase (crawl from the start):**
-- [ ] Crawl of **LibGen (books) + arXiv (articles)** already in the loop, behind a **swappable acquisition interface** (§11.1). A simple version — without refined format preference or full normalization (Phase 2).
-- [ ] **Explicit fallback to web search** when LibGen/arXiv produce no source; web content attributed inline ("according to site X ..."), links recorded in `SOURCES.md` (§11, §11.1).
-- [ ] Nodes cite book/chapter or article; immutable corpus, single download reused (§11).
+**Fundamentação de fonte nesta fase (crawl desde o início):**
+- [ ] Crawl do **LibGen (livros) + arXiv (artigos)** já no loop, atrás de uma **interface de aquisição trocável** (§11.1). Versão simples — sem preferência de formato refinada nem normalização completa (Fase 2).
+- [ ] **Fallback explícito para busca web** quando LibGen/arXiv não produzem fonte; conteúdo web atribuído inline ("segundo o site X ..."), links registrados em `SOURCES.md` (§11, §11.1).
+- [ ] Nós citam livro/capítulo ou artigo; acervo imutável, download único reaproveitado (§11).
 
-**Out of scope in this phase:** multiple documents and cross-referencing; the retrieval/embeddings layer; the non-destructive versioned revision chain (§5); long-term profile compaction (§7.1); complete provider onboarding (§12); a polished source viewer; the EPUB>PDF>DJVU format preference and normalization (§11.1).
+**Fora de escopo nesta fase:** múltiplos documentos e cross-referência; camada de retrieval/embeddings; cadeia de revisão versionada não-destrutiva (§5); compactação de perfil no longo prazo (§7.1); onboarding completo de provedores (§12); viewer da fonte polido; preferência de formato EPUB>PDF>DJVU e normalização (§11.1).
 
-**Done criterion:** a user can start from a topic, read nodes generated from real sources (LibGen/arXiv, or web with explicit attribution), be assessed, receive remediation on failure, and see the curriculum advance/adjust — all without leaving the loop.
-
----
-
-## Phase 2 — Complete application, single living document
-
-**Goal:** bring each subsystem to the quality of the spec, still within **a single living document** (no graph across documents). This is where the product becomes genuinely good; the calibration decisions learned in Phase 1 guide the depth.
-
-**AI providers (§12, §12.1):**
-- [ ] OpenRouter OAuth PKCE as the default path (one-click connection).
-- [ ] Direct BYOK (Anthropic, OpenAI, OpenCode Zen) with immediate key validation and a link to key generation.
-- [ ] Key storage in the OS keychain.
-- [ ] Maintained recommended pairings per provider/tier + an advanced model override; minimal explanation with examples at setup.
-- [ ] Free tier with rate-limit handling (queue/fallback/degradation) without breaking the session.
-
-**Deepening the interactive generative HTML (§4.4) — the basic sandbox+protocol has existed since Phase 1:**
-- [ ] Raise the quality/reliability of the generated visualizations and interactive exercises (the chosen mode — arbitrary JS always sandboxed — has variance; measure and harden the prompts/artifact validation).
-- [ ] Cache/reuse of widgets and checking the artifact schema against the rubric at generation.
-
-**Deepening responsiveness (§14) — the basics have existed since Phase 1:**
-- [ ] Speculative prefetch of multiple branches with a refined cost-aware policy; separate skeleton generation (predictable) from the post-grade calibration delta.
-- [ ] Per-sub-task tuned tiering (measure where the light model suffices vs. where it degrades quality).
-
-**Deepening source grounding (§11, §11.1) — the basic crawl has existed since Phase 1:**
-- [ ] Robust version selection: most recent edition, user's language when possible (fallback to another language).
-- [ ] Format preference **EPUB > PDF > DJVU**; normalization of any format into the internal representation (extracted text + HTML dialect).
-- [ ] **Read-only** source viewer; selecting in the source routes the cited passage to the living document (§11).
-
-**Canonical node serialization (§4, §4.3):**
-- [ ] Stable attribute order when re-emitting the node HTML (`scraper`'s `inner_html` does not preserve byte-for-byte order) — for clean diffs in the "human-readable files" spirit of §4. Today the content is normalized at ingestion and frozen; canonicalizing the output is missing.
-
-**Versioned concept graph (§5):**
-- [ ] Non-destructive revision: revisiting a concept generates a new version node; the original stays intact with anchored annotations.
-- [ ] Version chain via front-matter/sequential name; future references point to the most recent tip.
-
-**Complete curriculum engine (§6):**
-- [ ] Prune/expand/reorder nodes based on the assessment; scope negotiation during generation; flexible atomic granularity.
-
-**Complete assessment engine (§8, §8.1):**
-- [ ] Synthesis exercises crossing distant nodes **within the document** (integration test).
-- [ ] Rubrics for non-deterministic domains: ideological Turing test, position mapping, consistency over time.
-
-**Complete memory / profile (§7, §7.1):**
-- [ ] Immutable append-only event log + profile as a materialized projection.
-- [ ] Multi-resolution memory (recent verbatim → summaries → distilled traits + per-concept retention).
-- [ ] Derived/rebuildable retrieval index (embedded vector store / sqlite) — needed already here because a profile used over months requires retrieval (§4, §10).
-- [ ] Decay and versioned revision of profile beliefs (reuses the §5 philosophy).
-- [ ] User-inspectable and editable profile.
-- [ ] Adversarial behavior: build the strongest counter-argument; distinguish legitimate disagreement from failed comprehension.
-- [ ] Living-document annotations visible to the user and the AI.
-
-**Out of scope in this phase:** multiple living documents; summaries/links/side panel across documents; cross-reference sensitivity control.
-
-**Done criterion:** a single living document works at the full depth of the spec — real LibGen sources, versioned revision, rich assessment, a profile that survives prolonged use.
+**Critério de pronto:** um usuário consegue partir de um tema, ler nós gerados a partir de fontes reais (LibGen/arXiv, ou web com atribuição explícita), ser avaliado, receber remediação na falha e ver o currículo avançar/ajustar — tudo sem sair do loop.
 
 ---
 
-## Phase 3 — Multiple living documents + cross-referencing ("second brain", §10)
+## Fase 2 — Aplicação completa, documento vivo único
 
-**Goal:** turn the set of living documents into a cross-referencing graph.
+**Objetivo:** levar cada subsistema à qualidade da spec, ainda dentro de **um único documento vivo** (sem grafo entre documentos). É aqui que o produto fica realmente bom; as decisões de calibração aprendidas na Fase 1 orientam a profundidade.
 
-- [ ] Multiple living documents as a cross-referenced graph.
-- [ ] When a learning depends on knowledge from another document: a brief summary + link, possibly opening a side panel that renders the content + the user's notes from that other document/node.
-- [ ] Scale the retrieval layer (the Phase 2 index) to the whole document corpus.
-- [ ] Integration exercises crossing nodes from **different documents** (§8).
-- [ ] **Cross-reference sensitivity control** adjustable by the user over time — §10 marks this as the biggest risk (calibration, not technical): firing too often becomes noise, too rarely loses value.
+**Provedores de IA (§12, §12.1):**
+- [ ] OpenRouter OAuth PKCE como caminho default (conexão em um clique).
+- [ ] BYOK direto (Anthropic, OpenAI, OpenCode Zen) com validação imediata da chave e link para geração.
+- [ ] Armazenamento de chave no keychain do SO.
+- [ ] Pairings recomendados mantidos por provedor/tier + override avançado de modelo; explicação mínima com exemplos no setup.
+- [ ] Tier gratuito com tratamento de rate limit (fila/fallback/degradação) sem quebrar a sessão.
 
-**Done criterion:** the user navigates between living documents with useful, adjustable cross-references, without noise.
+**Aprofundamento do HTML generativo interativo (§4.4) — o sandbox+protocolo básico já existe desde a Fase 1:**
+- [ ] Elevar qualidade/confiabilidade das visualizações e exercícios interativos gerados (o modo escolhido — JS arbitrário sempre em sandbox — tem variância; medir e endurecer prompts/validação do artefato).
+- [ ] Cache/reaproveitamento de widgets e checagem do schema de artefato contra o rubric na geração.
+
+**Aprofundamento de responsividade (§14) — o básico já existe desde a Fase 1:**
+- [ ] Prefetch especulativo de múltiplos ramos com política cost-aware refinada; separar geração do esqueleto (previsível) do delta de calibração pós-nota.
+- [ ] Tiering afinado por sub-tarefa (medir onde o modelo leve basta vs. onde degrada a qualidade).
+
+**Aprofundamento da fundamentação de fontes (§11, §11.1) — o crawl básico já existe desde a Fase 1:**
+- [ ] Seleção de versão robusta: edição mais recente, língua do usuário quando possível (fallback a outra língua).
+- [ ] Preferência de formato **EPUB > PDF > DJVU**; normalização de qualquer formato para a representação interna (texto extraído + dialeto HTML).
+- [ ] Viewer da fonte **só-leitura**; seleção na fonte roteia trecho citado para o documento vivo (§11).
+
+**Serialização canônica do nó (§4, §4.3):**
+- [ ] Ordem de atributo estável na reemissão do HTML do nó (o `inner_html` do `scraper` não preserva ordem byte a byte) — para diffs limpos no espírito "arquivos legíveis por humano" da §4. Hoje o conteúdo é normalizado na ingestão e congelado; falta canonicalizar a saída.
+
+**Grafo de conceitos versionado (§5):**
+- [ ] Revisão não-destrutiva: revisitar conceito gera novo nó de versão; original intacto com anotações ancoradas.
+- [ ] Cadeia de versão via front-matter/nome sequencial; referências futuras apontam para a ponta mais recente.
+
+**Motor de currículo completo (§6):**
+- [ ] Podar/expandir/reordenar nós conforme a avaliação; negociação de escopo durante a geração; granularidade atômica flexível.
+
+**Motor de avaliação completo (§8, §8.1):**
+- [ ] Exercícios de síntese cruzando nós distantes **dentro do documento** (teste de integração).
+- [ ] Rubrics para domínios não-determinísticos: teste de Turing ideológico, mapeamento de posição, consistência ao longo do tempo.
+
+**Memória / perfil completo (§7, §7.1):**
+- [ ] Log de eventos imutável append-only + perfil como projeção materializada.
+- [ ] Memória multi-resolução (recente verbatim → resumos → traços destilados + retenção por conceito).
+- [ ] Índice de recuperação derivado/reconstruível (vector store embutido / sqlite) — necessário já aqui porque o perfil em uso por meses exige retrieval (§4, §10).
+- [ ] Decaimento e revisão versionada de crenças do perfil (reusa a filosofia da §5).
+- [ ] Perfil inspecionável e editável pelo usuário.
+- [ ] Comportamento adversarial: construir o contra-argumento mais forte; distinguir discordância legítima de falha de compreensão.
+- [ ] Anotações no documento vivo visíveis a usuário e IA.
+
+**Fora de escopo nesta fase:** múltiplos documentos vivos; resumos/links/sidepanel entre documentos; controle de sensibilidade de cross-referência.
+
+**Critério de pronto:** um único documento vivo funciona em toda a profundidade da spec — fontes reais do LibGen, revisão versionada, avaliação rica, perfil que sobrevive a uso prolongado.
 
 ---
 
-## Cross-cutting risks (apply to all phases)
+## Fase 3 — Múltiplos documentos vivos + cross-referência ("segundo cérebro", §10)
 
-- **Assessment quality is the cornerstone** — the entire adaptive engine adapts on top of the "understood?" signal. A weak signal = adaptation on noise. The rubric locked at generation (§8) is the mitigation; even so it is the riskiest dependency.
-- **Cost/latency of atomic nodes** — a short cycle multiplies LLM calls. BYOK pushes the cost to the user, but the per-node latency is UX. Monitor the atomic ↔ number-of-rounds tension.
-- **Grounding fidelity** — text extraction varies by format; the LLM can still drift from the source. Citation + visible source audit, they do not prevent.
-- **Profile-compaction calibration** (§7.1) — deciding what to forget is judgment, not a closed algorithm. The immutable log makes errors recoverable; the inspectable profile makes them correctable.
+**Objetivo:** transformar o conjunto de documentos vivos num grafo que se cross-referencia.
+
+- [ ] Múltiplos documentos vivos como grafo cross-referenciado.
+- [ ] Quando um aprendizado depende de conhecimento de outro documento: resumo breve + link, possivelmente abrindo sidepanel que renderiza o conteúdo + notas do usuário daquele outro documento/nó.
+- [ ] Escalar a camada de retrieval (o índice da Fase 2) para todo o acervo de documentos.
+- [ ] Exercícios de integração cruzando nós de **documentos diferentes** (§8).
+- [ ] **Controle de sensibilidade de cross-referência** ajustável pelo usuário ao longo do tempo — a §10 marca isso como o maior risco (calibração, não técnico): acionar demais vira ruído, de menos perde valor.
+
+**Critério de pronto:** o usuário navega entre documentos vivos com referências cruzadas úteis e ajustáveis, sem ruído.
+
+---
+
+## Riscos transversais (valem para todas as fases)
+
+- **Qualidade da avaliação é a pedra angular** — todo o motor adaptativo adapta em cima do sinal "entendeu?". Sinal fraco = adaptação em ruído. Rubric travado na geração (§8) é a mitigação; ainda assim é a dependência mais arriscada.
+- **Custo/latência dos nós atômicos** — ciclo curto multiplica chamadas de LLM. BYOK joga o custo pro usuário, mas a latência por nó é UX. Monitorar a tensão atômico ↔ número de rodadas.
+- **Fidelidade do grounding** — extração de texto varia por formato; o LLM ainda pode se afastar da fonte. Citação + fonte visível auditam, não previnem.
+- **Calibração da compactação de perfil** (§7.1) — decidir o que esquecer é julgamento, não algoritmo fechado. Log imutável torna erros recuperáveis; perfil inspecionável torna-os corrigíveis.

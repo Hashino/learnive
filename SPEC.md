@@ -1,269 +1,269 @@
-# learnive — Specification of the Self-Directed Exploratory Learning Platform
+# learnive — Especificação da Plataforma de Aprendizado Explorativo Autodirigido
 
-## 1. Overview
+## 1. Visão geral
 
-A self-directed learning application that generates, for every topic/idea/problem the user wants to explore, an adaptive curriculum in the form of a "generative book". The system does not deliver a fixed curriculum: it builds the material progressively, assesses the user's real understanding at each step, and uses that assessment to decide what comes next — including revisiting and revising already-taught concepts.
+Aplicação de aprendizado autodirigido que gera, para cada tema/ideia/problema que o usuário quer explorar, um currículo adaptativo em formato de "livro generativo". O sistema não entrega um currículo fixo: constrói o material progressivamente, avalia a compreensão real do usuário a cada etapa, e usa essa avaliação para decidir o que vem a seguir — incluindo revisitar e revisar conceitos já ensinados.
 
-## 2. Target audience and central design principle
+## 2. Público-alvo e princípio de design central
 
-- Primary target user: a polymath seeking a holistic learning curriculum that they control themselves.
-- Design principle: it is **not** a system designed "for sophisticated users" — it is a system that must be **as sophisticated as the user is**. The same need to calibrate pace and to use personal interests to make learning enjoyable applies equally to someone gifted and to someone with a learning difficulty. Calibration is continuous and local (per concept/objective), not a general level fixed once.
+- Usuário-alvo primário: um polímata buscando um currículo de aprendizado holístico que ele mesmo controla.
+- Princípio de design: **não** é um sistema desenhado "para usuários sofisticados" — é um sistema que deve ser **tão sofisticado quanto o usuário for**. A mesma necessidade de calibração de ritmo e uso de interesses pessoais para tornar o aprendizado prazeroso se aplica igualmente a alguém superdotado ou a alguém com dificuldade de aprendizado. A calibração é contínua e local (por conceito/objetivo), não um nível geral fixado uma vez.
 
-## 3. Overall architecture
+## 3. Arquitetura geral
 
-- **Language**: Rust — makes it easy to compile binaries for multiple operating systems.
-- **Topology**: a Rust backend running locally as an HTTP server; the frontend rendered in the user's own browser (not an embedded webview like Tauri/Electron). The backend does all file reading/writing — the browser never touches the filesystem directly, it only talks to the backend over the local network.
-- **Streaming**: Server-Sent Events (SSE) to push incrementally generated content to the on-screen document — the main flow is server→client. User actions (selecting text, asking, answering an exercise) are ordinary HTTP requests.
-- **HTTP framework**: `axum` (native SSE support).
-- **Frontend**: **HTMX** as the backbone (server→client HTML swaps, SSE, forms — HTMX's model is exactly the §3 flow) + **minimal vanilla JavaScript** only for what is genuinely client state (text selection, scroll-based reading line, token-by-token streaming, optimistic UI) + a **WebAssembly module** compiled from the same Rust crate for the §4.3 anchoring (block/quote resolution written once, no JS reimplementation and no drift). **No JS VDOM framework (React/etc.)**: the canonical data is the HTML itself (§4.2), so a VDOM that wants JSON state as the source of truth would be impedance — the server generates the dialect, the client displays it. No build step for the page; assets embedded in the binary (portability §15).
+- **Linguagem**: Rust — facilita compilação de binários para múltiplos sistemas operacionais.
+- **Topologia**: backend Rust rodando localmente como servidor HTTP; frontend renderizado no navegador do próprio usuário (não é um webview embutido tipo Tauri/Electron). O backend faz toda leitura/escrita de arquivo — o navegador nunca acessa o filesystem diretamente, só fala com o backend via rede local.
+- **Streaming**: Server-Sent Events (SSE) para empurrar conteúdo gerado incrementalmente pro documento em tela — o fluxo principal é servidor→cliente. Ações do usuário (selecionar texto, perguntar, responder exercício) são requisições HTTP normais.
+- **Framework HTTP**: `axum` (suporte nativo a SSE).
+- **Frontend**: **HTMX** como espinha dorsal (troca de HTML servidor→cliente, SSE, formulários — o modelo do HTMX é exatamente o fluxo da §3) + **JavaScript vanilla mínimo** só para o que é estado de cliente (seleção de texto, linha de leitura por scroll, streaming token-a-token, UI otimista) + um **módulo WebAssembly** compilado do mesmo crate Rust para a ancoragem da §4.3 (resolução bloco/quote escrita uma vez, sem reimplementar em JS e sem drift). **Sem framework JS de VDOM (React/etc.)**: o dado canônico é o próprio HTML (§4.2), então um VDOM que quer estado JSON como verdade seria impedância — o servidor gera o dialeto, o cliente o exibe. Sem etapa de build para a página; assets embutidos no binário (portabilidade §15).
 
-### 3.1 Local-server security
+### 3.1 Segurança do servidor local
 
-The server holds the user's API keys and runs as HTTP reachable by any browser tab — it needs protection against CSRF/DNS-rebinding:
+O servidor guarda as chaves de API do usuário e roda como HTTP acessível por qualquer aba do navegador — precisa de proteção contra CSRF/DNS rebinding:
 
-- Bind exclusively to `127.0.0.1`, never `0.0.0.0`.
-- Mandatory session token on every request (the same pattern Jupyter uses: token in the URL/cookie).
-- Strict `Origin`/CORS validation — never `Access-Control-Allow-Origin: *`.
-- No state-changing endpoint responds to GET (prevents CSRF via a plain image/link tag).
-- **Generated interactive content runs in a sandbox.** LLM-generated interactive HTML/JS (§4.4) **never** executes in the app origin: it goes in an `<iframe sandbox>` without `allow-same-origin`, with no access to the session token, cookies, or endpoints; it returns a result only over a narrow, validated `postMessage` channel. Without that isolation, a generated (or source-injected) script could exfiltrate the key/token.
-- **Non-interactive generated HTML (prose, remediation) is sanitized before entering the app origin.** Prose becomes part of the document (selectable, anchorable §4.3), so it lives in the app origin — but it is still LLM output (potentially poisoned by a source §11.1). Before inserting, the client removes `<script>`, event attributes (`on*`) and dangerous URLs; only **interactive blocks** carry script, and only inside the sandbox. Reinforced by a **restrictive CSP** on every response (`default-src 'self'`, `connect-src 'self'` blocks exfiltration to another origin, `object-src`/`base-uri 'none'`).
+- Bind exclusivamente em `127.0.0.1`, nunca `0.0.0.0`.
+- Token de sessão obrigatório em toda requisição (mesmo padrão usado pelo Jupyter: token na URL/cookie).
+- Validação restritiva de `Origin`/CORS — nunca `Access-Control-Allow-Origin: *`.
+- Nenhum endpoint que mude estado responde a GET (previne CSRF via tag de imagem/link simples).
+- **Conteúdo interativo gerado roda em sandbox.** HTML/JS interativo gerado por LLM (§4.4) **nunca** executa na origem da app: vai em `<iframe sandbox>` sem `allow-same-origin`, sem acesso ao token de sessão, aos cookies ou aos endpoints; devolve resultado só por um canal `postMessage` estreito e validado. Sem esse isolamento, um script gerado (ou injetado via fonte) poderia exfiltrar a chave/token.
+- **HTML gerado não-interativo (prosa, remediação) é sanitizado antes de entrar na origem da app.** Prosa vira parte do documento (selecionável, ancorável §4.3), então mora na origem da app — mas continua sendo saída de LLM (potencialmente envenenada por uma fonte §11.1). Antes de inserir, o cliente remove `<script>`, atributos de evento (`on*`) e URLs perigosas; só **blocos interativos** carregam script, e apenas dentro do sandbox. Reforçado por uma **CSP restritiva** em toda resposta (`default-src 'self'`, `connect-src 'self'` bloqueia exfiltração para outra origem, `object-src`/`base-uri 'none'`).
 
-## 4. Storage format
+## 4. Formato de armazenamento
 
-- A human-readable directory-and-file structure — no proprietary binary database — in the spirit of how Obsidian uses markdown files for the "second brain".
-- **HTML** for the living documents (generated content + user annotations).
-- **PDF** for the source books used as reference (original, immutable material).
-- Directories/subdirectories serve only loose human navigation. The real graph relationships (prerequisite, cross-reference) are expressed as links inside the content, never implied by filesystem position — the same logic as Obsidian: the folder does not carry the graph, the `[[links]]` inside the files do.
-- **Files are the source of truth; indexes are derived artifacts.** Retrieval at scale (§10) and the long-term profile (§7.1) require a binary index (embedded vector store / sqlite) for performance — this does not contradict "no proprietary database". The index is always a **rebuildable cache** from the files; deleting it never loses data, it only forces reindexing. The Obsidian spirit is preserved because the canonical data stays in readable files.
+- Estrutura de diretórios e arquivos legível por humano — sem banco de dados binário proprietário — no espírito de como o Obsidian usa arquivos markdown para o "segundo cérebro".
+- **HTML** para os documentos vivos (conteúdo gerado + anotações do usuário).
+- **PDF** para os livros-fonte usados como referência (material original, imutável).
+- Diretório/subdiretório serve apenas para navegação humana solta. As relações reais do grafo (pré-requisito, referência cruzada) são expressas como links dentro do conteúdo, nunca implícitas pela posição no filesystem — a mesma lógica do Obsidian: pasta não carrega o grafo, os `[[links]]` dentro dos arquivos carregam.
+- **Arquivos são a fonte da verdade; índices são artefatos derivados.** A recuperação em escala (§10) e o perfil no longo prazo (§7.1) exigem um índice binário (vector store embutido / sqlite) para performance — isso não contradiz o "sem banco de dados proprietário". O índice é sempre um **cache reconstruível** a partir dos arquivos; apagá-lo nunca perde dados, só força reindexação. O espírito Obsidian é preservado porque o dado canônico continua em arquivos legíveis.
 
-### 4.1 File granularity
+### 4.1 Granularidade de arquivo
 
-One HTML file per concept node, inside one directory per living document. It maps directly onto the versioned-graph model (section 5). The version chain is expressed via sequential filename or front-matter pointing to the previous/next node.
+Um arquivo HTML por nó de conceito, dentro de um diretório por documento vivo. Mapeia diretamente no modelo de grafo versionado (seção 5). Cadeia de versão expressa via nome de arquivo sequencial ou front-matter apontando pro nó anterior/seguinte.
 
-### 4.2 The application's own HTML dialect
+### 4.2 Dialeto HTML próprio da aplicação
 
-The generated HTML follows its own convention (semantic tags/attributes), it is not loose HTML — needed for: node ID, version-chain pointer, learning-objective tag associated with a span, user-annotation span, citation marker for source book/chapter. Parsing in Rust via `html5ever`/`scraper`/`lol_html`.
+O HTML gerado segue uma convenção própria (tags/atributos semânticos), não é HTML solto — necessário para: ID de nó, ponteiro de cadeia de versão, tag de objetivo de aprendizagem associado a um trecho, span de anotação do usuário, marcador de citação para livro/capítulo-fonte. Parsing em Rust via `html5ever`/`scraper`/`lol_html`.
 
-### 4.3 Node layer model and anchoring
+### 4.3 Modelo de camadas do nó e ancoragem
 
-Resolves the apparent tension between §5 (immutable node) and §9 (the AI "edits the document", the user annotates): a node is an HTML file with **two logical layers**.
+Resolve a tensão aparente entre §5 (nó imutável) e §9 (a IA "edita o documento", usuário anota): um nó é um arquivo HTML com **duas camadas lógicas**.
 
-- **Content layer — immutable after creation.** The generated prose, the learning objectives on spans, the exercise/form, and the source citations. Frozen at the moment the node is created (§5). Every addressable block carries a **stable, unique ID** assigned at generation (e.g. `data-block-id`). That ID is the anchoring target.
-- **Interaction layer — append-only.** Everything that accumulates afterwards: user annotations, the remediation conversation (§8.2), Q&A threads the tutor writes. These are elements that **reference** content-layer IDs and never alter them. Append-only = new elements are added, existing ones are not rewritten (preserves the trajectory, §7.1).
+- **Camada de conteúdo — imutável após a criação.** A prosa gerada, os objetivos de aprendizagem em trechos, o exercício/formulário e as citações de fonte. Congelada no momento da criação do nó (§5). Todo bloco endereçável carrega um **ID estável e único** atribuído na geração (ex.: `data-block-id`). Esse ID é o alvo de ancoragem.
+- **Camada de interação — append-only.** Tudo que se acumula depois: anotações do usuário, a conversa de remediação (§8.2), threads de Q&A que o tutor escreve. São elementos que **referenciam** IDs da camada de conteúdo, nunca a alteram. Append-only = novos elementos são adicionados, os existentes não são reescritos (preserva a trajetória, §7.1).
 
-**Anchoring:**
-- Primary: by **stable block ID** — survives streaming, regeneration, and reflow, because the content layer is frozen, so the ID is permanent.
-- Sub-block (a span inside a paragraph): **fuzzy quote** anchor — exact quote + prefix/suffix context (W3C Web Annotation / hypothes.is style), resolved against the frozen block text. Since the block is immutable, it resolves deterministically; the fuzzy part is only robustness against minimal normalization.
+**Ancoragem:**
+- Primária: por **ID de bloco estável** — sobrevive a streaming, regeneração e reflow, porque a camada de conteúdo é congelada, então o ID é permanente.
+- Sub-bloco (um trecho dentro de um parágrafo): âncora **fuzzy por citação** — quote exato + contexto de prefixo/sufixo (estilo W3C Web Annotation / hypothes.is), resolvido contra o texto congelado do bloco. Como o bloco é imutável, resolve deterministicamente; o fuzzy é só robustez contra normalização mínima.
 
-**Version chain (§5):** revising a concept generates a new node file whose front-matter/attribute points to the previous version's ID. The old file (both layers) stays intact — annotations remain correctly anchored to the frozen content they were made on. Future references resolve to the tip of the chain.
+**Cadeia de versão (§5):** revisar um conceito gera um novo arquivo de nó cujo front-matter/atributo aponta para o ID da versão anterior. O arquivo antigo (ambas as camadas) permanece intacto — as anotações continuam ancoradas ao conteúdo congelado sobre o qual foram feitas. Referências futuras resolvem para a ponta da cadeia.
 
-**v0 vocabulary (illustrative, to be refined in implementation):**
-- Node root: `<article data-node-id data-doc-id data-prev-version>`
-- Content block: any element with `data-block-id`
-- Learning objective: `<span data-objective-id data-objective-type="knowledge|application|synthesis">` wrapping the span a rubric item targets
-- Citation: `<cite data-source-id data-locator="chap:3;p:42">`; for a web source (§11.1), `data-source-url`
-- Exercise: `<form data-exercise-id data-rubric-id>` with generated fields
-- Interaction layer: `<aside data-annotation-id data-anchor-block data-anchor-quote>` (annotation); `<div data-thread-id data-anchor-block>` (Q&A/remediation)
-- **The highlighted reading line (§9) is NOT persisted** — it is ephemeral UI state (scroll position), lives only on the client, and does not enter the node file.
+**Vocabulário v0 (ilustrativo, a refinar na implementação):**
+- Raiz do nó: `<article data-node-id data-doc-id data-prev-version>`
+- Bloco de conteúdo: qualquer elemento com `data-block-id`
+- Objetivo de aprendizagem: `<span data-objective-id data-objective-type="knowledge|application|synthesis">` envolvendo o trecho que um item de rubric mira
+- Citação: `<cite data-source-id data-locator="chap:3;p:42">`; para fonte web (§11.1), `data-source-url`
+- Exercício: `<form data-exercise-id data-rubric-id>` com campos gerados
+- Camada de interação: `<aside data-annotation-id data-anchor-block data-anchor-quote>` (anotação); `<div data-thread-id data-anchor-block>` (Q&A/remediação)
+- **A linha de leitura em destaque (§9) NÃO é persistida** — é estado efêmero de UI (posição de scroll), vive só no cliente, não entra no arquivo do nó.
 
-### 4.4 Generated interactive blocks
+### 4.4 Blocos interativos gerados
 
-The app uses **generative HTML to the fullest** (§9): beyond prose, the content can contain **interactive visualizations** when that teaches better (a manipulable chart, a simulation, a diagram), and the **exercises have free modality** — they are not limited to checkbox/textbox. That is the point of generating HTML instead of markdown: the node is not just a prose rewrite of the sources.
+A app usa **HTML generativo a fundo** (§9): além de prosa, o conteúdo pode conter **visualizações interativas** quando isso ensina melhor (gráfico manipulável, simulação, diagrama), e os **exercícios têm modalidade livre** — não ficam limitados a checkbox/textbox. Isso é o propósito de gerar HTML em vez de markdown: o nó não é só reescrita em prosa das fontes.
 
-Generation strategy: **arbitrary generated JS, always sandboxed.** The LLM writes a bespoke widget per block; there is no fixed component library (maximum expressiveness, uniform security model).
+Estratégia de geração: **JS gerado arbitrário, sempre em sandbox.** O LLM escreve um widget sob medida por bloco; não há biblioteca fixa de componentes (máxima expressividade, modelo de segurança uniforme).
 
-- **Layer and immutability (§4.3):** an interactive block is content **frozen at creation**, with a stable `data-block-id` (e.g. `<figure data-block-id data-interactive>` wrapping the sandbox `srcdoc`). Its internal manipulation (dragging, simulating, exploring) is **ephemeral client state** — like the reading line, it is not persisted. Only the **answer artifact** of an exercise is captured.
-- **Security (§3.1):** it runs in an `<iframe sandbox>` isolated from the origin and the token; it communicates only via `postMessage`.
-- **Result protocol (exercises, §8):** every interactive exercise emits a **structured answer artifact** via `postMessage` (final state, action sequence, target reached, submitted value). The **schema of that artifact is generated together with** the content and the rubric and **locked before submission** — interactivity must not become "eyeballed" grading (§8). The burden falls on generation: to produce, when creating the exercise, both the rubric and the schema of the artifact it grades.
-- **Latency (§14):** the prose streams first (TTFT ~1s); heavier widgets **hydrate afterwards**, never blocking the time-to-reading.
-- **Grounding (§11):** a visualization is also grounded/citable — it visualizes source material and carries the citation like any block.
+- **Camada e imutabilidade (§4.3):** um bloco interativo é conteúdo **congelado na criação**, com `data-block-id` estável (ex.: `<figure data-block-id data-interactive>` embrulhando o `srcdoc` do sandbox). Sua manipulação interna (arrastar, simular, explorar) é **estado efêmero de cliente** — como a linha de leitura, não é persistida. Só o **artefato de resposta** de um exercício é capturado.
+- **Segurança (§3.1):** roda em `<iframe sandbox>` isolado da origem e do token; comunica-se apenas por `postMessage`.
+- **Protocolo de resultado (exercícios, §8):** todo exercício interativo emite um **artefato de resposta estruturado** por `postMessage` (estado final, sequência de ações, alvo atingido, valor submetido). O **schema desse artefato é gerado junto com** o conteúdo e o rubric e **travado antes da submissão** — a interatividade não pode virar avaliação "no olho" (§8). O ônus recai sobre a geração: produzir, ao criar o exercício, tanto o rubric quanto o schema do artefato que ele avalia.
+- **Latência (§14):** a prosa streama primeiro (TTFT ~1s); widgets mais pesados **hidratam depois**, nunca bloqueiam o tempo até estar lendo.
+- **Fundamentação (§11):** uma visualização também é fundamentada/citável — visualiza material de fonte e carrega a citação como qualquer bloco.
 
-## 5. Data model: versioned concept-node graph
+## 5. Modelo de dados: grafo de nós de conceito versionados
 
-- The curriculum is internally a **graph**: concept nodes with prerequisite/relation edges between them.
-- The reading presented to the user is a **linearization** (traversal) of the graph at that moment — it can be re-planned as the graph changes, without breaking the feeling of "a book being read".
-- **No destructive editing**: when the user revisits an old concept with a new question (informed by later learnings), the system generates a **new version node** in that concept's chain. The original node stays intact, with the user's annotations still correctly anchored to it. From that point on, future references to that concept point to the most recent tip of the chain.
-- This preserves the pedagogical-trajectory history (section 7) and avoids the problem of annotations anchored to text that changes underneath them.
-- Outside this revision mechanism, the system moves **only forward** — incremental generation from the current reading point, never a retroactive in-place rewrite.
+- O currículo é internamente um **grafo**: nós de conceito com arestas de pré-requisito/relação entre eles.
+- A leitura apresentada ao usuário é uma **linearização** (travessia) do grafo naquele momento — pode ser replanejada conforme o grafo muda, sem quebrar a sensação de "livro sendo lido".
+- **Sem edição destrutiva**: quando o usuário revisita um conceito antigo com uma dúvida nova (informada por aprendizados posteriores), o sistema gera um **novo nó de versão** na cadeia daquele conceito. O nó original permanece intacto, com as anotações do usuário ainda ancoradas corretamente nele. A partir daquele momento, referências futuras àquele conceito apontam para a ponta mais recente da cadeia.
+- Isso preserva o histórico de trajetória pedagógica (seção 7) e evita o problema de anotações ancoradas em texto que muda por baixo delas.
+- Fora desse mecanismo de revisão, o sistema se move **só para frente** — geração incremental a partir do ponto de leitura atual, nunca reescrita retroativa in-place.
 
-## 6. Curriculum engine
+## 6. Motor de currículo
 
-- **Outline generation**: a provisional hierarchical map/graph is generated at the start (from the user's initial topic/idea/problem), serving as a skeleton. Each real content node is generated only when it is its turn to be read, using the map as a guide — able to prune, expand, or reorder nodes as the assessment (section 8) reveals what the user already knows or does not retain.
-- **Scope negotiation**: happens not only at the initial outline generation, but occasionally during the generation of future nodes as well.
-- **Flexible generation granularity**: not fixed to a "chapter" format. Simple concepts may occupy a single node; complex concepts that do not split well into large units are decomposed into smaller, more atomic blocks whenever possible. The goal is to keep the learning → feedback cycle as short as possible: each node, whatever its size, ends with a comprehension check, instead of accumulating several concepts before testing.
+- **Geração de outline**: um mapa hierárquico/grafo provisório é gerado no início (a partir do tema/ideia/problema inicial do usuário), servindo de esqueleto. Cada nó real de conteúdo é gerado só quando chega a vez de ser lido, usando o mapa como guia — podendo podar, expandir ou reordenar nós conforme a avaliação (seção 8) revela o que o usuário já sabe ou não retém.
+- **Negociação de escopo**: acontece não só na geração inicial do outline, mas ocasionalmente durante a geração de nós futuros também.
+- **Granularidade de geração flexível**: não é fixada em formato de "capítulo". Conceitos simples podem ocupar um nó só; conceitos complexos que não se dividem bem em unidades grandes são decompostos em blocos menores e mais atômicos sempre que possível. O objetivo é manter o ciclo aprendizado → feedback o mais curto possível: cada nó, do tamanho que for, termina com uma checagem de compreensão, em vez de acumular vários conceitos antes de testar.
 
-### 6.1 Cold start / topic entry
+### 6.1 Cold start / entrada de tema
 
-The initial screen is **a single generic question** ("What are we learning?") and a text box. From what the user types, the agent adaptively decides between two paths:
+A tela inicial é **uma única pergunta genérica** ("O que vamos aprender?") e uma caixa de texto. A partir do que o usuário digita, o agente decide adaptativamente entre dois caminhos:
 
-- **The living document starts directly**: when the topic is already clear/bounded enough to generate an outline.
-- **A conversation session with the tutor**: when it is still vague/broad, a scope-negotiation conversation (§6) runs until the starting point and the document outline are defined.
+- **Documento vivo começa direto**: quando o tema já é claro/delimitado o bastante para gerar um outline.
+- **Sessão de conversa com o tutor**: quando ainda é vago/amplo, uma conversa de negociação de escopo (§6) roda até se definir o ponto de partida e o outline do documento.
 
-The choice between the two is made by the agent itself from the input — it is the lightweight front of the same scope-negotiation machinery that §6 already describes.
+A escolha entre os dois é feita pelo próprio agente a partir do input — é a frente leve da mesma maquinaria de negociação de escopo que a §6 já descreve.
 
-### 6.2 Abstraction-level calibration
+### 6.2 Calibração de nível de abstração
 
-Concrete mechanism for the "sophistication follows the user" principle (§2). It is continuous and local (per concept/objective), never a global level fixed once.
+Mecanismo concreto do princípio "sofisticação acompanha o usuário" (§2). É contínuo e local (por conceito/objetivo), nunca um nível global fixado uma vez.
 
-- **Signal**: error rate + questions per concept. Advancing **without errors and without questions** ⇒ the abstraction level is too low.
-- **Response when it is too low**: language richer in meaning; content explained more superficially (less hand-holding); exercises that demand greater understanding — both atomic (deeper into the isolated concept) and integrative (§8, synthesis crossing nodes).
-- **Inverse when the user gets stuck**: lower abstraction, more detailed/explicit explanation, more scaffolded exercises.
-- The calibration lives in the profile (§7) and parameterizes generation (§6).
+- **Sinal**: taxa de erros + perguntas por conceito. Avançar **sem errar e sem perguntar** ⇒ o nível de abstração está baixo demais.
+- **Resposta quando está baixo demais**: linguagem mais rica de significado; conteúdo explicado de forma mais superficial (menos hand-holding); exercícios que exigem compreensão maior — tanto atômica (mais fundo no conceito isolado) quanto de integração (§8, síntese cruzando nós).
+- **Inverso quando o usuário trava**: abstração menor, explicação mais detalhada/explícita, exercícios mais escafoldados.
+- A calibração vive no perfil (§7) e parametriza a geração (§6).
 
-## 7. Memory system / user profile
+## 7. Sistema de memória / perfil do usuário
 
-All of the user's interactions — questions asked, answers to exercises, requests to change the curriculum, annotations in the document — feed a cumulative pedagogical-trajectory profile, used to:
+Todas as interações do usuário — perguntas feitas, respostas a exercícios, pedidos de alteração de currículo, anotações no documento — alimentam um perfil de trajetória pedagógica cumulativo, usado para:
 
-- Anticipate, when generating future nodes, the kind of question that user tends to ask.
-- Measure what kind of explanation/exercise produces the most learning for that user specifically.
-- Identify how the user thinks and **explicitly confront them** with their philosophical basis/premises and their limitations — adversarially: the system builds the strongest counter-argument against the user's position, not merely describing it generically or complacently (LLMs tend to flatter/mirror instead of challenge; this behavior must be actively avoided).
-- Recognize what generates the most interest in the user.
-- Explicitly distinguish **legitimate disagreement** from **failed comprehension**: if the user demonstrates understanding the mechanism of a concept but diverges from it, that is not treated as an unmet objective — it becomes a position recorded in the profile, and can feed a future node that confronts it dialectically.
-- **Text selection + question is the system's most important signal**: it is explicit, localized curiosity/confusion, more informative than any implicit inference. It directly influences the direction of the next generated node — it is never recorded merely as side chat disconnected from the curriculum.
+- Antecipar, na geração de nós futuros, o tipo de pergunta que aquele usuário costuma fazer.
+- Mensurar que tipo de explicação/exercício gera mais aprendizado para aquele usuário especificamente.
+- Identificar como o usuário pensa e **explicitamente confrontá-lo** com sua base filosófica/premissas e as limitações delas — de forma adversarial: o sistema constrói o contra-argumento mais forte contra a posição do usuário, não apenas a descreve de forma genérica ou complacente (LLMs tendem a bajular/espelhar em vez de desafiar; esse comportamento deve ser ativamente evitado).
+- Reconhecer o que gera mais interesse no usuário.
+- Distinguir explicitamente **discordância legítima** de **falha de compreensão**: se o usuário demonstra entender o mecanismo de um conceito mas diverge dele, isso não é tratado como objetivo não atingido — vira uma posição registrada no perfil, e pode alimentar um nó futuro que a confronta dialeticamente.
+- **Seleção de texto + pergunta é o sinal mais importante do sistema**: é curiosidade/confusão explícita e localizada, mais informativa que qualquer inferência implícita. Influencia diretamente a direção do próximo nó gerado — nunca fica registrada apenas como conversa lateral desconectada do currículo.
 
-### 7.1 Long-term memory architecture (months/years)
+### 7.1 Arquitetura de memória no longo prazo (meses/anos)
 
-The profile is not a replay of all interactions — that is unsustainable and unnecessary. Split into two layers, in the spirit of event sourcing / materialized view:
+O perfil não é o replay de todas as interações — isso é insustentável e desnecessário. Separação em duas camadas, no espírito de event sourcing / materialized view:
 
-- **Immutable, append-only event log** (questions, answers, selections, change requests, annotations) = the source of truth on disk. Never loaded whole into context. It is what lets a nuance discarded by an earlier compaction be recovered.
-- **Profile = a materialized projection** of that log: compact, curated, it is what actually enters node generation. A *model* of the user maintained incrementally, not the raw history.
+- **Log de eventos imutável, append-only** (perguntas, respostas, seleções, pedidos de alteração, anotações) = fonte da verdade em disco. Nunca é carregado inteiro no contexto. É o que permite recuperar uma nuance que uma compactação anterior descartou.
+- **Perfil = projeção materializada** desse log: compacto, curado, é o que efetivamente entra na geração de nó. Um *modelo* do usuário mantido incrementalmente, não o histórico bruto.
 
-On that basis:
+Sobre essa base:
 
-- **Multi-resolution memory**: recent interactions at high fidelity (verbatim); mid-term as per-session/topic summaries; long-term as stable distilled traits + per-concept retention state (analogous to spaced repetition). A node generated months later consumes the distilled conclusion, not the verbatim exercise.
-- **Retrieval, not whole context**: the slice of the profile relevant to the current node's topic is retrieved (the same retrieval layer as §10), not the whole profile.
-- **Structured where possible, prose only where needed**: per-concept retention, recorded positions/disagreements (§7, §8.1), and interest tags are structured, queryable data; only the "how this user thinks" is LLM-maintained prose — short and periodically re-synthesized from the structured signals + recent events.
-- **Decay and revision, not just accumulation**: profile beliefs have a timestamp and can become false over time (the user changes over years). The profile revises/deprecates beliefs by reusing the §5 philosophy — no destructive editing: a revised belief becomes a new version in the chain, the old one stays in the history. The quality of the adversarial feature (confronting the user's premises) is limited by the profile's fidelity; targeting a strawman of the user is the worst failure mode.
-- **User-inspectable and editable profile**: since everything is already visible to the user and the AI (§9), the model the system holds of the user is exposed and correctable by them. Human-in-the-loop is the cheapest mitigation for drift and bad compaction — and consistent with the thesis that the user controls their own curriculum.
+- **Memória multi-resolução**: interações recentes em alta fidelidade (verbatim); médio prazo em resumos por sessão/tópico; longo prazo em traços destilados estáveis + estado de retenção por conceito (análogo a spaced-repetition). Um nó gerado meses depois consome a conclusão destilada, não o exercício verbatim.
+- **Recuperação, não contexto inteiro**: recupera-se a fatia do perfil relevante ao tópico do nó atual (mesma camada de retrieval da §10), não o perfil todo.
+- **Estruturado onde dá, prosa só onde precisa**: retenção por conceito, posições/discordâncias registradas (§7, §8.1) e tags de interesse são dados estruturados e consultáveis; só o "como esse usuário pensa" é prosa mantida por LLM — curta e re-sintetizada periodicamente a partir dos sinais estruturados + eventos recentes.
+- **Decaimento e revisão, não só acumulação**: crenças do perfil têm timestamp e podem se tornar falsas com o tempo (o usuário muda ao longo de anos). O perfil revisa/depreca crenças reaproveitando a filosofia da §5 — sem edição destrutiva: uma crença revisada vira nova versão na cadeia, a antiga permanece no histórico. A qualidade da feature adversarial (confrontar as premissas do usuário) é limitada pela fidelidade do perfil; mirar um espantalho do usuário é o pior modo de falha.
+- **Perfil inspecionável e editável pelo usuário**: como tudo já é visível ao usuário e à IA (§9), o modelo que o sistema tem do usuário é exposto e corrigível por ele. Humano no loop é a mitigação mais barata para drift e compactação errada — e coerente com a tese de que o usuário controla o próprio currículo.
 
-The residual bottleneck here is not scale/storage (solved by the techniques above), but **calibration of lossy compaction**: deciding what to distill/forget is judgment, not a closed algorithm. The immutable log guarantees compaction errors are recoverable; the inspectable profile guarantees they are correctable.
+O gargalo residual aqui não é de escala/armazenamento (resolvido pelas técnicas acima), mas de **calibração da compactação lossy**: decidir o que destilar/esquecer é julgamento, não algoritmo fechado. O log imutável garante que erros de compactação sejam recuperáveis; o perfil inspecionável garante que sejam corrigíveis.
 
-## 8. Assessment engine
+## 8. Motor de avaliação
 
-- **Learning objectives generated together with the node content**, not afterwards — the grading rubric is locked at the moment the node is created, avoiding the leniency bias of LLM-as-grader (an LLM tends to validate shallow answers as correct when it judges without a pre-defined criterion).
-- Every "application" objective has at least one item requiring transfer to a scenario **not covered in the node text** — that is the test that generalizes to any domain, because it is not satisfiable by memorization/pattern recognition.
-- **Unit/integration metaphor**: a node objective = a unit test (was the isolated concept understood?). An occasional synthesis exercise crossing distant nodes in the graph = an integration test (can the user connect learnings from different contexts into a new application?).
-- **Grounding exercises in the original material**: the exercise and its solution are grounded in the same source (book/chapter) that backs the node, making the rubric more objective and reducing leniency. It works well in exact sciences; in less deterministic areas the grounding is looser and the weight falls on the §8.1 rubrics — a recognized, not solved, limitation.
-- **Structured per-objective grade**: each objective is graded on `{not demonstrated, partial, demonstrated}`, not just pass/fail. Advancing requires every objective demonstrated; any one not demonstrated triggers remediation (§8.2). The grade feeds the per-concept retention state (§7.1).
-- **Free exercise modality, but always gradeable (§4.4, §9):** the exercise can be an arbitrary interactive widget (drag-to-order, label a diagram, manipulate a simulation until a target is reached, draw), not just checkbox/textbox. Whatever the modality, it emits a **structured answer artifact** (via `postMessage`, §4.4) whose schema is locked **together with the rubric, before submission**; the rubric grades the artifact. Interactivity broadens how the user answers, it **never** replaces the pre-defined criterion.
+- **Objetivos de aprendizagem gerados junto com o conteúdo do nó**, não depois — o rubric de avaliação é travado no momento da criação do nó, evitando o viés de leniência de LLM-como-avaliador (LLM tende a validar respostas rasas como corretas quando julga sem critério pré-definido).
+- Todo objetivo do tipo "aplicação" tem ao menos um item que exige transferência para um cenário **não coberto no texto do nó** — esse é o teste que generaliza para qualquer domínio, porque não é satisfazível por memorização/reconhecimento de padrão.
+- **Metáfora unitário/integração**: objetivo de nó = teste unitário (conceito isolado foi entendido?). Exercício ocasional de síntese cruzando nós distantes no grafo = teste de integração (o usuário consegue conectar aprendizados de contextos diferentes numa aplicação nova?).
+- **Grounding dos exercícios no material original**: o exercício e sua solução são fundamentados na mesma fonte (livro/capítulo) que embasa o nó, tornando o rubric mais objetivo e reduzindo a leniência. Funciona bem em exatas; em áreas menos determinísticas o grounding é mais frouxo e o peso recai sobre os rubrics da §8.1 — limitação reconhecida, não resolvida.
+- **Nota estruturada por objetivo**: cada objetivo é avaliado em `{não demonstrado, parcial, demonstrado}`, não só passa/falha. Avançar exige todos os objetivos demonstrados; qualquer um não demonstrado dispara a remediação (§8.2). A nota alimenta o estado de retenção por conceito (§7.1).
+- **Modalidade de exercício livre, mas sempre gradeável (§4.4, §9):** o exercício pode ser um widget interativo arbitrário (arrastar-ordenar, rotular diagrama, manipular simulação até atingir um alvo, desenhar), não só checkbox/textbox. Seja qual for a modalidade, ele emite um **artefato de resposta estruturado** (via `postMessage`, §4.4) cujo schema é travado **junto com o rubric, antes da submissão**; o rubric avalia o artefato. Interatividade amplia como o usuário responde, **nunca** substitui o critério pré-definido.
 
-### 8.1 Assessment in non-deterministic domains (philosophy, ethics, etc.)
+### 8.1 Avaliação em domínios não-determinísticos (filosofia, ética, etc.)
 
-- **Ideological Turing test**: the user articulates the position opposite to their own as strongly as possible; the rubric assesses whether the articulation would be recognized as fair by a real proponent of that position — testing genuine understanding separated from agreement.
-- **Mapping a position against known territory**: the rubric defines the space of defensible positions in a debate (not a single right answer) and assesses whether the user recognizes where they sit in that space and why.
-- **Consistency over time** as the analog of the integration test: it checks whether the user's position stays coherent when reexamined from different angles at different times.
+- **Teste de Turing ideológico**: o usuário articula a posição contrária à sua da forma mais forte possível; o rubric avalia se a articulação seria reconhecida como justa por um proponente real daquela posição — testa compreensão genuína separada de concordância.
+- **Mapeamento de posição contra o território conhecido**: o rubric define o espaço de posições defensáveis num debate (não uma resposta certa única) e avalia se o usuário reconhece onde se situa nesse espaço e por quê.
+- **Consistência ao longo do tempo** como análogo do teste de integração: checa se a posição do usuário permanece coerente quando reexaminada de ângulos diferentes em momentos diferentes.
 
-### 8.2 Remediation on failure
+### 8.2 Remediação na falha
 
-When the user fails a comprehension check, the system does **not** just advance nor silently regenerate: the node enters a **conversation session with the tutor**, in the node's interaction layer (§4.3), in the context of the failed exercise.
+Quando o usuário falha uma checagem de compreensão, o sistema **não** apenas avança nem regenera em silêncio: o nó entra numa **sessão de conversa com o tutor**, na camada de interação do nó (§4.3), no contexto do exercício falhado.
 
-- The tutor explains the tested concept **in the exercise's context**: it gives examples of how to use the concept to solve a similar problem, or shows the step by step of solving exactly the problem the user got wrong.
-- Then it proposes a **new similar problem**. With each subsequent failure, the new problem becomes **increasingly similar** to the worked example — converging toward the demonstrated solution — until the user can solve an almost identical case; then the difficulty ramps back up. (Scaffolding by increasing proximity to the model, gradually withdrawn as the user succeeds.)
-- The conversation is a high-value signal for the profile (§7): which explanation/example finally "landed" feeds "what explanation works for this user".
-- It is **append-only** in the node (§4.3): the history of the difficulty is preserved in the trajectory (§7.1).
-- Only when the objective becomes **demonstrated** (§8) does the next node fire (§9).
+- O tutor explica o conceito testado **no contexto do exercício**: dá exemplos de como usar o conceito para resolver um problema similar, ou mostra o passo a passo de resolver exatamente o problema que o usuário errou.
+- Em seguida propõe um **novo problema similar**. A cada falha subsequente, o novo problema fica **cada vez mais similar** ao exemplo resolvido — convergindo em direção à solução demonstrada — até o usuário conseguir resolver um caso quase idêntico; depois a dificuldade volta a subir. (Scaffolding por proximidade crescente ao modelo, retirado gradualmente conforme o usuário acerta.)
+- A conversa é sinal de alto valor para o perfil (§7): qual explicação/exemplo finalmente "pegou" alimenta o "que explicação funciona para esse usuário".
+- É **append-only** no nó (§4.3): o histórico da dificuldade fica preservado na trajetória (§7.1).
+- Só quando o objetivo passa a **demonstrado** (§8) o disparo do próximo nó acontece (§9).
 
-## 9. Interface — the "living document"
+## 9. Interface — "documento vivo"
 
-- **Full use of generative HTML.** The content is not just a prose rewrite/combination of the sources: when it teaches better, the node renders **interactive visualizations** (manipulable charts, simulations, diagrams) generated bespoke. Likewise, the exercise is **not limited to checkbox/textbox** — its modality (chatbox, form, interactive widget) varies per content/domain, decided at generation, not fixed by the system. Generated interactive blocks follow the sandbox + answer-artifact contract of §4.4 (and, for exercises, the locked rubric of §8).
-- A central highlighted line follows the user's current reading position (based on scroll position, not eye-tracking).
-- The user can, at any moment: select a block of text and say something, or say something without a selection (context = the highlighted line).
-- The AI's response **edits the document itself** to contain the answer — it does not appear in a separate widget.
-- The document works simultaneously as reference material and personal notes: the user can annotate/mark directly on it. It is the **only** place for the user's notes — the original source (§11) is read-only; anything the user wants to record from the source is brought into the living document.
-- Annotations and marks are visible both to the user and to the tutoring AI that grades and generates text.
-- **Next-node generation trigger**: automatic as soon as the exercise is graded, but the user can pause or redirect the curriculum at any time.
+- **Uso pleno do HTML generativo.** O conteúdo não é só reescrita/combinação em prosa das fontes: quando ensina melhor, o nó renderiza **visualizações interativas** (gráficos manipuláveis, simulações, diagramas) geradas sob medida. Do mesmo modo, o exercício **não é limitado a checkbox/textbox** — sua modalidade (chatbox, formulário, widget interativo) varia por conteúdo/domínio, decidida na própria geração, não fixada pelo sistema. Blocos interativos gerados seguem o contrato de sandbox + artefato de resposta da §4.4 (e, para exercícios, o rubric travado da §8).
+- Uma linha central em destaque (highlight) acompanha a posição de leitura atual do usuário (baseada em posição de scroll, não eye-tracking).
+- O usuário pode, a qualquer momento: selecionar um bloco de texto e dizer algo, ou dizer algo sem seleção (contexto = a linha em destaque).
+- A resposta da IA **edita o próprio documento** para conter a resposta — não aparece em um widget separado.
+- O documento funciona simultaneamente como material de referência e notas pessoais: o usuário pode fazer anotações/marcações diretamente nele. É o **único** local de notas do usuário — a fonte original (§11) é só-leitura; qualquer coisa que o usuário queira registrar da fonte é trazida para o documento vivo.
+- Anotações e marcações são visíveis tanto para o usuário quanto para a IA tutora que avalia e gera texto.
+- **Disparo de geração do próximo nó**: automático assim que o exercício é avaliado, mas o usuário pode pausar ou redirecionar o currículo a qualquer momento.
 
-## 10. Second brain — the graph across living documents
+## 10. Segundo cérebro — grafo entre documentos vivos
 
-- The user has multiple living documents, functioning as a cross-referencing graph.
-- When a learning depends on knowledge/skill already learned in another document, the system shows a brief summary with a link — possibly opening in a side panel that renders the content + the user's notes from that other document/node.
-- Above a certain accumulated volume, the set of documents no longer fits whole in any model context window — a retrieval layer (embeddings + index) is needed to decide what to bring in as context at each moment. The specific technology (vector store, embedding model, PDF chunking) is left to the implementation. That index is a derived artifact rebuildable from the files (§4), not the source of truth — and it is the same retrieval layer reused by the profile memory (§7.1).
-- The biggest risk of this layer is not technical, it is calibration: firing cross-references too often becomes irritating noise; too rarely loses the feature's value. It needs a sensitivity control adjustable by the user over time.
+- O usuário tem múltiplos documentos vivos, funcionando como um grafo que se cross-referencia.
+- Quando um aprendizado depende de conhecimento/habilidade já aprendida em outro documento, o sistema mostra um breve resumo com link — possivelmente abrindo em um sidepanel que renderiza o conteúdo + as notas do usuário daquele outro documento/nó.
+- Acima de um certo volume acumulado, o conjunto de documentos não cabe mais inteiro em nenhuma janela de contexto de modelo — é necessária uma camada de recuperação (embeddings + índice) para decidir o que trazer como contexto a cada momento. A tecnologia específica (vector store, modelo de embedding, chunking de PDF) fica a critério da implementação. Esse índice é um artefato derivado reconstruível a partir dos arquivos (§4), não fonte da verdade — e é a mesma camada de retrieval reaproveitada pela memória de perfil (§7.1).
+- O maior risco dessa camada não é técnico, é de calibração: acionar referências cruzadas com frequência demais vira ruído irritante; acionar de menos perde o valor da feature. Precisa de um controle de sensibilidade ajustável pelo usuário ao longo do tempo.
 
-## 11. Grounding in sources (real books and articles)
+## 11. Fundamentação em fontes (livros e artigos reais)
 
-- The preferred "ground truth" of the generated content is real sources written by humans: books and articles (§11.1).
-- The nodes are prose rewrites/combinations of the sources' content, citing which book/chapter or article the information came from. For content grounded in web search (fallback, §11.1), the attribution is **explicit and inline** ("according to site X ...") pointing to the link.
-- A side panel allows the user **only to view** the original source to check it — with no annotation function on the source. The living document (§9) is the only place for the user's notes: the source is an immutable corpus (§4), notes live in the living document.
-- **Selecting in the source is interaction, not a persistent mark**: the user can select a passage of the source in the viewer and act on it (ask, request an explanation, "bring this into my document"). The action routes to the living document — the passage is inserted/answered there, already **cited** (book + chapter). No persistent mark is written on the source.
-- Since the notes live in the living document but the node cites the chapter (and can deep-link to the exact passage in the source), the marginalia is not lost: the note points back to the location in the source without duplicating the notes store.
+- O "ground truth" preferencial do conteúdo gerado são fontes reais escritas por humanos: livros e artigos (§11.1).
+- Os nós são reescritas/combinações em prosa do conteúdo das fontes, citando de qual livro/capítulo ou artigo a informação veio. Para conteúdo fundamentado em busca na web (fallback, §11.1), a atribuição é **explícita e inline** ("segundo o site X ...") apontando para o link.
+- Sidepanel permite **apenas visualizar** a fonte original para o usuário conferir — sem função de anotação sobre a fonte. O documento vivo (§9) é o único lugar de notas do usuário: fonte é acervo imutável (§4), notas moram no documento vivo.
+- **Seleção na fonte é interação, não marcação persistente**: o usuário pode selecionar um trecho da fonte no viewer e agir sobre ele (perguntar, pedir explicação, "trazer isso pro meu documento"). A ação roteia para o documento vivo — o trecho é inserido/respondido lá, já **citado** (livro + capítulo). Nada de marca persistente é gravado sobre a fonte.
+- Como as notas moram no documento vivo mas o nó cita capítulo (e pode deep-linkar para a passagem exata na fonte), a marginália não se perde: a nota aponta de volta para o local na fonte sem duplicar o acervo de notas.
 
-### 11.1 Book acquisition / origin
+### 11.1 Aquisição/origem dos livros
 
-- **Origin**: crawling **Library Genesis (LibGen)** for books and **arXiv** for articles. The AI agent decides, during generation, which sources are pertinent to ground a node/topic and downloads them on demand, adding them to the application's corpus.
-- **Swappable acquisition module**: each source (LibGen, arXiv, web search) is one implementation behind a common acquisition interface. LibGen is not welded to the system — it can be replaced/extended without touching the rest (it matters for the hosting endgame §15, and for the legal risk §16).
-- **Fallback chain, explicit to the user**: LibGen/arXiv → if no adequate source is found, an **explicit fallback to internet search**, signaled to the user. Web-grounded content is always attributed inline ("according to site X ...", §11).
-- **`SOURCES.md`**: the links of the web-search results used are recorded in a `SOURCES.md`; the references in the living document point to those links. It keeps traceable where each statement not covered by a book/article came from.
-- **Version selection**: it downloads the most recent edition/version available and, whenever possible, in the user's language (falling back to another language when there is none in the user's).
-- **Preferred format**: among the formats available for the same book, the preference order is **EPUB > PDF > DJVU**. EPUB is structured XHTML (clean text extraction, native chapters via spine/TOC, smaller download, direct fit into the app's HTML stack/dialect §4.2). PDF is the universal fallback with good per-page citation. DJVU is accepted only when it is the only format (a *scan* format, without structure, dependent on embedded/own OCR). Since the source viewer is read-only (§11), EPUB's reflow has no downside — no pixel-faithful typeset page is needed.
-- **Normalization**: regardless of the source format, ingestion normalizes everything to one internal representation (extracted text + HTML in the app dialect). EPUB arrives nearly ready; PDF goes through extraction; DJVU through OCR/conversion. After ingestion, the source format becomes an acquisition detail, transparent to the rest of the system.
-- **Ingestion into the corpus**: the downloaded book joins the immutable source corpus and becomes available for citation (§11) and for the retrieval/embeddings layer (§10). The same book is downloaded once and reused across nodes and living documents.
-- The download is the agent's decision, not a manual user action — it is part of the generation flow, triggered when the material already in the corpus does not cover what the node needs to ground.
+- **Origem**: crawl do **Library Genesis (LibGen)** para livros e do **arXiv** para artigos. O agente de IA decide, durante a geração, quais fontes são pertinentes para fundamentar um nó/tema e as baixa sob demanda, adicionando ao acervo da aplicação.
+- **Módulo de aquisição trocável**: cada fonte (LibGen, arXiv, busca web) é uma implementação por trás de uma interface comum de aquisição. LibGen não é soldado ao sistema — pode ser substituído/estendido sem tocar no resto (importa para o endgame de hospedagem, §15, e para o risco legal, §16).
+- **Cadeia de fallback, explícita ao usuário**: LibGen/arXiv → se nenhuma fonte adequada for encontrada, **fallback explícito para busca na internet**, sinalizado ao usuário. O conteúdo web-fundamentado é sempre atribuído inline ("segundo o site X ...", §11).
+- **`SOURCES.md`**: os links dos resultados de busca web usados são registrados num `SOURCES.md`; as referências no documento vivo apontam para esses links. Mantém rastreável de onde veio cada afirmação não coberta por livro/artigo.
+- **Seleção de versão**: baixa a edição/versão mais recente disponível e, sempre que possível, na língua do usuário (fallback para outra língua quando não houver na do usuário).
+- **Formato preferido**: entre os formatos disponíveis para o mesmo livro, a ordem de preferência é **EPUB > PDF > DJVU**. EPUB é XHTML estruturado (extração de texto limpa, capítulos nativos via spine/TOC, menor download, encaixe direto no stack/dialeto HTML da app §4.2). PDF é o fallback universal com boa citação por página. DJVU só é aceito quando é o único formato (formato de *scan*, sem estrutura, depende de OCR embutido/próprio). Como o viewer da fonte é só-leitura (§11), o reflow do EPUB não tem desvantagem — não é preciso página tipografada fiel.
+- **Normalização**: independentemente do formato de origem, a ingestão normaliza tudo para uma representação interna (texto extraído + HTML no dialeto da app). EPUB chega quase pronto; PDF passa por extração; DJVU por OCR/conversão. Depois da ingestão, o formato-fonte vira detalhe de aquisição, transparente para o resto do sistema.
+- **Ingestão no acervo**: o livro baixado entra no acervo imutável de fontes e fica disponível para citação (§11) e para a camada de recuperação/embeddings (§10). Um mesmo livro é baixado uma única vez e reaproveitado entre nós e documentos vivos.
+- O download é decisão do agente, não ação manual do usuário — faz parte do fluxo de geração, disparado quando o material já presente no acervo não cobre o que o nó precisa fundamentar.
 
-## 12. AI provider integration (bring your own AI)
+## 12. Integração com provedores de IA (bring your own AI)
 
-- The user brings their own AI provider — the application does not pay for usage.
-- **Direct Anthropic and OpenAI**: API key only (BYOK). Subscription OAuth tokens (Claude Pro/Max, ChatGPT Plus/Pro) in third-party tools are outside Anthropic's terms of use (actively banned since April 2026) and are not a generic, publicly available OAuth flow on OpenAI's side (limited to Codex) — the integration is not built on top of those flows.
-- **OpenRouter**: the main/default path — an official, documented OAuth PKCE flow, made specifically for third-party apps, connects the user's account in one click, without copy/pasting a key. It gives access to Anthropic, OpenAI, and dozens of other providers behind a single integration, including free models (`:free` suffix, rate-limited).
-- **OpenCode Zen**: an additional free/paid provider option — a simple API key (no credit card for the free tier), an OpenAI-format-compatible endpoint.
-- **Direct BYOK** (Anthropic Console, OpenAI Platform, OpenCode Zen) as a secondary advanced option, with immediate key validation before saving and a direct link to each provider's key-generation page.
-- Key storage: local-first architecture — the key is kept in the operating system keychain, not in a centralized database.
+- Usuário traz seu próprio provedor de IA — não é a aplicação que paga pelo uso.
+- **Anthropic e OpenAI diretos**: apenas chave de API (BYOK). Token OAuth de assinatura (Claude Pro/Max, ChatGPT Plus/Pro) em ferramentas de terceiros está fora dos termos de uso da Anthropic (banido ativamente desde abril de 2026) e não é um fluxo OAuth genérico disponível publicamente do lado da OpenAI (limitado ao Codex) — a integração não é construída em cima desses fluxos.
+- **OpenRouter**: caminho principal/default — fluxo OAuth PKCE oficial e documentado, feito especificamente para apps de terceiros, conecta a conta do usuário em um clique, sem copiar/colar chave. Dá acesso a Anthropic, OpenAI e dezenas de outros provedores por trás de uma única integração, incluindo modelos gratuitos (sufixo `:free`, com rate limit).
+- **OpenCode Zen**: opção adicional de provedor gratuito/pago — chave de API simples (sem cartão de crédito para o tier gratuito), endpoint compatível com formato OpenAI.
+- **BYOK direto** (Anthropic Console, OpenAI Platform, OpenCode Zen) como opção avançada secundária, com validação imediata da chave antes de salvar e link direto para a página de geração de chave de cada provedor.
+- Armazenamento de chave: arquitetura local-first — chave guardada no keychain do sistema operacional, não em banco de dados centralizado.
 
-### 12.1 Model configuration (model tiering) for non-technical users
+### 12.1 Configuração de modelos (model tiering) para usuários não-técnicos
 
-The system uses **two model levels** (§14): a light/fast one for frequent, cheap tasks (generate an exercise, grade against the rubric, summaries, embeddings, cross-ref decisions) and a robust one for the explanatory prose and adversarial confrontation. But the user **does not pick two models by name** on the common path — tiering is the system's concern, not a setup step.
+O sistema usa **dois níveis de modelo** (§14): um leve/rápido para tarefas frequentes e baratas (gerar exercício, corrigir contra rubric, resumos, embeddings, decisão de cross-ref) e um robusto para a prosa explicativa e a confrontação adversarial. Mas o usuário **não escolhe dois modelos por nome** no caminho comum — tiering é preocupação do sistema, não etapa de setup.
 
-- **App-recommended and maintained pairings**, per provider/tier (fast + robust), updated as the model landscape changes. OpenRouter one-click: connect the account and done, zero model choice. Direct BYOK: the app auto-selects that provider's fast/robust pair. Free tier: a `:free` pair.
-- **The user expresses intent, not models.** A high-level question at setup — "free models (slower, with usage limits) or your paid account (faster, costs per use)?" — derives *both tiers* from a single choice.
-- **Minimal explanation with examples on the setup screen**: it shows which pair will be used by default and a one-line why (fast for checks, strong for teaching); editable, but **not required**.
-- **Manual two-model config is an advanced, optional override** — for the user who knows what they want. It is accepted that this user needs the knowledge; the non-technical user never sees a model name.
-- **Graceful degradation with a single model**: if only one model is available/configured, it serves both tiers. **Tiering is an optimization, not a requirement** — it is never a barrier to start.
-- **The free tier respects rate limits**: the `:free` pair must handle usage limits (queue/fallback/degradation), without breaking the study session.
+- **Pairings recomendados e mantidos pela app**, por provedor/tier (fast + robusto), atualizados conforme o cenário de modelos muda. OpenRouter one-click: conecta a conta e pronto, zero escolha de modelo. BYOK direto: a app auto-seleciona o par fast/robusto daquele provedor. Tier gratuito: um par `:free`.
+- **O usuário expressa intenção, não modelos.** Uma pergunta de alto nível no setup — "modelos gratuitos (mais lentos, com limite de uso) ou sua conta paga (mais rápido, custa por uso)?" — deriva *os dois tiers* de uma única escolha.
+- **Explicação mínima com exemplos na tela de setup**: mostra qual par será usado por padrão e uma linha do porquê (rápido para checagens, forte para ensinar); editável, mas **não obrigatório**.
+- **Config manual dos dois modelos é override avançado, opcional** — para o usuário que sabe o que quer. Aceita-se que esse usuário precise de conhecimento; o não-técnico nunca vê nome de modelo.
+- **Degradação graciosa com um só modelo**: se só há um modelo disponível/configurado, ele serve os dois tiers. **Tiering é otimização, não requisito** — nunca é barreira para começar.
+- **Tier gratuito respeita rate limit**: o par `:free` precisa lidar com limite de uso (fila/fallback/degradação), sem quebrar a sessão de estudo.
 
-### 12.2 Cost control and visibility
+### 12.2 Controle e visibilidade de custo
 
-Since it is BYOK and the app is *deliberately* token-heavy (atomic nodes, speculative prefetch, confrontation, retrieval), the user on a paid key must not be surprised by the bill.
+Como é BYOK e a app é *deliberadamente* pesada em tokens (nós atômicos, prefetch especulativo, confrontação, retrieval), o usuário em chave paga não pode ser surpreendido pela fatura.
 
-- **Spend configuration/visualization screen**: the user sets **daily/weekly/monthly** limits and sees how much they have already spent in each window.
-- **Enforcing the limits**: as the cap is approached/reached, the system throttles **speculative prefetch first** (§14), then warns/pauses generation — degrading responsiveness before blocking study.
-- **Running cost always visible** so the token-heavy design is never opaque.
-- **The free tier** shows rate-limit status instead of a monetary value.
+- **Tela de configuração/visualização de gastos**: o usuário define limites **diário/semanal/mensal** e vê quanto já gastou em cada janela.
+- **Aplicação dos limites**: ao aproximar/atingir o teto, o sistema estrangula **primeiro o prefetch especulativo** (§14), depois avisa/pausa a geração — degradando responsividade antes de bloquear o estudo.
+- **Custo corrente sempre visível** para que o design token-heavy nunca seja opaco.
+- **Tier gratuito** mostra status de rate limit em vez de valor monetário.
 
-## 13. Implementation approach
+## 13. Abordagem de implementação
 
-- **Full loop first, depth later.** Development starts with a vertical slice that closes the central cycle end to end (topic → node generated on demand → check with a locked rubric → grading fires the next node), and only then is each subsystem deepened to the quality of this spec. The reason: almost all of the project's risk is *calibration* (assessment quality, profile fidelity, cross-ref sensitivity), and that is only learned by using — building the elaborate machinery before knowing which signal predicts learning is expensive and probably wrong.
-- The final goal remains the complete application (not just the isolated central engine); the phasing is about the *order* of construction, not about delivering less.
-- **The LibGen crawl (§11.1) is part of the loop from the start** — grounding in real sources is not deferred; what is deepened later is the quality (format preference, normalization, viewer).
-- The detailed, living phase plan is in `PLAN.md` (phase 1: minimum loop; phase 2: complete application with a single living document; phase 3: multiple living documents with cross-referencing).
+- **Loop completo primeiro, profundidade depois.** O desenvolvimento começa por uma fatia vertical que fecha o ciclo central ponta-a-ponta (tema → nó gerado sob demanda → checagem com rubric travado → avaliação dispara o próximo nó), e só então cada subsistema é aprofundado até a qualidade desta spec. O motivo: quase todo o risco do projeto é de *calibração* (qualidade de avaliação, fidelidade do perfil, sensibilidade de cross-ref), e isso só se aprende usando — construir a maquinaria elaborada antes de saber qual sinal prevê aprendizado é caro e provavelmente errado.
+- O objetivo final continua sendo a aplicação completa (não só o motor central isolado); o faseamento é sobre a *ordem* de construção, não sobre entregar menos.
+- **Crawl do LibGen (§11.1) faz parte do loop desde o início** — a fundamentação em fontes reais não é adiada; o que se aprofunda depois é a qualidade (preferência de formato, normalização, viewer).
+- O plano de fases detalhado e vivo fica em `PLAN.md` (fase 1: loop mínimo; fase 2: aplicação completa com documento vivo único; fase 3: múltiplos documentos vivos com cross-referência).
 
-## 14. Latency and responsiveness
+## 14. Latência e responsividade
 
-The application must be **pleasant to use now**, on autoregressive API models with real latency — a study session where most of the time is spent watching a spinner is a failure. This is an **architecture/UX problem, not a model problem**: the faster model is a future lever that cannot be controlled while the stack is not self-hosted, so it **cannot be load-bearing**. The goal is not to eliminate latency, it is to make the user **almost never blocked**. The target metric is **time-to-first-token / time-to-reading** (~1s), not time-to-node-complete.
+A aplicação precisa ser **prazerosa de usar agora**, sobre modelos autoregressivos de API com latência real — uma sessão de estudo em que a maior parte do tempo é olhar um spinner é fracasso. Isso é um problema de **arquitetura/UX, não de modelo**: o modelo mais rápido é uma alavanca futura que não se controla enquanto a stack não é auto-hospedada, então **não pode ser load-bearing**. O objetivo não é eliminar a latência, é fazer o usuário **quase nunca estar bloqueado**. A métrica-alvo é **time-to-first-token / tempo até estar lendo** (~1s), não tempo até o nó ficar completo.
 
-Levers, from biggest to smallest:
+Alavancas, da maior para a menor:
 
-- **Streaming + optimizing TTFT (already in §3).** Human reading is slower than the prose generation rate; if the node streams token by token while the user reads, they never catch up to the spinner. Perceived latency becomes just the time-to-first-token.
-- **Predictive prefetch over the outline (§6).** While the user reads node N and does the exercise (seconds to minutes of human time), the likely next node(s) are generated in the background. Separate **"what comes next"** (predictable from the outline → generate ahead) from **"how to calibrate"** (depends on the assessment → a small delta post-grade). The prefetch depth/breadth is **cost-aware/adjustable**, because under BYOK wasted speculative work is the user's money.
-- **Pipeline within the node.** Prose streams first; exercise + rubric are generated in parallel while the user reads. §8 requires the rubric **locked before submission**, not in the same LLM call — so this preserves the invariant without serializing the wait. Grading overlaps with the prefetch. **Interactive visualizations/widgets (§4.4) hydrate after the prose** — they never delay TTFT.
-- **Model tiering (§12.1).** A light/fast model for the frequent tasks (exercise, grading against the rubric, summaries, embeddings, cross-ref); a robust model only for prose and adversarial confrontation. Since most of the atomic loop's rounds are the small ones, this directly attacks the "constant waiting" — and it is a knob available today via BYOK.
-- **Optimistic UI.** The user's action (submit an answer, ask) reflects in the document immediately; "thinking" happens in the document flow, never in a blocking modal.
+- **Streaming + otimizar TTFT (já na §3).** Leitura humana é mais lenta que a taxa de geração de prosa; se o nó streama token-a-token enquanto o usuário lê, ele nunca alcança o spinner. A latência percebida vira só o time-to-first-token.
+- **Prefetch preditivo sobre o outline (§6).** Enquanto o usuário lê o nó N e faz o exercício (segundos a minutos de tempo humano), gera-se em background o(s) provável(is) próximo(s) nó(s). Separar **"o que vem a seguir"** (previsível pelo outline → gerar adiantado) de **"como calibrar"** (depende da avaliação → delta pequeno pós-nota). Profundidade/largura do prefetch é **cost-aware/ajustável**, porque em BYOK trabalho especulativo desperdiçado é dinheiro do usuário.
+- **Pipeline dentro do nó.** Prosa streama primeiro; exercício + rubric geram em paralelo enquanto o usuário lê. A §8 exige o rubric **travado antes da submissão**, não na mesma chamada de LLM — então isso preserva o invariante sem serializar a espera. A correção sobrepõe com o prefetch. **Visualizações/widgets interativos (§4.4) hidratam depois da prosa** — nunca atrasam o TTFT.
+- **Model tiering (§12.1).** Modelo leve/rápido para as tarefas frequentes (exercício, correção contra rubric, resumos, embeddings, cross-ref); modelo robusto só para prosa e confrontação adversarial. Como a maioria das rodadas do loop atômico são as pequenas, isso ataca direto o "espera constante" — e é um knob disponível hoje via BYOK.
+- **UI otimista.** A ação do usuário (submeter resposta, perguntar) reflete na hora no documento; "pensando" acontece no fluxo do documento, nunca em modal bloqueante.
 
-**The model as a swappable knob, not a dependency.** Diffusion LLMs (e.g. the Mercury / Gemini Diffusion line) promise much better TTFT/throughput and are a plausible future lever once the stack is self-hosted — but the experience must not depend on them. The durable decision is a **model layer routed per sub-task and swappable** (which BYOK already forces); a faster model is a multiplier over an architecture that already hides latency, not the rescue of one that blocks.
+**Modelo como knob trocável, não dependência.** LLMs de difusão (ex. linha Mercury / Gemini Diffusion) prometem TTFT/throughput muito melhores e são uma alavanca futura plausível quando a stack for auto-hospedada — mas a experiência não pode depender deles. A decisão durável é uma **camada de modelo roteada por sub-tarefa e trocável** (que o BYOK já força); um modelo mais rápido é multiplicador sobre uma arquitetura que já esconde a latência, não o resgate de uma que bloqueia.
 
-**Synthesis with the atomic nodes (§6):** atomic nodes = more LLM rounds = risk of more spinner. The levers above (prefetch + tiering + streaming) are exactly what makes the atomic-node density affordable — the short-loop principle and responsiveness are resolved by the same architecture.
+**Síntese com os nós atômicos (§6):** nós atômicos = mais rodadas de LLM = risco de mais spinner. As alavancas acima (prefetch + tiering + streaming) são exatamente o que torna a densidade de nós atômicos acessível — o princípio do loop curto e a responsividade se resolvem pela mesma arquitetura.
 
-## 15. Endgame — hosting and portability
+## 15. Endgame — hospedagem e portabilidade
 
-- The first incarnation is a **desktop application**, local-first (§3, §4). Meanwhile, the model stack is BYOK (§12) and there is no own infrastructure.
-- When the desktop application has enough traction, the plan is to **host it and monetize with Monero donations** — in the spirit of how The Pirate Bay operated and LibGen operates. At that point the application is **100% portable**.
-- Design consequences that already hold now: keep everything **local-first and portable** (files as the source of truth §4, key in the keychain §12, rebuildable indexes §10), and keep the **source-acquisition module swappable** (§11.1) so the business model is not welded to a specific source.
+- A primeira encarnação é uma **aplicação desktop** local-first (§3, §4). Enquanto isso, a stack de modelo é BYOK (§12) e não há infraestrutura própria.
+- Quando a aplicação desktop tiver tração suficiente, o plano é **hospedá-la e monetizar com doações em Monero** — no espírito de como o The Pirate Bay operou e o LibGen opera. Nesse ponto a aplicação é **100% portátil**.
+- Consequências de design que já valem agora: manter tudo **local-first e portátil** (arquivos como fonte da verdade §4, chave no keychain §12, índices reconstruíveis §10), e manter o **módulo de aquisição de fontes trocável** (§11.1) para o modelo de negócio não ficar soldado a uma fonte específica.
 
-## 16. Open decisions / recorded risks
+## 16. Decisões em aberto / riscos registrados
 
-Known items, not yet resolved or to revisit — they do not block the start, but must not be forgotten.
+Itens conhecidos, ainda não resolvidos ou a revisitar — não bloqueiam o início, mas não devem ser esquecidos.
 
-- **Concurrency/resumability (baseline to revisit):** initial proposal — a single active study session per document; idempotent/resumable generation (a node carries generation state so an SSE stream interrupted by sleep/network resumes or regenerates deterministically, without corruption); multiple tabs = one authoritative session, the rest mirror read-only. To be defined with real usage.
-- **LibGen legal/operational risk:** automatically downloading copyrighted works has different exposure from manual downloading, especially in the hosting endgame (§15). Structural mitigation: the swappable acquisition module (§11.1). The final legal stance is outside the scope of this spec.
-- **Grounding in non-exact areas:** grounding exercises in the original material (§8) works well in exact sciences; in less deterministic domains it is looser and the assessment quality depends more on the §8.1 rubrics. A recognized, not solved, calibration risk.
-- **Evaluator-failure detection:** the thesis depends on the assessment quality; there is no explicit telemetry/correction mechanism (a "this is wrong/useless" affordance that feeds back) to *detect* leniency, hallucinated grounding, or confrontation against a strawman. To be designed during Phase 1, when the loop exists to be observed.
-- **Backup/sync across machines** (the polymath with a laptop + desktop): post-Phase-1; the file layout (§4) must preserve that possibility.
+- **Concorrência/resumabilidade (baseline a revisitar):** proposta inicial — sessão de estudo ativa única por documento; geração idempotente/resumível (um nó carrega estado de geração para que um stream SSE interrompido por sleep/rede resuma ou regenere deterministicamente, sem corromper); múltiplas abas = uma sessão autoritativa, as demais espelham em leitura. A definir com uso real.
+- **Risco legal/operacional do LibGen:** baixar automaticamente obras protegidas tem exposição diferente do download manual, sobretudo no endgame de hospedagem (§15). Mitigação estrutural: módulo de aquisição trocável (§11.1). Postura jurídica final fica fora do escopo desta spec.
+- **Grounding em áreas não-exatas:** o grounding de exercícios no material original (§8) funciona bem em exatas; em domínios menos determinísticos é mais frouxo e a qualidade da avaliação depende mais dos rubrics da §8.1. Risco de calibração reconhecido, não resolvido.
+- **Detecção de falha do avaliador:** a tese depende da qualidade da avaliação; falta um mecanismo explícito de telemetria/correção (affordance de "isso está errado/inútil" que realimente) para *detectar* leniência, grounding alucinado ou confrontação contra espantalho. A ser desenhado durante a Fase 1, quando o loop existir para ser observado.
+- **Backup/sync entre máquinas** (o polímata com laptop + desktop): pós-Fase-1; o layout de arquivos (§4) deve preservar essa possibilidade.
