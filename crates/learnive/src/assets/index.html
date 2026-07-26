@@ -293,6 +293,9 @@
         border-color: var(--accent);
         box-shadow: 0 0 0 1px var(--accent);
       }
+      .rem-answer {
+        margin-top: 0.8rem;
+      }
       button {
         font: inherit;
         padding: 0.5rem 1rem;
@@ -638,11 +641,27 @@
                 '<p class="muted">You have completed the current outline.</p>';
             }
           } else if (data.remediation_html) {
-            // Also LLM-generated → sanitize before the app origin (§3.1).
+            // Also LLM-generated → sanitize before the app origin (§3.1). The
+            // remediation explains and proposes a NEW similar problem (§8.2), but
+            // sanitized prose can't carry a form — so we append our own answer box
+            // wired back into the same grading loop. Re-submitting hits the same
+            // /answer endpoint: it re-grades against the locked rubric and either
+            // advances or remediates again (attempt count grows server-side).
             el("result").innerHTML +=
               '<div class="remediation"><h3>Let\'s review</h3>' +
               sanitizeHtml(data.remediation_html) +
-              "</div>";
+              '<form id="remForm" class="rem-answer">' +
+              '<textarea id="remAnswer" rows="4" ' +
+              'placeholder="Your answer to the new problem…"></textarea>' +
+              '<p><button type="submit">Submit answer</button></p>' +
+              "</form></div>";
+            const remForm = el("remForm");
+            remForm.addEventListener("submit", (e) => {
+              e.preventDefault();
+              submitAnswer(
+                JSON.stringify({ answer: el("remAnswer").value }),
+              );
+            });
           }
         } catch (err) {
           el("result").innerHTML =

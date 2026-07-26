@@ -426,10 +426,17 @@ fn demo_responder(req: &crate::ai::ChatRequest) -> String {
     } else if text.contains("exercise_html") {
         r#"{"exercise_html":"<form><p>Explain the concept in your own words and apply it to a new case:</p><textarea name=\"answer\" rows=\"4\" required></textarea><p><button type=\"submit\">Submit answer</button></p></form>","objectives":[{"id":"o1","kind":"application","description":"Apply the concept to a new case","criteria":"The answer transfers the concept to a scenario not covered in the text","transfer":true}]}"#.to_string()
     } else if text.contains("locked rubric") {
-        // Demo: always demonstrated, so the loop advances end to end.
-        r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"Good transfer of the concept to a new case."}]}"#.to_string()
+        // Demo: a blank/empty answer fails (so the "fail on purpose" flow reaches
+        // remediation §8.2 keyless); any real content is graded as demonstrated so
+        // the loop still advances end to end.
+        let blank = text.contains("\"answer\":\"\"") || text.contains("Student's answer: {}");
+        if blank {
+            r#"{"grades":[{"objective_id":"o1","grade":"not_demonstrated","feedback":"No answer given — nothing to assess."}]}"#.to_string()
+        } else {
+            r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"Good transfer of the concept to a new case."}]}"#.to_string()
+        }
     } else if text.contains("Remediation session") {
-        "<p>Let's review with a worked example and a new, similar problem.</p>".to_string()
+        "<p><strong>Worked example.</strong> Take the concept step by step: first identify what's given, then apply the core idea, then check the result against a case the text didn't cover.</p><p><strong>Now you try.</strong> Explain the concept in your own words and apply it to a new situation.</p>".to_string()
     } else {
         // Prose (default).
         "<h2>Core concept</h2><p>This is an explanatory paragraph generated in <strong>demo mode</strong> (no AI key). Configure a provider for real content, grounded in sources.</p><p>Each node is atomic and ends in a comprehension check.</p>".to_string()
