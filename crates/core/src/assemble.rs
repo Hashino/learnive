@@ -29,6 +29,84 @@ pub fn ensure_block_ids(inner_html: &str, prefix: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// Reconstructs just the frozen prose blocks from a node's stored
+/// `content.html` — every top-level element that carries `data-block-id`,
+/// in document order, re-serialized. Used to split the exercise back out on
+/// read (`api::get_node`, §S5/§4.3): the exercise wrapper `ensure_form_ids`
+/// (`engine.rs`) produces is not always a bare `<form>` (the model may wrap
+/// it, e.g. `<div><p>question</p><form>…`), so finding it by searching for
+/// the `<form` substring leaves that wrapper's non-block prefix dangling in
+/// the split-off prose. Selecting on the id attribute instead of a tag-name
+/// substring is exact regardless of what the model wrapped the form in.
+pub fn prose_blocks_only(content_html: &str) -> String {
+    let wrapped = format!(r#"<div id="__lv_root">{content_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let sel = Selector::parse("#__lv_root > *").expect("static selector");
+
+    let mut out = String::new();
+    for el in frag.select(&sel) {
+        if el.value().attr("data-block-id").is_some() {
+            out.push_str(&el.html());
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Extracts a single top-level content-layer element's raw HTML by its
+/// `data-block-id` (§4.3) — the interactive-island counterpart of the
+/// exercise-by-sidecar lookup: `api::block_frame` calls this to serve one
+/// `data-interactive` block (§4.4) through its own sandboxed frame, the same
+/// pattern `api::exercise_frame` uses for the graded exercise.
+pub fn extract_block_by_id(content_html: &str, block_id: &str) -> Option<String> {
+    let wrapped = format!(r#"<div id="__lv_root">{content_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let sel = Selector::parse("#__lv_root > *").expect("static selector");
+
+    frag.select(&sel)
+        .find(|el| el.value().attr("data-block-id") == Some(block_id))
+        .map(|el| el.html())
+}
+
+/// Empties every top-level `data-interactive` block (§4.4) in place: keeps
+/// its opening tag and attributes (so the client can still find it by
+/// `data-block-id` and hydrate it) but drops its raw HTML/JS content. The
+/// frozen original is only ever read back through `extract_block_by_id`, for
+/// the sandboxed frame route — it must never reach `content_html`, which is
+/// inserted into the app origin and only lightly re-sanitized there (§3.1).
+pub fn redact_interactive_blocks(content_html: &str) -> String {
+    let wrapped = format!(r#"<div id="__lv_root">{content_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let sel = Selector::parse("#__lv_root > *").expect("static selector");
+
+    let mut out = String::new();
+    for el in frag.select(&sel) {
+        if el.value().attr("data-interactive").is_some() {
+            out.push_str(&opening_tag(el.value()));
+            out.push_str("</");
+            out.push_str(el.value().name());
+            out.push('>');
+        } else {
+            out.push_str(&el.html());
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+fn opening_tag(el: &scraper::node::Element) -> String {
+    let mut s = format!("<{}", el.name());
+    for (name, value) in el.attrs() {
+        s.push(' ');
+        s.push_str(name);
+        s.push_str("=\"");
+        s.push_str(&value.replace('&', "&amp;").replace('"', "&quot;"));
+        s.push('"');
+    }
+    s.push('>');
+    s
+}
+
 /// Inserts ` data-block-id="id"` right after the opening tag name.
 fn inject_attr(html: &str, id: &str) -> String {
     let Some(rest) = html.strip_prefix('<') else {
@@ -79,5 +157,55 @@ mod tests {
         let out = ensure_block_ids(inner, "b");
         assert!(out.contains(r#"data-block-id="keep""#));
         assert!(out.contains(r#"data-block-id="b1""#));
+    }
+
+    #[test]
+    fn prose_blocks_only_drops_a_wrapped_exercise() {
+        // The model doesn't always wrap the exercise in a bare <form> — a
+        // surrounding <div>/<p> is common. A substring split on "<form"
+        // would leave that wrapper's opening tags dangling in the prose.
+        let content = r#"<p data-block-id="b1">Hello</p>
+<div><p>Question text</p><form data-exercise-id="ex1"><input></form></div>"#;
+        let prose = prose_blocks_only(content);
+        assert_eq!(prose, r#"<p data-block-id="b1">Hello</p>"#);
+        assert!(!prose.contains("Question text"));
+        assert!(!prose.contains("<form"));
+    }
+
+    #[test]
+    fn extract_block_by_id_returns_the_raw_element() {
+        let content = r#"<p data-block-id="b1">Hello</p>
+<figure data-block-id="b2" data-interactive><script>alert(1)</script></figure>
+<p data-block-id="b3">World</p>"#;
+        let block = extract_block_by_id(content, "b2").unwrap();
+        assert!(block.contains("<script>alert(1)</script>"));
+        assert!(block.contains("data-interactive"));
+        assert!(extract_block_by_id(content, "nope").is_none());
+    }
+
+    #[test]
+    fn redact_interactive_blocks_empties_but_keeps_the_slot() {
+        let content = r#"<p data-block-id="b1">Hello</p>
+<figure data-block-id="b2" data-interactive><script>alert(document.cookie)</script></figure>
+<p data-block-id="b3">World</p>"#;
+        let redacted = redact_interactive_blocks(content);
+        assert!(!redacted.contains("<script"));
+        assert!(!redacted.contains("alert"));
+        assert!(redacted.contains(r#"data-block-id="b2""#));
+        assert!(redacted.contains("data-interactive"));
+        assert!(redacted.contains("Hello"));
+        assert!(redacted.contains("World"));
+    }
+
+    #[test]
+    fn prose_blocks_only_keeps_a_bare_form_out_too() {
+        let content = r#"<p data-block-id="b1">Hello</p>
+<p data-block-id="b2">World</p>
+<form data-exercise-id="ex1"><input></form>"#;
+        let prose = prose_blocks_only(content);
+        assert_eq!(
+            prose,
+            "<p data-block-id=\"b1\">Hello</p>\n<p data-block-id=\"b2\">World</p>"
+        );
     }
 }

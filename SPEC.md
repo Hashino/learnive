@@ -15,7 +15,10 @@ Aplicação de aprendizado autodirigido que gera, para cada tema/ideia/problema 
 - **Topologia**: backend Rust rodando localmente como servidor HTTP; frontend renderizado no navegador do próprio usuário (não é um webview embutido tipo Tauri/Electron). O backend faz toda leitura/escrita de arquivo — o navegador nunca acessa o filesystem diretamente, só fala com o backend via rede local.
 - **Streaming**: Server-Sent Events (SSE) para empurrar conteúdo gerado incrementalmente pro documento em tela — o fluxo principal é servidor→cliente. Ações do usuário (selecionar texto, perguntar, responder exercício) são requisições HTTP normais.
 - **Framework HTTP**: `axum` (suporte nativo a SSE).
-- **Frontend**: **HTMX** como espinha dorsal (troca de HTML servidor→cliente, SSE, formulários — o modelo do HTMX é exatamente o fluxo da §3) + **JavaScript vanilla mínimo** só para o que é estado de cliente (seleção de texto, linha de leitura por scroll, streaming token-a-token, UI otimista) + um **módulo WebAssembly** compilado do mesmo crate Rust para a ancoragem da §4.3 (resolução bloco/quote escrita uma vez, sem reimplementar em JS e sem drift). **Sem framework JS de VDOM (React/etc.)**: o dado canônico é o próprio HTML (§4.2), então um VDOM que quer estado JSON como verdade seria impedância — o servidor gera o dialeto, o cliente o exibe. Sem etapa de build para a página; assets embutidos no binário (portabilidade §15).
+- **Frontend**: **JavaScript vanilla mínimo**, sem framework e sem etapa de build; assets embutidos no binário (portabilidade §15). **Sem framework JS de VDOM (React/etc.)**: o dado canônico é o próprio HTML (§4.2), então um VDOM que quer estado JSON como verdade seria impedância — o servidor gera o dialeto, o cliente o exibe.
+  - *Revisão 2026-08-03.* Esta seção originalmente especificava **HTMX** como espinha dorsal e um **módulo WebAssembly** compilado do mesmo crate Rust para a ancoragem da §4.3. Os dois foram **descartados** depois que os fluxos que os justificariam foram construídos (evidência registrada no PLAN.md):
+    - **HTMX** não serve o fluxo que de fato existe. O conteúdo streama por **SSE sobre POST**, porque `EventSource` não carrega o token de sessão e a §3.1 proíbe mutação em GET — enquanto a extensão SSE do HTMX pressupõe exatamente `EventSource`/GET. Adotá-lo seria retrofitar a biblioteca contra o único fluxo que ela não atende. O princípio pelo qual ele foi escolhido (o dado canônico é o HTML; o servidor gera o dialeto, o cliente exibe) se sustentou sozinho.
+    - O **módulo wasm** ficou sem consumidor. A ancoragem da §4.3 é resolvida **uma vez, no servidor**, no POST de pergunta/anotação; o cliente nunca resolve âncora, porque interações renderizam como cards num painel próprio e não como marca inline dentro da prosa. Não existe reimplementação em JS para manter em sincronia — o problema que o módulo resolvia foi eliminado pelo modelo de renderização escolhido. O crate compartilhado continua livre de dependências de runtime (barato, mantém a porta aberta se a ancoragem um dia precisar rodar no cliente), mas isso passou a ser higiene, não requisito de build.
 
 ### 3.1 Segurança do servidor local
 
@@ -222,10 +225,10 @@ O sistema usa **dois níveis de modelo** (§14): um leve/rápido para tarefas fr
 
 ### 12.2 Controle e visibilidade de custo
 
-Como é BYOK e a app é *deliberadamente* pesada em tokens (nós atômicos, prefetch especulativo, confrontação, retrieval), o usuário em chave paga não pode ser surpreendido pela fatura.
+Como é BYOK e a app é *deliberadamente* pesada em tokens (nós atômicos, confrontação, retrieval), o usuário em chave paga não pode ser surpreendido pela fatura.
 
 - **Tela de configuração/visualização de gastos**: o usuário define limites **diário/semanal/mensal** e vê quanto já gastou em cada janela.
-- **Aplicação dos limites**: ao aproximar/atingir o teto, o sistema estrangula **primeiro o prefetch especulativo** (§14), depois avisa/pausa a geração — degradando responsividade antes de bloquear o estudo.
+- **Aplicação dos limites**: ao aproximar/atingir o teto, o sistema degrada antes de bloquear — avisa, rebaixa o que puder para o tier leve (§12.1) e só então pausa a geração, preservando a leitura do que já existe. *(Revisão 2026-08-03: a redação original estrangulava **primeiro o prefetch especulativo**; com o prefetch descartado na §14, o tiering forçado passa a ser o primeiro degrau de degradação.)*
 - **Custo corrente sempre visível** para que o design token-heavy nunca seja opaco.
 - **Tier gratuito** mostra status de rate limit em vez de valor monetário.
 
@@ -243,14 +246,14 @@ A aplicação precisa ser **prazerosa de usar agora**, sobre modelos autoregress
 Alavancas, da maior para a menor:
 
 - **Streaming + otimizar TTFT (já na §3).** Leitura humana é mais lenta que a taxa de geração de prosa; se o nó streama token-a-token enquanto o usuário lê, ele nunca alcança o spinner. A latência percebida vira só o time-to-first-token.
-- **Prefetch preditivo sobre o outline (§6).** Enquanto o usuário lê o nó N e faz o exercício (segundos a minutos de tempo humano), gera-se em background o(s) provável(is) próximo(s) nó(s). Separar **"o que vem a seguir"** (previsível pelo outline → gerar adiantado) de **"como calibrar"** (depende da avaliação → delta pequeno pós-nota). Profundidade/largura do prefetch é **cost-aware/ajustável**, porque em BYOK trabalho especulativo desperdiçado é dinheiro do usuário.
+- ~~**Prefetch preditivo sobre o outline (§6).**~~ — **descartado 2026-08-03.** A alavanca pressupunha que *"o que vem a seguir"* fosse previsível pelo outline. Deixou de ser: o próximo movimento é decidido dinamicamente a cada passo, um movimento de replanejamento pode reescrever o outline inteiro, e o grafo tem pré-requisitos que podem redirecionar a travessia. Gerar adiantado virou especular sobre especulação — e em BYOK a especulação desperdiçada é dinheiro do usuário, gasto sem que exista teto ou medidor (§12.2). As demais alavancas desta seção (streaming token-a-token, tiering, pipeline dentro do nó) já entregam a meta de time-to-first-token sem ela. Se voltar um dia, volta como prefetch de **recuperação** — embeddings/passagens do próximo item destravado, determinístico e sem tokens de modelo —, nunca de prosa.
 - **Pipeline dentro do nó.** Prosa streama primeiro; exercício + rubric geram em paralelo enquanto o usuário lê. A §8 exige o rubric **travado antes da submissão**, não na mesma chamada de LLM — então isso preserva o invariante sem serializar a espera. A correção sobrepõe com o prefetch. **Visualizações/widgets interativos (§4.4) hidratam depois da prosa** — nunca atrasam o TTFT.
 - **Model tiering (§12.1).** Modelo leve/rápido para as tarefas frequentes (exercício, correção contra rubric, resumos, embeddings, cross-ref); modelo robusto só para prosa e confrontação adversarial. Como a maioria das rodadas do loop atômico são as pequenas, isso ataca direto o "espera constante" — e é um knob disponível hoje via BYOK.
 - **UI otimista.** A ação do usuário (submeter resposta, perguntar) reflete na hora no documento; "pensando" acontece no fluxo do documento, nunca em modal bloqueante.
 
 **Modelo como knob trocável, não dependência.** LLMs de difusão (ex. linha Mercury / Gemini Diffusion) prometem TTFT/throughput muito melhores e são uma alavanca futura plausível quando a stack for auto-hospedada — mas a experiência não pode depender deles. A decisão durável é uma **camada de modelo roteada por sub-tarefa e trocável** (que o BYOK já força); um modelo mais rápido é multiplicador sobre uma arquitetura que já esconde a latência, não o resgate de uma que bloqueia.
 
-**Síntese com os nós atômicos (§6):** nós atômicos = mais rodadas de LLM = risco de mais spinner. As alavancas acima (prefetch + tiering + streaming) são exatamente o que torna a densidade de nós atômicos acessível — o princípio do loop curto e a responsividade se resolvem pela mesma arquitetura.
+**Síntese com os nós atômicos (§6):** nós atômicos = mais rodadas de LLM = risco de mais spinner. As alavancas acima (streaming + tiering + pipeline dentro do nó) são exatamente o que torna a densidade de nós atômicos acessível — o princípio do loop curto e a responsividade se resolvem pela mesma arquitetura.
 
 ## 15. Endgame — hospedagem e portabilidade
 

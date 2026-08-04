@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Session token injected by the server; sent as the X-Learnive-Token
+         header on every request (§3.1), never a cookie. -->
+    <meta name="learnive-token" content="{{TOKEN}}" />
+    <title>learnive — setup</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #2e3440;
+        --panel: #3b4252;
+        --fg: #d8dee9;
+        --muted: #7b8494;
+        --accent: #88c0d0;
+        --border: #4c566a;
+        --ok: #a3be8c;
+        --err: #bf616a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Ubuntu Mono", "JetBrains Mono", monospace;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.6;
+      }
+      nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.8rem 1.2rem;
+        border-bottom: 1px solid var(--border);
+      }
+      nav a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 1.5rem 1.2rem 3rem;
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      fieldset {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin: 1rem 0;
+        padding: 0.9rem 1rem;
+      }
+      legend {
+        color: var(--accent);
+        padding: 0 0.4rem;
+      }
+      label {
+        display: block;
+        margin: 0.5rem 0 0.2rem;
+      }
+      input[type="text"],
+      input[type="password"],
+      select {
+        width: 100%;
+        font: inherit;
+        padding: 0.45rem 0.55rem;
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+      .radios label {
+        display: inline-flex;
+        gap: 0.4rem;
+        align-items: center;
+        margin-right: 1.4rem;
+      }
+      button {
+        font: inherit;
+        margin-top: 1rem;
+        padding: 0.5rem 1.1rem;
+        border-radius: 4px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #2e3440;
+        cursor: pointer;
+      }
+      button:hover {
+        opacity: 0.9;
+      }
+      .hidden {
+        display: none;
+      }
+      #msg {
+        margin-top: 1rem;
+        min-height: 1.4rem;
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .err {
+        color: var(--err);
+      }
+      code {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/">← learnive</a>
+      <span class="muted">setup</span>
+    </nav>
+    <main>
+      <h1>Provider setup</h1>
+      <p class="muted">
+        Bring your own key (§12). Your key is stored locally in a
+        <code>0600</code> file (never a database, never committed) and never
+        leaves this machine except to the provider you choose. Pick free or paid
+        — the app derives both model tiers for you.
+      </p>
+
+      <form id="form">
+        <fieldset>
+          <legend>Provider</legend>
+          <label for="provider">Which provider?</label>
+          <select id="provider">
+            <option value="demo">Demo (no key — canned content)</option>
+            <option value="openrouter">OpenRouter (recommended)</option>
+            <option value="openai_compatible">
+              OpenAI-compatible endpoint (Mercury, local, …)
+            </option>
+          </select>
+
+          <div id="baseUrlRow" class="hidden">
+            <label for="baseUrl">Base URL</label>
+            <input
+              type="text"
+              id="baseUrl"
+              placeholder="https://api.inceptionlabs.ai/v1"
+            />
+          </div>
+
+          <div id="keyRow" class="hidden">
+            <label for="apiKey">API key <span id="keyHint" class="muted"></span></label>
+            <input type="password" id="apiKey" placeholder="sk-…" autocomplete="off" />
+          </div>
+        </fieldset>
+
+        <fieldset id="intentBox">
+          <legend>Budget</legend>
+          <div class="radios">
+            <label><input type="radio" name="intent" value="free" checked /> Free models</label>
+            <label><input type="radio" name="intent" value="paid" /> Paid models (better quality)</label>
+          </div>
+          <p class="muted" id="derived"></p>
+        </fieldset>
+
+        <button type="submit">Save</button>
+      </form>
+      <div id="msg"></div>
+    </main>
+
+    <script>
+      const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
+      const el = (id) => document.getElementById(id);
+
+      function authFetch(path, options = {}) {
+        const headers = Object.assign(
+          { "X-Learnive-Token": TOKEN },
+          options.headers || {},
+        );
+        return fetch(path, Object.assign({}, options, { headers }));
+      }
+
+      // Show/hide provider-specific fields.
+      function syncFields() {
+        const p = el("provider").value;
+        el("baseUrlRow").classList.toggle("hidden", p !== "openai_compatible");
+        el("keyRow").classList.toggle("hidden", p === "demo");
+        el("intentBox").classList.toggle("hidden", p === "demo");
+      }
+      el("provider").addEventListener("change", syncFields);
+
+      function showStatus(s) {
+        el("provider").value = s.provider;
+        if (s.base_url) el("baseUrl").value = s.base_url;
+        for (const r of document.getElementsByName("intent"))
+          r.checked = r.value === s.intent;
+        el("keyHint").textContent = s.has_key
+          ? "(a key is already saved — leave blank to keep it)"
+          : "";
+        el("derived").textContent = s.demo
+          ? "Demo mode: canned content, no models."
+          : `Models — fast: ${s.model_fast} · robust: ${s.model_robust}`;
+        syncFields();
+      }
+
+      // Prefill from current config.
+      authFetch("/api/setup")
+        .then((r) => r.json())
+        .then(showStatus)
+        .catch(() => {});
+
+      el("form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        el("msg").textContent = "Saving…";
+        el("msg").className = "";
+        const intent = [...document.getElementsByName("intent")].find(
+          (r) => r.checked,
+        ).value;
+        const body = {
+          provider: el("provider").value,
+          intent,
+          base_url: el("baseUrl").value || null,
+          api_key: el("apiKey").value || null,
+        };
+        try {
+          const resp = await authFetch("/api/setup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const s = await resp.json();
+          el("apiKey").value = "";
+          showStatus(s);
+          el("msg").textContent = s.demo
+            ? "Saved. Running in demo mode."
+            : "Saved and applied — no restart needed.";
+          el("msg").className = "ok";
+        } catch (err) {
+          el("msg").textContent = "Error: " + err;
+          el("msg").className = "err";
+        }
+      });
+    </script>
+  </body>
+</html>

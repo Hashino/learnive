@@ -68,15 +68,23 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
 
     // Restrictive CSP (§3.1) as defense in depth beyond the client sanitizer:
     // `connect-src 'self'` prevents exfiltrating the token to another origin;
-    // `object-src`/`base-uri 'none'` close classic vectors. Interactive blocks
-    // run in an `<iframe sandbox srcdoc>` (§4.4), covered by `frame-src 'self'`.
+    // `object-src`/`base-uri 'none'` close classic vectors. Interactive/exercise
+    // blocks run in their own sandboxed frame served by a dedicated route (§4.4)
+    // that sets its own, deliberately more permissive CSP — this default is
+    // only applied when a handler hasn't already set one, so that route's
+    // policy is never clobbered on the way out.
     // `'unsafe-inline'` is still needed because the page's script and styles are
     // inline — externalizing them to drop it is a later hardening.
     let mut response = next.run(req).await;
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
+    if !response
+        .headers()
+        .contains_key(header::CONTENT_SECURITY_POLICY)
+    {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CSP),
+        );
+    }
     response
 }
 

@@ -114,6 +114,13 @@ pub enum InteractionItem {
         kind: ThreadKind,
         anchor_block: Option<String>,
         body_html: String,
+        /// Set when this thread's answer is a spawned sub-node (§S8) rather
+        /// than inline prose: the id of a real, separately-stored `Node`
+        /// (present in `outline.json`, `parent_id` pointing back at this
+        /// node) whose content the client splices inline at `anchor_block`,
+        /// permanently — not a collapsed/expandable widget.
+        #[serde(default)]
+        child_node_id: Option<String>,
     },
 }
 
@@ -327,6 +334,7 @@ fn parse_interaction(article: &ElementRef) -> Vec<InteractionItem> {
                         .unwrap_or(ThreadKind::Qa),
                     anchor_block: v.attr("data-anchor-block").map(str::to_string),
                     body_html: el.inner_html(),
+                    child_node_id: v.attr("data-child-node-id").map(str::to_string),
                 }),
                 _ => None,
             }
@@ -372,12 +380,16 @@ fn render_interaction(item: &InteractionItem) -> String {
             kind,
             anchor_block,
             body_html,
+            child_node_id,
         } => {
             let mut s = String::from("    <div");
             push_attr(&mut s, "data-thread-id", id);
             push_attr(&mut s, "data-thread-kind", thread_kind_str(*kind));
             if let Some(b) = anchor_block {
                 push_attr(&mut s, "data-anchor-block", b);
+            }
+            if let Some(c) = child_node_id {
+                push_attr(&mut s, "data-child-node-id", c);
             }
             s.push('>');
             s.push_str(body_html);
@@ -528,6 +540,7 @@ mod tests {
             kind: ThreadKind::Remediation,
             anchor_block: Some("b2".to_string()),
             body_html: "<p>remediation</p>".to_string(),
+            child_node_id: None,
         });
         node.push_interaction(InteractionItem::Annotation {
             id: "a2".to_string(),

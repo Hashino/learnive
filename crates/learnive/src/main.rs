@@ -9,8 +9,16 @@
 mod ai;
 mod api;
 mod app;
+mod config;
 mod engine;
+mod events;
+mod movement;
+mod objective;
+mod profile;
+mod retrieval;
+mod secret;
 mod security;
+mod source;
 mod store;
 
 use std::net::SocketAddr;

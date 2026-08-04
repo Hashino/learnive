@@ -21,6 +21,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use learnive_core::{Node, ParseError};
 
@@ -35,6 +36,10 @@ pub enum StoreError {
     Io(io::Error),
     /// Malformed node HTML.
     Parse(ParseError),
+    /// A `update_outline_file` closure rejected the current contents (e.g.
+    /// malformed JSON) — kept generic (a `String`, not a serde error type)
+    /// so `Store` stays agnostic of `Outline`'s Rust shape (§4, §S8).
+    Invalid(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -44,6 +49,7 @@ impl std::fmt::Display for StoreError {
             StoreError::NotFound(p) => write!(f, "not found: {}", p.display()),
             StoreError::Io(e) => write!(f, "I/O error: {e}"),
             StoreError::Parse(e) => write!(f, "malformed node: {e}"),
+            StoreError::Invalid(msg) => write!(f, "invalid content: {msg}"),
         }
     }
 }
@@ -68,6 +74,18 @@ type Result<T> = std::result::Result<T, StoreError>;
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    // Serializes `append_interaction`'s read-modify-write so two concurrent
+    // requests (e.g. `/ask` and `/annotate` on the same node) can't both read
+    // before either writes and silently drop one append (§5, §S6). Shared
+    // across `Clone`s via `Arc` — a per-clone `Mutex` would not serialize
+    // anything.
+    interaction_lock: Arc<Mutex<()>>,
+    // Same class of race, one file over: `outline.json` can be read-modify-
+    // written by a spawned sub-node insertion (§S8) and by an approved
+    // `plan` proposal (`decide_plan_proposal`) from concurrent requests.
+    // Separate from `interaction_lock` since the two files are unrelated —
+    // no reason for one to block the other.
+    outline_lock: Arc<Mutex<()>>,
 }
 
 impl Store {
@@ -75,7 +93,11 @@ impl Store {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            interaction_lock: Arc::new(Mutex::new(())),
+            outline_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     /// Creates a living document's directory. Idempotent.
@@ -153,15 +175,34 @@ impl Store {
 
     /// Append-only convenience (§4.3): loads the node, appends an interaction
     /// item, and rewrites. Never touches the content layer.
+    ///
+    /// Holds `interaction_lock` across the whole read-modify-write so two
+    /// concurrent callers can't both read the pre-append node and have the
+    /// later write clobber the earlier one (§5 — no destructive edits).
     pub fn append_interaction(
         &self,
         doc_id: &str,
         node_id: &str,
         item: learnive_core::InteractionItem,
     ) -> Result<()> {
+        let _guard = self
+            .interaction_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut node = self.read_node(doc_id, node_id)?;
         node.push_interaction(item);
         self.write_node(&node)
+    }
+
+    /// Opens the document's event log (§7.1, `events` module) — `<doc>/events.jsonl`.
+    /// Routes through `ensure_safe_id`, the codebase's one path-traversal gate;
+    /// `EventLog` has no other way to be constructed with an arbitrary path.
+    pub fn event_log(&self, doc_id: &str) -> Result<crate::events::EventLog> {
+        ensure_safe_id(doc_id)?;
+        fs::create_dir_all(self.doc_dir(doc_id))?;
+        Ok(crate::events::EventLog::new(
+            self.doc_dir(doc_id).join("events.jsonl"),
+        ))
     }
 
     /// Writes a **server-only** sidecar file inside the document's directory
@@ -185,6 +226,25 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound(path)),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Guarded read-modify-write of `<doc>/outline.json` (§S8): holds
+    /// `outline_lock` across the whole read, `f`, write — the same fix
+    /// `interaction_lock` applied to node interaction appends, arriving at a
+    /// second shared file two concurrent handlers (a sub-node spawn, a `plan`
+    /// approval) can both mutate. `f` works in raw JSON text so `Store` stays
+    /// agnostic of `Outline`'s Rust shape; the caller parses/mutates/
+    /// re-serializes and returns `Err` (mapped to `StoreError::Invalid`) on a
+    /// parse failure instead of `?`-ing through a foreign error type.
+    pub fn update_outline_file(
+        &self,
+        doc_id: &str,
+        f: impl FnOnce(&str) -> std::result::Result<String, String>,
+    ) -> Result<()> {
+        let _guard = self.outline_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self.read_doc_file(doc_id, "outline.json")?;
+        let updated = f(&current).map_err(StoreError::Invalid)?;
+        self.write_doc_file(doc_id, "outline.json", &updated)
     }
 
     fn doc_dir(&self, doc_id: &str) -> PathBuf {
@@ -318,6 +378,28 @@ mod tests {
     }
 
     #[test]
+    fn event_log_rooted_under_doc_dir_and_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+
+        let log = store.event_log("algebra").unwrap();
+        log.append(
+            None,
+            crate::events::EventKind::SchemaViolation {
+                move_type: "testar".into(),
+                detail: "d".into(),
+            },
+        )
+        .unwrap();
+        assert!(tmp.path().join("algebra/events.jsonl").exists());
+
+        assert!(matches!(
+            store.event_log("../etc"),
+            Err(StoreError::InvalidId(_))
+        ));
+    }
+
+    #[test]
     fn doc_files_round_trip_and_reject_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).unwrap();
@@ -342,6 +424,43 @@ mod tests {
             store.write_doc_file("algebra", ".hidden", "x"),
             Err(StoreError::InvalidId(_))
         ));
+    }
+
+    #[test]
+    fn update_outline_file_applies_the_closure_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        store
+            .write_doc_file("algebra", "outline.json", r#"{"topic":"x","items":[]}"#)
+            .unwrap();
+
+        store
+            .update_outline_file("algebra", |json| {
+                let mut v: serde_json::Value = serde_json::from_str(json).unwrap();
+                v["topic"] = serde_json::json!("updated");
+                Ok(v.to_string())
+            })
+            .unwrap();
+
+        let updated = store.read_doc_file("algebra", "outline.json").unwrap();
+        assert!(updated.contains("\"updated\""));
+    }
+
+    #[test]
+    fn update_outline_file_maps_closure_error_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        store
+            .write_doc_file("algebra", "outline.json", "original")
+            .unwrap();
+
+        let result = store.update_outline_file("algebra", |_json| Err("bad content".to_string()));
+        assert!(matches!(result, Err(StoreError::Invalid(msg)) if msg == "bad content"));
+        // A rejected closure must not clobber the file with a partial write.
+        assert_eq!(
+            store.read_doc_file("algebra", "outline.json").unwrap(),
+            "original"
+        );
     }
 
     #[test]

@@ -325,8 +325,46 @@
         font-weight: 700;
         color: var(--accent);
       }
+      /* §S5 gate state: locked items are visible (so the graph shape reads)
+         but not reachable; available/demonstrated items are clickable. */
+      #outline li.state-locked {
+        opacity: 0.5;
+      }
+      #outline li.state-available,
+      #outline li.state-demonstrated {
+        cursor: pointer;
+      }
+      #outline li.state-available:hover,
+      #outline li.state-demonstrated:hover {
+        color: var(--accent);
+      }
       #prose {
         min-height: 2rem;
+      }
+      /* A spawned sub-node (§S8), spliced permanently into the reading flow
+         right after the paragraph that prompted it — not a toggle, always
+         rendered. The left border marks it as a distinct section without
+         hiding it behind an expand/collapse affordance. */
+      .subnode {
+        border-left: 3px solid var(--accent);
+        padding-left: 0.9rem;
+        margin: 1rem 0;
+      }
+      .subnode > .subnode-title {
+        font-size: 0.85rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 0.4rem;
+      }
+      .subnode > .subnode-question {
+        font-size: 0.9rem;
+        font-style: italic;
+        color: var(--muted);
+        margin-bottom: 0.6rem;
+      }
+      figure[data-interactive] {
+        margin: 1rem 0;
       }
       iframe.sandbox {
         display: block;
@@ -359,6 +397,39 @@
       .error {
         color: var(--nord11);
       }
+      /* §S6 reading interactions (§9): the append-only Q&A/annotation/
+         remediation history, each visually distinct so the source of a
+         given entry (asked, noted, or a failed-check walkthrough) reads at
+         a glance. */
+      #interactions > div {
+        border-left: 3px solid var(--card-border);
+        padding-left: 0.75rem;
+        margin: 0.75rem 0;
+      }
+      #interactions > .qa {
+        border-color: var(--accent);
+      }
+      #interactions > .annotation {
+        border-color: var(--nord13);
+      }
+      .reading-toolbar button {
+        font-size: 0.85rem;
+        padding: 0.3rem 0.6rem;
+      }
+      .reading-popover {
+        position: fixed;
+        z-index: 20;
+        padding: 0.35rem;
+        display: flex;
+        gap: 0.35rem;
+      }
+      .reading-popover button {
+        font-size: 0.8rem;
+        padding: 0.25rem 0.5rem;
+      }
+      #readingForm textarea {
+        width: 100%;
+      }
     </style>
     <!-- Set the theme before first paint (no flash): saved choice, else the OS
          preference. The toggle is wired in the main script below. -->
@@ -385,6 +456,7 @@
         <a href="/" class="nav-title">learnive</a>
         <div class="nav-right">
           <span class="nav-tag">living document</span>
+          <a href="/setup" class="nav-tag" style="text-decoration: none">setup</a>
           <button
             id="themeToggle"
             class="theme-toggle"
@@ -397,27 +469,96 @@
     </nav>
 
     <div class="main-container">
-      <!-- Cold start (§6.1): a single generic question. -->
+      <!-- Cold start (§6.1): a single generic question, then a confirmable
+           objective (§S4) before the outline is generated. -->
       <section id="coldstart" class="card">
         <h1>What are we learning?</h1>
         <form id="startForm">
           <textarea id="topic" rows="3" autofocus></textarea>
           <p><button type="submit">Start</button></p>
         </form>
+
+        <!-- Objective confirm (§6.1/§S4): the app almost never skips this —
+             it anchors every future generation decision, so it's always
+             shown editable, even for an unambiguous request. -->
+        <div id="objectiveConfirm" hidden>
+          <h2>Curriculum objective</h2>
+          <p class="muted">
+            Here's the objective we'll build the curriculum toward — edit it
+            if this isn't quite right.
+          </p>
+          <textarea id="objectiveText" rows="2"></textarea>
+          <p class="muted">Non-goals (comma-separated, optional):</p>
+          <textarea id="nonGoalsText" rows="1"></textarea>
+          <p>
+            <button type="button" id="objectiveConfirmBtn">Confirm</button>
+            <button type="button" id="objectiveBackBtn">Back</button>
+          </p>
+        </div>
+
         <p id="startStatus" class="muted"></p>
       </section>
 
       <!-- Living document (§9). -->
       <main id="doc" hidden class="card">
         <ol id="outline"></ol>
+        <!-- §S5 revisit scheduler: a suggestion, not a mandate — hidden when
+             nothing is currently skipped. -->
+        <p id="revisitHint" class="muted" hidden></p>
+
+        <!-- §S6 reading interactions (§9 "the document is the answer"):
+             question-on-the-line / a note anchored to whichever block is
+             nearest the viewport center — the reading line's position, read
+             once at click time, never persisted (§9); only the resulting
+             anchor is. Disabled until the node is finalized. -->
+        <p class="reading-toolbar">
+          <button type="button" id="askLineBtn" disabled>Ask about this</button>
+          <button type="button" id="noteLineBtn" disabled>Add a note</button>
+        </p>
+
         <article id="prose"></article>
         <div id="exercise"></div>
+        <!-- Scroll-to-end sentinel (§S6 "Ritmo"): crossing this logs the
+             signal event. Placed after the exercise so it marks the end of
+             the node's actual content, not the interaction history below. -->
+        <div id="readEndSentinel"></div>
         <!-- Append-only interaction layer (§4.3): attempts + remediation
              accumulate here and are never overwritten within a node. -->
         <div id="interactions"></div>
         <!-- Transient status only (evaluating…, errors). -->
         <div id="result"></div>
         <div id="controls"></div>
+
+        <!-- Floating popover shown next to a live text selection inside
+             #prose (§S6 selection→question/annotation). -->
+        <div id="selectionPopover" class="card reading-popover" hidden>
+          <button type="button" id="selAskBtn">Ask</button>
+          <button type="button" id="selNoteBtn">Note</button>
+        </div>
+
+        <!-- Shared inline form for both "ask" and "annotate" (§S6) — which
+             one is filled in by whichever control opened it. -->
+        <form id="readingForm" class="card" hidden>
+          <h3 id="readingFormTitle"></h3>
+          <textarea id="readingFormText" rows="2"></textarea>
+          <p>
+            <button type="submit">Send</button>
+            <button type="button" id="readingFormCancel">Cancel</button>
+          </p>
+          <p id="readingFormStatus" class="muted"></p>
+        </form>
+
+        <!-- A `plan` move's proposed outline revision, awaiting approval
+             (§5 propose→approve, §S4). Pauses generation until decided. -->
+        <div id="planProposal" hidden class="card">
+          <h2>Proposed outline change</h2>
+          <div id="planRationale"></div>
+          <ol id="planProposedOutline"></ol>
+          <p>
+            <button type="button" id="planApproveBtn">Approve</button>
+            <button type="button" id="planRejectBtn">Reject</button>
+          </p>
+        </div>
       </main>
     </div>
 
@@ -441,7 +582,19 @@
       }
 
       const el = (id) => document.getElementById(id);
-      const state = { docId: null, titles: [], index: 0, nodeId: null };
+      // items: [{id, title, state}] from the server (§S5) — state is
+      // "locked" | "available" | "demonstrated", the graph's gate resolved.
+      // currentId is the outline item id being generated/answered; nodeId
+      // mirrors it once generation actually completes (kept separate so a
+      // still-streaming request doesn't let a stray postMessage answer
+      // reach the wrong node).
+      const state = {
+        docId: null,
+        items: [],
+        currentId: null,
+        nodeId: null,
+        suggestedRevisit: null,
+      };
       // The current exercise's sandbox iframe (for height + theme messages).
       let exerciseFrame = null;
 
@@ -458,54 +611,562 @@
         document.documentElement.dataset.theme = next;
         localStorage.setItem("learnive-theme", next);
         syncThemeToggle();
-        // Re-theme a live exercise iframe (sandboxed → only reachable by message).
-        if (exerciseFrame && exerciseFrame.contentWindow) {
-          exerciseFrame.contentWindow.postMessage(
-            { type: "learnive-theme", theme: next },
-            "*",
-          );
+        // Re-theme every sandbox iframe (node check + remediation problems);
+        // they're reachable only by message (§4.4).
+        for (const f of document.querySelectorAll("iframe.sandbox")) {
+          if (f.contentWindow) {
+            f.contentWindow.postMessage(
+              { type: "learnive-theme", theme: next },
+              "*",
+            );
+          }
         }
       });
       syncThemeToggle();
 
-      // --- Cold start -------------------------------------------------------
+      // --- Cold start (§6.1/§S4) ---------------------------------------------
+      // Two steps: propose a compact, editable objective from the raw topic,
+      // then confirm (possibly edited) before the outline is generated and
+      // the document is created — the objective anchors every later move.
+      let pendingTopic = null;
+
       el("startForm").addEventListener("submit", async (e) => {
         e.preventDefault();
         const topic = el("topic").value.trim();
         if (!topic) return;
-        el("startStatus").textContent = "planning the curriculum…";
+        pendingTopic = topic;
+        el("startStatus").textContent = "thinking about the objective…";
         try {
-          const resp = await postJson("/api/documents", { topic });
+          const resp = await postJson("/api/objective/propose", { topic });
           if (!resp.ok) throw new Error(await resp.text());
           const data = await resp.json();
-          state.docId = data.doc_id;
-          state.titles = data.titles;
-          el("coldstart").hidden = true;
-          el("doc").hidden = false;
-          renderOutline();
-          generateNode(0);
+          el("objectiveText").value = data.text;
+          el("nonGoalsText").value = (data.non_goals || []).join(", ");
+          el("startStatus").textContent = "";
+          el("startForm").hidden = true;
+          el("objectiveConfirm").hidden = false;
         } catch (err) {
           el("startStatus").innerHTML =
             '<span class="error">failed: ' + escapeHtml(String(err)) + "</span>";
         }
       });
 
+      el("objectiveBackBtn").addEventListener("click", () => {
+        el("objectiveConfirm").hidden = true;
+        el("startForm").hidden = false;
+      });
+
+      el("objectiveConfirmBtn").addEventListener("click", async () => {
+        const objective_text = el("objectiveText").value.trim();
+        const non_goals = el("nonGoalsText")
+          .value.split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        el("startStatus").textContent = "planning the curriculum…";
+        try {
+          const resp = await postJson("/api/documents", {
+            topic: pendingTopic,
+            objective_text,
+            non_goals,
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          state.docId = data.doc_id;
+          state.items = data.items;
+          el("coldstart").hidden = true;
+          el("doc").hidden = false;
+          renderOutline();
+          generateNode(state.items[0].id);
+        } catch (err) {
+          el("startStatus").innerHTML =
+            '<span class="error">failed: ' + escapeHtml(String(err)) + "</span>";
+        }
+      });
+
+      // Renders the outline with its gate state (§S5): locked items are
+      // shown but not clickable, available/demonstrated items jump straight
+      // to that node (not just "next" — a diamond can leave several
+      // available at once, even though today's outlines are all linear).
       function renderOutline() {
-        el("outline").innerHTML = state.titles
-          .map(
-            (t, i) =>
+        el("outline").innerHTML = state.items
+          .map((it) => {
+            const cls = [
+              it.id === state.currentId ? "current" : "",
+              "state-" + it.state,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            const badge =
+              it.state === "locked" ? " 🔒" : it.state === "demonstrated" ? " ✓" : "";
+            return (
               '<li class="' +
-              (i === state.index ? "current" : "") +
+              cls +
+              '" data-id="' +
+              it.id +
               '">' +
-              escapeHtml(t) +
-              "</li>",
-          )
+              escapeHtml(it.title) +
+              badge +
+              "</li>"
+            );
+          })
           .join("");
+        el("outline")
+          .querySelectorAll("li[data-id]")
+          .forEach((li) => {
+            const it = state.items.find((i) => i.id === li.dataset.id);
+            if (it && it.state !== "locked") {
+              li.addEventListener("click", () => openNode(it.id));
+            }
+          });
+      }
+
+      // §S5 revisit scheduler: shows the server's suggestion (the
+      // longest-deferred skipped node), clickable, or hides the hint when
+      // there's nothing to suggest.
+      function renderRevisitHint() {
+        const hint = el("revisitHint");
+        const target = state.items.find((it) => it.id === state.suggestedRevisit);
+        if (!target) {
+          hint.hidden = true;
+          hint.onclick = null;
+          return;
+        }
+        hint.hidden = false;
+        hint.textContent = "↺ Consider revisiting: " + target.title;
+        hint.style.cursor = "pointer";
+        hint.onclick = () => openNode(target.id);
+      }
+
+      // Re-reads the outline's gate state from the server (§S5) — called
+      // after anything that can change it (advancing, skipping).
+      async function refreshOutline() {
+        const resp = await api(`/api/documents/${state.docId}/outline`);
+        if (resp.ok) {
+          const data = await resp.json();
+          state.items = data.items;
+          state.suggestedRevisit = data.suggested_revisit || null;
+          renderOutline();
+          renderRevisitHint();
+        }
+      }
+
+      // Opens an outline item non-destructively: an already-generated node
+      // (skipped or demonstrated) is just READ (§S5/§4.3 — regenerating it
+      // would clobber the append-only interaction layer); a never-generated
+      // one falls through to the normal streaming generation path.
+      async function openNode(id) {
+        try {
+          const resp = await api(`/api/documents/${state.docId}/nodes/${id}`);
+          if (resp.status === 404) {
+            return generateNode(id);
+          }
+          if (!resp.ok) throw new Error(await resp.text());
+          await renderExistingNode(id, await resp.json());
+        } catch (err) {
+          el("controls").innerHTML =
+            '<p class="error">could not open node: ' +
+            escapeHtml(String(err)) +
+            "</p>";
+        }
+      }
+
+      // Renders an already-generated node read back from the server: frozen
+      // prose, the append-only interaction history, and — if not yet
+      // demonstrated — the still-active exercise, answerable exactly like a
+      // freshly generated one.
+      async function renderExistingNode(id, data) {
+        state.currentId = id;
+        state.nodeId = id;
+        renderOutline();
+        el("prose").innerHTML = sanitizeHtml(data.content_html);
+        el("prose").dataset.nodeId = id;
+        hydrateIslands(el("prose"), id);
+        el("result").innerHTML = "";
+        el("interactions").innerHTML = "";
+        await hydrateInteractions(data.interactions, el("interactions"));
+        if (data.has_exercise) {
+          renderExercise(id);
+          el("controls").innerHTML = "";
+          renderSkipControl();
+        } else {
+          el("exercise").innerHTML = "";
+          exerciseFrame = null;
+          el("controls").innerHTML =
+            '<p class="muted">Already demonstrated.</p>';
+        }
+        setReadingToolsEnabled(true);
+        armReadToEndWatcher();
+      }
+
+      // Shows the "skip" control (§S5, "botão pular") only when there's
+      // another reachable node to skip to — never for a linear doc's last
+      // (or only) available item.
+      function renderSkipControl() {
+        const other = state.items.find(
+          (it) => it.id !== state.currentId && it.state !== "locked",
+        );
+        if (!other) return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "Skip for now →";
+        btn.addEventListener("click", skipCurrentNode);
+        el("controls").appendChild(btn);
+      }
+
+      async function skipCurrentNode() {
+        if (!state.currentId) return;
+        const skippedId = state.currentId;
+        try {
+          const resp = await postJson(
+            `/api/documents/${state.docId}/nodes/${skippedId}/skip`,
+            {},
+          );
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          state.items = data.items;
+          state.suggestedRevisit = data.suggested_revisit || null;
+          renderOutline();
+          renderRevisitHint();
+          const next = state.items.find(
+            (it) => it.id !== skippedId && it.state !== "locked",
+          );
+          if (next) {
+            openNode(next.id);
+          } else {
+            el("controls").innerHTML =
+              '<p class="muted">Nothing else available yet.</p>';
+          }
+        } catch (err) {
+          el("result").innerHTML =
+            '<span class="error">skip failed: ' +
+            escapeHtml(String(err)) +
+            "</span>";
+        }
+      }
+
+      // --- §S6 reading interactions (§9 "the document is the answer") ------
+      // Selection→question/annotation: a popover next to any text selected
+      // inside #prose. Question-on-the-line / a note with no selection: the
+      // toolbar buttons anchor to whichever block is nearest the viewport
+      // center instead — the reading line's position, read once at click
+      // time and never persisted (§9); only the resulting anchor is. Both
+      // paths land in the shared inline form, which posts to `/ask` or
+      // `/annotate` and appends the returned thread to the interaction
+      // layer exactly like a page-load already does.
+
+      function setReadingToolsEnabled(enabled) {
+        el("askLineBtn").disabled = !enabled;
+        el("noteLineBtn").disabled = !enabled;
+      }
+
+      // Returns `{blockId, nodeId}` for the block nearest the reading line,
+      // or null. `nodeId` is whichever node actually owns that block — the
+      // top-level node (`#prose` carries its own `data-node-id`) or a
+      // spliced sub-node (§S8: each `.subnode` wrapper carries its own) —
+      // never assumed to be `state.nodeId`, since a spliced sub-node's
+      // blocks live inside `#prose` too.
+      function currentReadingBlockId() {
+        const blocks = el("prose").querySelectorAll("[data-block-id]");
+        if (blocks.length === 0) return null;
+        const center = window.innerHeight / 2;
+        let best = blocks[0];
+        let bestDist = Infinity;
+        blocks.forEach((b) => {
+          const rect = b.getBoundingClientRect();
+          const dist = Math.abs((rect.top + rect.bottom) / 2 - center);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = b;
+          }
+        });
+        const owner = best.closest("[data-node-id]");
+        return {
+          blockId: best.dataset.blockId,
+          nodeId: owner ? owner.dataset.nodeId : state.nodeId,
+        };
+      }
+
+      // Builds a §4.3 Anchor from the live DOM Selection: the block id of
+      // the closest ancestor inside #prose, plus an exact quote (with a
+      // little surrounding context to disambiguate repeats) when text is
+      // actually selected — the same contract `core::anchor` resolves
+      // server-side. Also resolves which node owns that block (§S8: could
+      // be a spliced sub-node, not always the top-level `state.nodeId`).
+      function anchorFromSelection() {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+        const node = sel.getRangeAt(0).commonAncestorContainer;
+        const el0 = node.nodeType === 1 ? node : node.parentElement;
+        const block = el0 && el0.closest("[data-block-id]");
+        if (!block || !el("prose").contains(block)) return null;
+        const exact = sel.toString();
+        if (!exact.trim()) return null;
+        const text = block.textContent || "";
+        const start = text.indexOf(exact);
+        const quote = { exact };
+        if (start >= 0) {
+          const prefix = text.slice(Math.max(0, start - 20), start);
+          const suffix = text.slice(start + exact.length, start + exact.length + 20);
+          if (prefix) quote.prefix = prefix;
+          if (suffix) quote.suffix = suffix;
+        }
+        const owner = block.closest("[data-node-id]");
+        return {
+          anchor: { block_id: block.dataset.blockId, quote },
+          nodeId: owner ? owner.dataset.nodeId : state.nodeId,
+        };
+      }
+
+      let selectionAnchor = null;
+      let selectionAnchorNodeId = null;
+      function hideSelectionPopover() {
+        el("selectionPopover").hidden = true;
+        selectionAnchor = null;
+        selectionAnchorNodeId = null;
+      }
+      document.addEventListener("mouseup", (e) => {
+        // A click on the popover's own buttons fires `mouseup` on them too,
+        // before their `click` handler runs — without this guard, this
+        // listener would hide the popover (clearing `selectionAnchor`)
+        // first, so "Ask"/"Note" would silently do nothing.
+        if (el("selectionPopover").contains(e.target)) return;
+        if (!state.nodeId || !el("prose").contains(e.target)) {
+          hideSelectionPopover();
+          return;
+        }
+        const r = anchorFromSelection();
+        if (!r) {
+          hideSelectionPopover();
+          return;
+        }
+        selectionAnchor = r.anchor;
+        selectionAnchorNodeId = r.nodeId;
+        const pop = el("selectionPopover");
+        pop.style.left = e.clientX + "px";
+        pop.style.top = Math.max(0, e.clientY - 40) + "px";
+        pop.hidden = false;
+      });
+      el("selAskBtn").addEventListener("click", () => {
+        if (selectionAnchor) openReadingForm("ask", selectionAnchor, selectionAnchorNodeId);
+        hideSelectionPopover();
+      });
+      el("selNoteBtn").addEventListener("click", () => {
+        if (selectionAnchor) openReadingForm("annotate", selectionAnchor, selectionAnchorNodeId);
+        hideSelectionPopover();
+      });
+
+      el("askLineBtn").addEventListener("click", () => {
+        const r = currentReadingBlockId();
+        if (r) openReadingForm("ask", { block_id: r.blockId }, r.nodeId);
+      });
+      el("noteLineBtn").addEventListener("click", () => {
+        const r = currentReadingBlockId();
+        if (r) openReadingForm("annotate", { block_id: r.blockId }, r.nodeId);
+      });
+
+      let readingFormMode = null;
+      let readingFormAnchor = null;
+      let readingFormNodeId = null;
+      function openReadingForm(mode, anchor, nodeId) {
+        if (!state.nodeId) return;
+        readingFormMode = mode;
+        readingFormAnchor = anchor;
+        readingFormNodeId = nodeId || state.nodeId;
+        el("readingFormTitle").textContent =
+          mode === "ask" ? "Ask about this" : "Add a note";
+        el("readingFormText").value = "";
+        el("readingFormStatus").textContent = "";
+        el("readingForm").hidden = false;
+        el("readingFormText").focus();
+      }
+      function closeReadingForm() {
+        el("readingForm").hidden = true;
+        readingFormMode = null;
+        readingFormAnchor = null;
+        readingFormNodeId = null;
+      }
+      el("readingFormCancel").addEventListener("click", closeReadingForm);
+      el("readingForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const text = el("readingFormText").value.trim();
+        if (!text || !readingFormAnchor || !readingFormNodeId) return;
+        const mode = readingFormMode;
+        const targetNodeId = readingFormNodeId;
+        const anchor = readingFormAnchor;
+        el("readingFormStatus").textContent =
+          mode === "ask" ? "thinking…" : "saving…";
+        try {
+          const path =
+            mode === "ask"
+              ? `/api/documents/${state.docId}/nodes/${targetNodeId}/ask`
+              : `/api/documents/${state.docId}/nodes/${targetNodeId}/annotate`;
+          const payload =
+            mode === "ask" ? { question: text, anchor } : { body: text, anchor };
+          const resp = await postJson(path, payload);
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          if (mode === "ask" && data.kind === "spawn") {
+            // §S8: not a toggle — permanently spliced right after the
+            // paragraph where the question was asked.
+            const anchorEl = document.querySelector(
+              '[data-block-id="' + anchor.block_id + '"]',
+            );
+            if (anchorEl) {
+              const sub = buildSubNodeWrapper(
+                data.node_id,
+                data.title,
+                '<strong>You asked:</strong> ' + escapeHtml(text),
+              );
+              sub.proseEl.innerHTML = sanitizeHtml(data.content_html);
+              hydrateIslands(sub.proseEl, data.node_id);
+              anchorEl.insertAdjacentElement("afterend", sub.wrapper);
+            }
+          } else {
+            const div = document.createElement("div");
+            div.className = mode === "ask" ? "qa" : "annotation";
+            div.innerHTML = sanitizeHtml(data.body_html);
+            interactionsContainerFor(targetNodeId).appendChild(div);
+          }
+          closeReadingForm();
+        } catch (err) {
+          el("readingFormStatus").innerHTML =
+            '<span class="error">' + escapeHtml(String(err)) + "</span>";
+        }
+      });
+
+      // §S8: a spawned sub-node's DOM shell — its own prose container and
+      // its own (initially empty) interaction container, so a question
+      // asked *inside* a sub-node nests exactly the same way, recursively.
+      function buildSubNodeWrapper(subNodeId, title, questionHtml) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "subnode";
+        wrapper.dataset.nodeId = subNodeId;
+        const titleEl = document.createElement("div");
+        titleEl.className = "subnode-title";
+        titleEl.textContent = title || "";
+        wrapper.appendChild(titleEl);
+        // §7: the selection-plus-question that triggered this section is the
+        // highest-signal input in the app — it must survive on the page, not
+        // just live in the parent's interaction log where nothing renders it.
+        if (questionHtml) {
+          const qEl = document.createElement("div");
+          qEl.className = "subnode-question";
+          qEl.innerHTML = sanitizeHtml(questionHtml);
+          wrapper.appendChild(qEl);
+        }
+        const proseEl = document.createElement("div");
+        proseEl.className = "subnode-prose";
+        const interEl = document.createElement("div");
+        interEl.className = "subnode-interactions";
+        wrapper.appendChild(proseEl);
+        wrapper.appendChild(interEl);
+        return { wrapper, proseEl, interEl };
+      }
+
+      // Pulls the "<p class="question">You asked: ...</p>" fragment out of a
+      // parent-side spawn marker's `body_html` (§S8) so a reload can show the
+      // same question text a live session showed — without re-parsing HTML
+      // by hand.
+      function extractQuestionHtml(markerBodyHtml) {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = sanitizeHtml(markerBodyHtml || "");
+        const q = tmp.querySelector(".question");
+        return q ? q.innerHTML : "";
+      }
+
+      // The right interaction container for a node id: the top-level panel
+      // for the currently open node, or a spliced sub-node's own container
+      // (§S8) — never assumed to be `#interactions` just because that's
+      // where every reply landed before this slice.
+      function interactionsContainerFor(nodeId) {
+        if (!nodeId || nodeId === state.nodeId) return el("interactions");
+        const wrapper = document.querySelector('[data-node-id="' + nodeId + '"]');
+        return (wrapper && wrapper.querySelector(".subnode-interactions")) || el("interactions");
+      }
+
+      // Fetches and permanently splices a sub-node (§S8) right after
+      // `anchorBlockId`, then recursively hydrates ITS OWN interactions
+      // (including further nested spawns) into its own containers — a
+      // reload must reconstruct exactly what a live session already spliced.
+      async function spliceSubNodeFromServer(anchorBlockId, subNodeId, questionHtml) {
+        const anchorEl = document.querySelector(
+          '[data-block-id="' + anchorBlockId + '"]',
+        );
+        if (!anchorEl) return;
+        try {
+          const resp = await api(
+            `/api/documents/${state.docId}/nodes/${subNodeId}`,
+          );
+          if (!resp.ok) return;
+          const data = await resp.json();
+          const sub = buildSubNodeWrapper(subNodeId, data.title, questionHtml);
+          sub.proseEl.innerHTML = sanitizeHtml(data.content_html);
+          hydrateIslands(sub.proseEl, subNodeId);
+          anchorEl.insertAdjacentElement("afterend", sub.wrapper);
+          await hydrateInteractions(data.interactions, sub.interEl);
+        } catch (err) {
+          // Best-effort: a failed sub-node fetch just leaves that spot
+          // unspliced rather than breaking the rest of the reload.
+        }
+      }
+
+      // Renders a node's interaction layer into `interactionsEl`, except a
+      // `qa` thread that spawned a sub-node (§S8) — that one is spliced
+      // inline into the prose instead of listed here.
+      async function hydrateInteractions(interactions, interactionsEl) {
+        for (const item of interactions || []) {
+          if (item.kind === "qa" && item.child_node_id) {
+            await spliceSubNodeFromServer(
+              item.anchor_block,
+              item.child_node_id,
+              extractQuestionHtml(item.body_html),
+            );
+            continue;
+          }
+          const div = document.createElement("div");
+          div.className = item.kind;
+          div.innerHTML = sanitizeHtml(item.body_html);
+          interactionsEl.appendChild(div);
+        }
+      }
+
+      // §S6 "Ritmo": crossing the sentinel after the exercise logs the
+      // scroll-to-end signal once per node. A pure signal today — nothing
+      // reacts to it yet (see the server's `EventKind::NodeReadToEnd` doc
+      // comment for why gating the next move on it is a separate slice).
+      let readEndFired = false;
+      let readEndObserver = null;
+      function armReadToEndWatcher() {
+        readEndFired = false;
+        if (readEndObserver) readEndObserver.disconnect();
+        // IntersectionObserver fires once immediately with whatever the
+        // current state already is — for a node short enough to fit the
+        // viewport, that's an "intersecting" callback before the learner has
+        // scrolled a pixel, which would log the signal before they've read
+        // anything. Ignore that first callback; only a later transition
+        // (an actual scroll bringing the sentinel into view) counts.
+        let firstCallback = true;
+        readEndObserver = new IntersectionObserver(
+          (entries) => {
+            const wasFirst = firstCallback;
+            firstCallback = false;
+            if (readEndFired || !state.nodeId || wasFirst) return;
+            if (entries.some((e) => e.isIntersecting)) {
+              readEndFired = true;
+              postJson(
+                `/api/documents/${state.docId}/nodes/${state.nodeId}/read-to-end`,
+                {},
+              ).catch(() => {});
+            }
+          },
+          { threshold: 0.1 },
+        );
+        readEndObserver.observe(el("readEndSentinel"));
       }
 
       // --- Node generation with streaming (§6, §14) -------------------------
-      async function generateNode(index) {
-        state.index = index;
+      async function generateNode(id) {
+        state.currentId = id;
         state.nodeId = null;
         renderOutline();
         el("prose").innerHTML = "";
@@ -514,11 +1175,14 @@
         el("interactions").innerHTML = "";
         el("result").innerHTML = "";
         el("controls").innerHTML = '<p class="muted">generating…</p>';
+        setReadingToolsEnabled(false);
+        hideSelectionPopover();
+        closeReadingForm();
 
         let prose = "";
         try {
           const resp = await api(
-            `/api/documents/${state.docId}/nodes/${index}/generate`,
+            `/api/documents/${state.docId}/nodes/${id}/generate`,
             { method: "POST" },
           );
           if (!resp.ok) throw new Error(await resp.text());
@@ -532,9 +1196,39 @@
               el("prose").innerHTML = sanitizeHtml(prose);
             } else if (event === "exercise") {
               renderExercise(data);
+            } else if (event === "plan_proposal") {
+              // A `plan` move proposed a structural outline change (§5) —
+              // this generation request ends here, unfinished, awaiting the
+              // learner's decision (nothing was persisted for this attempt).
+              renderPlanProposal(JSON.parse(data));
             } else if (event === "done") {
-              state.nodeId = data;
-              el("controls").innerHTML = "";
+              // Empty data means a plan_proposal paused this request instead
+              // of finishing a node — renderPlanProposal already set up the
+              // approve/reject controls, so leave them alone.
+              if (data) {
+                state.nodeId = data;
+                el("prose").dataset.nodeId = data;
+                el("controls").innerHTML = "";
+                renderSkipControl();
+                // The just-streamed prose has no data-block-id attributes —
+                // those are assigned server-side at finalize (§4.3), which
+                // only happens once the whole node, including the graded
+                // move, is done. Reading tools anchor on those ids (§S6),
+                // so swap in the finalized, block-tagged content now that
+                // it exists. Fire-and-forget: nothing here depends on it,
+                // and a failure just leaves the streamed prose in place.
+                api(`/api/documents/${state.docId}/nodes/${data}`)
+                  .then((resp) => (resp.ok ? resp.json() : null))
+                  .then((view) => {
+                    if (view) {
+                      el("prose").innerHTML = sanitizeHtml(view.content_html);
+                      hydrateIslands(el("prose"), data);
+                    }
+                  })
+                  .catch(() => {});
+                setReadingToolsEnabled(true);
+                armReadToEndWatcher();
+              }
             } else if (event === "error") {
               throw new Error(data);
             }
@@ -550,60 +1244,101 @@
       // Renders the generated exercise in a SANDBOX iframe (§3.1/§4.4): no
       // allow-same-origin, so the generated HTML never sees the token or the
       // parent DOM; it returns the answer only via postMessage.
-      function renderExercise(html) {
+      function renderExercise(nodeId) {
+        const iframe = buildExerciseIframe(nodeId);
+        el("exercise").replaceChildren(iframe);
+        exerciseFrame = iframe;
+      }
+
+      // Shows a `plan` move's proposed outline revision (§5 propose→approve,
+      // §S4). The rationale is sanitized prose (app origin, same contract as
+      // the node's own prose); the proposed titles are plain text.
+      function renderPlanProposal(proposal) {
+        el("controls").innerHTML = "";
+        el("planRationale").innerHTML = sanitizeHtml(proposal.html);
+        el("planProposedOutline").innerHTML = proposal.proposed
+          .map((t) => "<li>" + escapeHtml(t) + "</li>")
+          .join("");
+        el("planProposal").hidden = false;
+      }
+
+      el("planApproveBtn").addEventListener("click", () => decidePlanProposal(true));
+      el("planRejectBtn").addEventListener("click", () => decidePlanProposal(false));
+
+      // Either way the proposal is resolved and the interrupted generation
+      // attempt (nothing was persisted for it) is retried from scratch.
+      async function decidePlanProposal(approve) {
+        el("planProposal").hidden = true;
+        try {
+          const resp = await postJson(
+            `/api/documents/${state.docId}/plan/decide`,
+            { approve },
+          );
+          if (!resp.ok) throw new Error(await resp.text());
+          const data = await resp.json();
+          state.items = data.items;
+          renderOutline();
+        } catch (err) {
+          el("result").innerHTML =
+            '<span class="error">plan decision failed: ' +
+            escapeHtml(String(err)) +
+            "</span>";
+        }
+        generateNode(state.currentId);
+      }
+
+      // Builds a sandboxed exercise iframe (used for the node's check AND for the
+      // remediation loop's new practice problems, §8.2) — both are the same node
+      // id's currently-active exercise (remediation overwrites the rubric sidecar
+      // in place, §8.2), so both are just this one URL.
+      //
+      // A real `src=` fetch, not `srcdoc`: `srcdoc` documents inherit the parent
+      // page's CSP, which would break once the app origin's CSP drops
+      // `unsafe-inline` (planned hardening) — the frame endpoint
+      // (`api::exercise_frame`) sets its own, separate CSP and builds the whole
+      // harness (theme/height/answer-collection) server-side instead.
+      // §S11: finds every still-empty interactive-island placeholder (§4.4)
+      // inside `container` — an `ensure_block_ids`-tagged
+      // `<figure data-interactive data-block-id>`, redacted server-side
+      // (`redact_interactive_blocks`) so it never carries raw script — and
+      // swaps it for its own sandboxed iframe, fetched from its own frame
+      // endpoint. Same pattern as the exercise, just per content block
+      // instead of per node. `:not([data-hydrated])` makes repeated calls
+      // (e.g. every `renderExistingNode`) idempotent, never double-wrapping.
+      function hydrateIslands(container, nodeId) {
+        const islands = container.querySelectorAll(
+          "[data-interactive][data-block-id]:not([data-hydrated])",
+        );
+        for (const el of islands) {
+          el.dataset.hydrated = "1";
+          const iframe = document.createElement("iframe");
+          iframe.className = "sandbox island";
+          iframe.title = "Interactive content";
+          iframe.setAttribute("sandbox", "allow-scripts");
+          const url = new URL(
+            `/api/documents/${state.docId}/nodes/${nodeId}/blocks/${el.dataset.blockId}/frame`,
+            location.origin,
+          );
+          url.searchParams.set("token", TOKEN);
+          url.searchParams.set("theme", currentTheme());
+          iframe.src = url.toString();
+          el.replaceChildren(iframe);
+        }
+      }
+
+      function buildExerciseIframe(nodeId) {
         const iframe = document.createElement("iframe");
         iframe.className = "sandbox";
         iframe.title = "Exercise";
         iframe.setAttribute("sandbox", "allow-scripts");
-        // Nord base for both themes, keyed on a `data-t` attribute on <body>.
-        // Literal colors — the sandbox can't see the page's CSS vars. The initial
-        // theme is baked from the page; the harness updates it on `learnive-theme`
-        // messages (from the toggle) and reports its content height so the parent
-        // can size the box to fit — no internal scroll.
-        iframe.srcdoc =
-          '<!doctype html><meta charset="utf-8">' +
-          "<style>" +
-          "html,body{margin:0}" +
-          "body{font-family:'Ubuntu Mono','JetBrains Mono',monospace;padding:.6rem;line-height:1.5;background:#3b4252;color:#d8dee9}" +
-          "body[data-t='light']{background:#eceff4;color:#2e3440}" +
-          "button{font:inherit;padding:.4rem .8rem;border-radius:3px;border:1px solid #5e81ac;background:#5e81ac;color:#eceff4;cursor:pointer}" +
-          "button:hover{background:#81a1c1;border-color:#81a1c1}" +
-          "input,textarea,select{font:inherit;background:#434c5e;color:#d8dee9;border:1px solid #4c566a;border-radius:3px;padding:.35rem}" +
-          "textarea{width:100%;box-sizing:border-box}" +
-          "body[data-t='light'] input,body[data-t='light'] textarea,body[data-t='light'] select{background:#fff;color:#2e3440;border-color:#d8dee9}" +
-          "a{color:#88c0d0}body[data-t='light'] a{color:#5e81ac}" +
-          "label{display:inline-block}" +
-          "</style>" +
-          "<body data-t='" + currentTheme() + "'>" +
-          html +
-          "<script>(function(){" +
-          "function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}" +
-          "function send(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');}" +
-          "function reportHeight(){parent.postMessage({type:'learnive-height',height:document.documentElement.scrollHeight},'*');}" +
-          "function applyTheme(t){document.body.setAttribute('data-t',t);document.documentElement.style.colorScheme=t;reportHeight();}" +
-          // Submitting must always send — even with blank fields (blank → graded
-          // as fail → remediation §8.2). Disable native 'required' validation so a
-          // deliberate blank submit via Enter isn't silently blocked.
-          "var form=document.querySelector('form');if(form)form.setAttribute('novalidate','');" +
-          "document.addEventListener('submit',function(e){e.preventDefault();send();});" +
-          // Wire the exercise's submit control directly so a click ALWAYS works —
-          // even if it's type=button, sits outside a form, or native validation
-          // would block a blank submit. In a simple exercise (a form or a single
-          // field) the sole button is treated as submit; interactive exercises
-          // (many buttons) are left to their own postMessage.
-          "var sb=document.querySelector('button[type=submit],input[type=submit]');" +
-          "if(!sb){var bs=document.querySelectorAll('button');if(bs.length===1&&(form||document.querySelector('input,textarea,select')))sb=bs[0];}" +
-          "if(sb){sb.addEventListener('click',function(e){e.preventDefault();send();});}" +
-          // No submit control at all → add a fallback button.
-          "else if(!document.querySelector('button,input[type=submit],input[type=image]')){var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='Submit answer';b.addEventListener('click',function(e){e.preventDefault();send();});p.appendChild(b);document.body.appendChild(p);}" +
-          "window.addEventListener('message',function(e){var d=e.data;if(d&&d.type==='learnive-theme')applyTheme(d.theme==='light'?'light':'dark');});" +
-          "if(window.ResizeObserver){new ResizeObserver(reportHeight).observe(document.body);}" +
-          "window.addEventListener('load',reportHeight);setTimeout(reportHeight,60);" +
-          "if(document.fonts&&document.fonts.ready)document.fonts.ready.then(reportHeight);" +
-          "applyTheme(document.body.getAttribute('data-t'));" +
-          "})();<\/script>";
-        el("exercise").replaceChildren(iframe);
-        exerciseFrame = iframe;
+        const url = new URL(
+          `/api/documents/${state.docId}/nodes/${nodeId}/exercise-frame`,
+          location.origin,
+        );
+        url.searchParams.set("token", TOKEN);
+        url.searchParams.set("theme", currentTheme());
+        iframe.src = url.toString();
+        return iframe;
       }
 
       // Messages from the sandbox iframe (§4.4): the answer artifact, and the
@@ -613,13 +1348,15 @@
         if (!d) return;
         if (d.type === "learnive-answer") {
           submitAnswer(d.answer);
-        } else if (
-          d.type === "learnive-height" &&
-          exerciseFrame &&
-          e.source === exerciseFrame.contentWindow &&
-          typeof d.height === "number"
-        ) {
-          exerciseFrame.style.height = Math.max(d.height + 2, 40) + "px";
+        } else if (d.type === "learnive-height" && typeof d.height === "number") {
+          // Size whichever sandbox frame reported (node exercise or a remediation
+          // practice problem) — match by its content window.
+          for (const f of document.querySelectorAll("iframe.sandbox")) {
+            if (f.contentWindow === e.source) {
+              f.style.height = Math.max(d.height + 2, 40) + "px";
+              break;
+            }
+          }
         }
       });
 
@@ -638,11 +1375,14 @@
           el("result").innerHTML = "";
           appendGrades(data.grades);
           if (data.advance) {
-            const next = state.index + 1;
-            if (next < state.titles.length) {
+            await refreshOutline();
+            const next = state.items.find(
+              (it) => it.id !== state.currentId && it.state === "available",
+            );
+            if (next) {
               el("controls").innerHTML =
                 '<button id="next">Next concept →</button>';
-              el("next").addEventListener("click", () => generateNode(next));
+              el("next").addEventListener("click", () => openNode(next.id));
             } else {
               el("controls").innerHTML =
                 '<p class="muted">You have completed the current outline.</p>';
@@ -676,37 +1416,34 @@
         el("interactions").appendChild(div);
       }
 
-      // Remediation is LLM-generated → sanitize before the app origin (§3.1). It
-      // explains and proposes a NEW similar problem (§8.2), but sanitized prose
-      // can't carry a form — so we append our own answer box wired back into the
-      // same grading loop. Re-submitting hits the same /answer endpoint: it
-      // re-grades against the locked rubric and either advances or remediates
-      // again (attempt count grows server-side).
-      function appendRemediation(html) {
-        // Freeze earlier answer boxes so the log reads as history — only the
-        // latest remediation is answerable.
+      // Remediation (§8.2): a worked EXPLANATION of the missed problem (sanitized
+      // prose) followed by a NEW practice problem that runs in its own SANDBOX
+      // iframe — submittable and gradeable exactly like the node's check, with the
+      // answer never revealed. Server-side that new problem becomes the node's
+      // active rubric, so its submission (via postMessage → submitAnswer) grades
+      // the new problem and either advances or remediates again.
+      function appendRemediation(explanationHtml) {
+        // Freeze earlier remediation problems so only the latest is answerable —
+        // the log still reads as the full history (§4.3).
         document
-          .querySelectorAll("#interactions .rem-answer :is(textarea,button)")
-          .forEach((x) => (x.disabled = true));
+          .querySelectorAll("#interactions .remediation .sandbox")
+          .forEach((f) => {
+            f.style.pointerEvents = "none";
+            f.style.opacity = "0.55";
+          });
         const wrap = document.createElement("div");
         wrap.className = "remediation";
-        wrap.innerHTML =
-          "<h3>Let's review</h3>" +
-          sanitizeHtml(html) +
-          '<form class="rem-answer">' +
-          '<textarea rows="4" placeholder="Your answer to the new problem…">' +
-          "</textarea>" +
-          '<p><button type="submit">Submit answer</button></p>' +
-          "</form>";
-        const form = wrap.querySelector(".rem-answer");
-        form.addEventListener("submit", (e) => {
-          e.preventDefault();
-          submitAnswer(
-            JSON.stringify({ answer: form.querySelector("textarea").value }),
-          );
-        });
+        const head = document.createElement("div");
+        head.innerHTML = "<h3>Let's review</h3>" + sanitizeHtml(explanationHtml);
+        wrap.appendChild(head);
+        // The server always regenerates a fresh exercise on a failed answer
+        // (§8.2) — same node id, same frame URL, sidecar overwritten in place.
+        const label = document.createElement("p");
+        label.className = "muted";
+        label.textContent = "Now try this one:";
+        wrap.appendChild(label);
+        wrap.appendChild(buildExerciseIframe(state.nodeId));
         el("interactions").appendChild(wrap);
-        form.querySelector("textarea").focus();
       }
 
       // --- SSE parser over fetch (POST) -------------------------------------
