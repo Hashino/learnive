@@ -73,8 +73,10 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
     // that sets its own, deliberately more permissive CSP — this default is
     // only applied when a handler hasn't already set one, so that route's
     // policy is never clobbered on the way out.
-    // `'unsafe-inline'` is still needed because the page's script and styles are
-    // inline — externalizing them to drop it is a later hardening.
+    // `'unsafe-inline'` is still needed, but only for `/setup`: the main page's
+    // script and styles now load as real files from `/assets` (see
+    // `app::asset`). Externalizing setup.html the same way is what remains
+    // before this can be dropped.
     let mut response = next.run(req).await;
     if !response
         .headers()

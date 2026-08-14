@@ -225,9 +225,72 @@ impl Node {
         self.interaction.push(item);
     }
 
-    /// Resolves an anchor against this node's content layer.
+    /// Resolves an anchor against the node: the frozen content layer first
+    /// (§4.3), then the append-only interaction layer.
+    ///
+    /// Interaction items are anchorable because the app's central flow is
+    /// falling into a rabbit hole — you ask about a passage, and the *answer*
+    /// raises the next question. If only content blocks resolved, the document
+    /// would go mute exactly where the learner got most interested. This does
+    /// not weaken §4.3: an anchor into an answer still only ever *references*
+    /// an id, and the item it points at is itself append-only, so nothing an
+    /// anchor names can be rewritten under it.
     pub fn resolve(&self, anchor: &Anchor) -> Option<ResolvedAnchor> {
-        self.content.resolve(anchor)
+        if let Some(resolved) = self.content.resolve(anchor) {
+            return Some(resolved);
+        }
+        let text = self.interaction_text(&anchor.block_id)?;
+        let range = match &anchor.quote {
+            None => None,
+            Some(quote) => Some(resolve_quote(&text, quote)?),
+        };
+        Some(ResolvedAnchor {
+            block_id: anchor.block_id.clone(),
+            range,
+        })
+    }
+
+    /// Plain text of an interaction item, by id — the anchoring surface for a
+    /// question asked inside an answer, and the passage such a question is
+    /// "about" when the tutor is given its reading context.
+    pub fn interaction_text(&self, id: &str) -> Option<String> {
+        let html = self.interaction.iter().find_map(|item| match item {
+            InteractionItem::Thread {
+                id: item_id,
+                body_html,
+                ..
+            }
+            | InteractionItem::Annotation {
+                id: item_id,
+                body_html,
+                ..
+            } if item_id == id => Some(body_html),
+            _ => None,
+        })?;
+        Some(
+            Html::parse_fragment(html)
+                .root_element()
+                .text()
+                .collect::<String>(),
+        )
+    }
+
+    /// The content block an interaction item hangs off, if it names one —
+    /// what an answer was an answer *to*.
+    pub fn interaction_anchor_block(&self, id: &str) -> Option<&str> {
+        self.interaction.iter().find_map(|item| match item {
+            InteractionItem::Thread {
+                id: item_id,
+                anchor_block,
+                ..
+            } if item_id == id => anchor_block.as_deref(),
+            InteractionItem::Annotation {
+                id: item_id,
+                anchor,
+                ..
+            } if item_id == id => Some(anchor.block_id.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -589,6 +652,43 @@ mod tests {
 
         // Nonexistent block.
         assert!(node.resolve(&Anchor::block("nope")).is_none());
+    }
+
+    #[test]
+    fn resolves_an_anchor_into_an_answer() {
+        // The rabbit hole: a question asked about an answer anchors to that
+        // answer's interaction item, not to a content block — otherwise the
+        // document goes mute exactly where the learner got most interested.
+        let mut node = Node::parse(SAMPLE).unwrap();
+        node.push_interaction(InteractionItem::Thread {
+            id: "qa1".to_string(),
+            kind: ThreadKind::Qa,
+            anchor_block: Some("b1".to_string()),
+            body_html: "<p>The <em>Carnot</em> bound is what limits it.</p>".to_string(),
+            child_node_id: None,
+        });
+
+        let r = node.resolve(&Anchor::block("qa1")).unwrap();
+        assert_eq!(r.block_id, "qa1");
+
+        let r = node
+            .resolve(&Anchor {
+                block_id: "qa1".to_string(),
+                quote: Some(QuoteSelector {
+                    exact: "Carnot".to_string(),
+                    prefix: None,
+                    suffix: None,
+                }),
+            })
+            .unwrap();
+        // The quote resolves against the item's TEXT, tags stripped.
+        let text = node.interaction_text("qa1").unwrap();
+        let (s, e) = r.range.unwrap();
+        assert_eq!(&text[s..e], "Carnot");
+
+        // And the answer remembers what it was an answer to.
+        assert_eq!(node.interaction_anchor_block("qa1"), Some("b1"));
+        assert!(node.interaction_text("nope").is_none());
     }
 
     #[test]

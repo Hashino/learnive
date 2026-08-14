@@ -123,6 +123,12 @@ pub async fn distill(
     Ok(projection)
 }
 
+/// Header the open-hypothesis list is rendered under. Public because
+/// `movement::prompt` reads it back out of the rendered profile text to know
+/// whether a `profile` move has anything to investigate at all — the two are
+/// the same fact seen from opposite ends, so they must be one constant.
+pub const HYPOTHESES_HEADER: &str = "Open hypotheses";
+
 /// Combines the (always-fresh) evidence table with the (rarely-updated)
 /// distilled traits/hypotheses into `MoveContext::profile`'s text. A soft
 /// char budget backstops the §14 ≤~800-token target. Degrades gracefully —
@@ -152,7 +158,8 @@ pub fn render_for_prompt(evidence_text: &str, projection: Option<&ProfileProject
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
-            out.push_str("Open hypotheses (a \"profile\" move should test one of these):\n");
+            out.push_str(HYPOTHESES_HEADER);
+            out.push_str(" (a \"profile\" move should test one of these):\n");
             out.push_str(
                 &p.hypotheses
                     .iter()

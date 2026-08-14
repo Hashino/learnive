@@ -107,6 +107,21 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes a living document: its directory and everything in it.
+    ///
+    /// The one genuinely destructive operation in the app. §5's "never edit
+    /// destructively" is about the *content* of a document — revision makes
+    /// new versions rather than overwriting — not about the learner's right
+    /// to throw a whole document away; a store you cannot delete from is a
+    /// hoard, not a library. Deliberately not a trash/undo: the files are the
+    /// user's, in a directory they can see, and the confirmation is in the UI
+    /// where the learner still has the context to judge.
+    pub fn delete_document(&self, doc_id: &str) -> Result<()> {
+        ensure_safe_id(doc_id)?;
+        fs::remove_dir_all(self.doc_dir(doc_id))?;
+        Ok(())
+    }
+
     /// Lists the living-document IDs (subdirectories of the root).
     pub fn list_documents(&self) -> Result<Vec<String>> {
         let mut docs = Vec::new();
@@ -120,6 +135,26 @@ impl Store {
         }
         docs.sort();
         Ok(docs)
+    }
+
+    /// Most recent modification time anywhere inside the document's directory,
+    /// in milliseconds since the Unix epoch — the ordering key for "reopen the
+    /// document I was last reading" (§S12). Derived from the files themselves
+    /// rather than tracked in a sidecar: the files are the source of truth
+    /// (§4), so there is nothing to keep in sync. Unreadable timestamps count
+    /// as `0` (sorted last) instead of failing the whole listing.
+    pub fn doc_updated_ms(&self, doc_id: &str) -> Result<u64> {
+        ensure_safe_id(doc_id)?;
+        let mut newest = 0u64;
+        for entry in fs::read_dir(self.doc_dir(doc_id))? {
+            let modified = entry?.metadata().and_then(|m| m.modified());
+            if let Ok(t) = modified
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                newest = newest.max(d.as_millis() as u64);
+            }
+        }
+        Ok(newest)
     }
 
     /// Writes a node to `<doc>/<node>.html` (atomic write). Creates the document

@@ -7,13 +7,14 @@ use std::{collections::HashSet, convert::Infallible, sync::Arc};
 
 use axum::{
     Router,
-    extract::State,
+    extract::{Path, State},
+    http::{StatusCode, header},
     middleware,
     response::{
-        Html, Sse,
+        Html, IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use tokio_stream::Stream;
 
@@ -120,6 +121,9 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        // Page assets (§15: still baked into the binary, just not into one
+        // file). Fixed table, no filesystem lookup — nothing to traverse.
+        .route("/assets/{file}", get(asset))
         .route("/setup", get(setup_page))
         .route("/health", get(health))
         .route("/events", get(events))
@@ -127,7 +131,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/setup", get(api::setup_status).post(api::save_setup))
         // Curriculum loop (§6, §8, §S4). All POST — mutations never on GET (§3.1).
         .route("/api/objective/propose", post(api::propose_objective))
-        .route("/api/documents", post(api::create_document))
+        // GET lists the existing living documents so the app can reopen where
+        // the last session left off (§S12); POST creates a new one.
+        .route(
+            "/api/documents",
+            get(api::list_documents).post(api::create_document),
+        )
         // Read-only outline + gate state (§S5) — GET is fine, it mutates nothing.
         .route("/api/documents/{doc}/outline", get(api::get_outline))
         // Non-destructive read of an already-generated node (§S5/§4.3) —
@@ -177,6 +186,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/documents/{doc}/objective",
             post(api::revise_objective),
         )
+        // Document display name (§S12) — the sidebar's title, renameable.
+        .route("/api/documents/{doc}/name", post(api::rename_document))
+        // Deleting a whole living document (§S12) — DELETE, never GET (§3.1).
+        .route("/api/documents/{doc}", delete(api::delete_document))
         .route(
             "/api/documents/{doc}/profile",
             get(api::get_profile).post(api::revise_profile),
@@ -192,6 +205,39 @@ pub fn build_router(state: AppState) -> Router {
 /// header (never a cookie) on subsequent requests.
 async fn index(State(state): State<AppState>) -> Html<String> {
     Html(include_str!("assets/index.html").replace("{{TOKEN}}", &state.token))
+}
+
+/// Page assets: the stylesheet and the scripts `index.html` pulls in.
+///
+/// They are still compiled into the binary (§15 portability) — the split is
+/// purely so the page is editable; there is no asset directory to ship and no
+/// path is ever taken from the request, only matched against this table.
+async fn asset(Path(file): Path<String>) -> Response {
+    const CSS: &str = "text/css; charset=utf-8";
+    const JS: &str = "text/javascript; charset=utf-8";
+    let (mime, body) = match file.as_str() {
+        "app.css" => (CSS, include_str!("assets/app.css")),
+        "theme-init.js" => (JS, include_str!("assets/theme-init.js")),
+        "core.js" => (JS, include_str!("assets/core.js")),
+        "documents.js" => (JS, include_str!("assets/documents.js")),
+        "outline.js" => (JS, include_str!("assets/outline.js")),
+        "reading.js" => (JS, include_str!("assets/reading.js")),
+        "node.js" => (JS, include_str!("assets/node.js")),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    // `no-store`: the asset URLs are stable (no content hash) but their bodies
+    // change with every rebuild, and the page they belong to is never cached
+    // either — a stale stylesheet here shows up as a layout that "didn't take"
+    // long after the code changed, which is a miserable thing to debug. This
+    // is a localhost server reading from memory; there is nothing to save.
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// In-app setup page (§12): provider + key + free/paid intent. Same token
@@ -382,16 +428,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_asset_the_page_references_is_served() {
+        // The page pulls its style and scripts as subresources, so a typo in a
+        // filename is a blank app rather than a compile error. Walk what
+        // `index.html` actually asks for and demand a 200 for each. The request
+        // is shaped like the browser's: no token header (a <script src> cannot
+        // set one), only the `?token=` query the URLs carry, and no Origin —
+        // same-origin subresource fetches don't send one.
+        let page = include_str!("assets/index.html");
+        let mut referenced = 0;
+        for (i, _) in page.match_indices("/assets/") {
+            let rest = &page[i..];
+            let url = &rest[..rest.find('"').expect("asset href is quoted")];
+            let name = url
+                .trim_start_matches("/assets/")
+                .split('?')
+                .next()
+                .unwrap();
+            referenced += 1;
+            let req = Request::builder()
+                .uri(url.replace("{{TOKEN}}", TOKEN))
+                .header("host", HOST)
+                .body(Body::empty())
+                .unwrap();
+            let resp = router().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "asset {name} is not served");
+            let mime = resp.headers()[header::CONTENT_TYPE].to_str().unwrap();
+            let expected = if name.ends_with(".css") {
+                "text/css"
+            } else {
+                "text/javascript"
+            };
+            assert!(mime.starts_with(expected), "{name} served as {mime}");
+        }
+        assert!(
+            referenced >= 6,
+            "expected the split assets, found {referenced}"
+        );
+
+        let (status, _) = send(authed("GET", "/assets/nope.js", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn mutating_endpoint_rejects_get() {
-        // No mutation responds to GET (§3.1): /api/documents exists only as POST.
-        let req = Request::builder()
-            .uri("/api/documents")
-            .header("host", HOST)
-            .header("x-learnive-token", TOKEN)
-            .body(Body::empty())
-            .unwrap();
-        let (status, _) = send(req).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        // No state-changing endpoint responds to GET (§3.1). `/api/documents`
+        // itself is no longer the example: it gained a read-only GET listing
+        // (§S12) alongside the POST that creates. Node generation is the
+        // clearest remaining mutation — it writes a node file and appends
+        // events.
+        for uri in [
+            "/api/documents/d1/nodes/n1/generate",
+            "/api/documents/d1/name",
+            "/api/objective/propose",
+        ] {
+            let req = Request::builder()
+                .uri(uri)
+                .header("host", HOST)
+                .header("x-learnive-token", TOKEN)
+                .body(Body::empty())
+                .unwrap();
+            let (status, _) = send(req).await;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "GET {uri}");
+        }
+    }
+
+    /// §S12: documents survive a restart and are reopenable. Before this,
+    /// documents were written to disk from the first slice but nothing could
+    /// read them back, so every page load looked like a fresh install. Covers
+    /// the whole resume contract: the listing, the resume point, the rename,
+    /// and — the reason `list_documents` filters on `outline.json` — that the
+    /// data directory's non-document siblings (`corpus/`, `index/`) never
+    /// show up as documents.
+    #[tokio::test]
+    async fn documents_are_listed_resumable_and_renameable() {
+        let state = test_state();
+        let call = |req: Request<Body>| {
+            let state = state.clone();
+            async move {
+                let resp = build_router(state).oneshot(req).await.unwrap();
+                let status = resp.status();
+                let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                (status, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+
+        // Nothing yet: an empty list, not an error.
+        let (status, body) = call(authed("GET", "/api/documents", "")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.trim(), "[]");
+
+        let (_, body) = call(authed(
+            "POST",
+            "/api/documents",
+            r#"{"topic":"fractions","name":"Fractions 101"}"#,
+        ))
+        .await;
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let doc_id = created["doc_id"].as_str().unwrap().to_string();
+        let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(created["name"], "Fractions 101");
+
+        // Listed, but with no resume point until a node actually exists —
+        // reopening must never generate one (§12.2).
+        let (_, body) = call(authed("GET", "/api/documents", "")).await;
+        let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(docs.as_array().unwrap().len(), 1);
+        assert_eq!(docs[0]["doc_id"], serde_json::json!(doc_id));
+        assert_eq!(docs[0]["name"], "Fractions 101");
+        assert!(docs[0]["resume_node_id"].is_null());
+
+        call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+            "",
+        ))
+        .await;
+
+        let (_, body) = call(authed("GET", "/api/documents", "")).await;
+        let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(docs[0]["resume_node_id"], serde_json::json!(node0));
+
+        // Rename: a plain overwrite, reflected in the listing.
+        let (status, body) = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/name"),
+            r#"{"name":"Frações"}"#,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"],
+            "Frações"
+        );
+        let (_, body) = call(authed("GET", "/api/documents", "")).await;
+        let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(docs[0]["name"], "Frações");
+
+        // A blank name is refused rather than silently blanking the sidebar.
+        let (status, _) = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/name"),
+            r#"{"name":"   "}"#,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // `corpus/` is a sibling of the document directories in the data dir,
+        // not a document — it has no outline and must not be listed (nor be
+        // renameable into looking like one).
+        state.store.create_document("corpus").unwrap();
+        let (_, body) = call(authed("GET", "/api/documents", "")).await;
+        let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(docs.as_array().unwrap().len(), 1);
+        let (status, _) = call(authed(
+            "POST",
+            "/api/documents/corpus/name",
+            r#"{"name":"sneaky"}"#,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Same guard on delete — otherwise this endpoint would happily wipe
+        // `corpus/` (the immutable source corpus, §4) or the retrieval index.
+        let (status, _) = call(authed("DELETE", "/api/documents/corpus", "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            state
+                .store
+                .list_documents()
+                .unwrap()
+                .contains(&"corpus".to_string())
+        );
+
+        // Deleting a real document takes the whole directory with it, and the
+        // listing is empty again — nothing left half-deleted behind.
+        let (status, _) = call(authed("DELETE", &format!("/api/documents/{doc_id}"), "")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = call(authed("GET", "/api/documents", "")).await;
+        assert_eq!(body.trim(), "[]");
+        assert!(!state.store.list_documents().unwrap().contains(&doc_id));
+        assert_eq!(
+            call(authed(
+                "GET",
+                &format!("/api/documents/{doc_id}/outline"),
+                ""
+            ))
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     /// The whole loop closes in demo mode: create document → generate node

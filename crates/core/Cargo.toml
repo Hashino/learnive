@@ -6,5 +6,6 @@ edition = "2024"
 # Kept deliberately free of tokio/axum so this crate compiles to wasm32 and the
 # §4.3 anchoring can run identically on server and client.
 [dependencies]
+pulldown-latex = "0.8"
 scraper = "0.21"
 serde = { version = "1", features = ["derive"] }

@@ -477,20 +477,32 @@ pub mod prompt {
             .join(", ")
     }
 
-    fn menu(policy: AgentPolicy) -> &'static str {
+    /// The move menu, with `profile` (§7) dropped when there is nothing for it
+    /// to investigate.
+    ///
+    /// A `profile` move probes an OPEN HYPOTHESIS about the learner; on a fresh
+    /// document there are none, and the per-move instruction used to handle
+    /// that by asking the model to "skip this move type". A model cannot skip a
+    /// move it was just told to write: seen live (2026-08-14, first node of a
+    /// new document) it dutifully wrote the skip itself into the document —
+    /// "Nenhuma hipótese aberta foi listada… nenhuma investigação será gerada."
+    /// as the learner's opening prose. So the option is withheld instead of
+    /// restraint being requested.
+    fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
+        let types = if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
+            "explain, ask, test, profile, confront, integrate, revisit, plan"
+        } else {
+            "explain, ask, test, confront, integrate, revisit, plan"
+        };
         match policy {
-            AgentPolicy::L1 => {
-                "\
-Choose the NEXT move from EXACTLY this closed menu: explain, ask, test, \
-profile, confront, integrate, revisit, plan. Pick one type; do not combine \
-or invent one."
-            }
-            AgentPolicy::L2 => {
-                "\
-Choose the NEXT move. Prefer a named type (explain, ask, test, \
-profile, confront, integrate, revisit, plan) but you may use \"other\" for \
-a bespoke move that doesn't fit any of them."
-            }
+            AgentPolicy::L1 => format!(
+                "Choose the NEXT move from EXACTLY this closed menu: {types}. \
+                 Pick one type; do not combine or invent one."
+            ),
+            AgentPolicy::L2 => format!(
+                "Choose the NEXT move. Prefer a named type ({types}) but you may \
+                 use \"other\" for a bespoke move that doesn't fit any of them."
+            ),
             AgentPolicy::L0 => unreachable!("L0 decides via l0_next_move, never the AI"),
         }
     }
@@ -504,7 +516,7 @@ a bespoke move that doesn't fit any of them."
                  exercise machine. {}\n\
                  Respond ONLY with JSON choosing the next move: \
                  {{\"move_type\":\"...\",\"rationale\":\"one short sentence\"}}.",
-                menu(policy)
+                menu(policy, ctx)
             )),
             ChatMessage::user(format!(
                 "Overall topic: {}\nConcept of this node: {}\n\
@@ -552,8 +564,11 @@ a bespoke move that doesn't fit any of them."
             MoveType::Profile => {
                 "Investigate ONE of the open hypotheses about the learner listed in \
                  the profile context (§7) — a short probing question or a targeted \
-                 mini-check whose answer would confirm or refute it. If no open \
-                 hypothesis is listed yet, skip this move type."
+                 mini-check whose answer would confirm or refute it. If none is \
+                 listed (L2 may still pick this move off-menu), probe how the \
+                 learner approaches THIS concept instead — one short question. \
+                 NEVER write about the absence of a hypothesis: whatever you \
+                 produce is what the learner reads."
             }
             MoveType::Plan => {
                 "Revise the outline (§5, non-destructive) ONLY if you have a concrete \
@@ -1042,6 +1057,32 @@ mod tests {
         };
         let user = &prompt::decide_move(AgentPolicy::L1, &ctx)[1].content;
         assert!(user.contains("worked-example: 3 demonstrated, 0 partial"));
+    }
+
+    #[test]
+    fn profile_move_is_offered_only_when_there_is_a_hypothesis_to_test() {
+        // Regression, found in a live run: on a fresh document (no hypotheses
+        // yet) the model picked `profile` and then wrote the skip instruction
+        // itself into the learner's document. The menu now withholds the
+        // option instead of asking the model to decline it.
+        let fresh = MoveContext {
+            profile: "Evidence (tactic -> outcome, from the event log):\nanalogy: 1 demonstrated"
+                .to_string(),
+            ..Default::default()
+        };
+        let with_hypothesis = MoveContext {
+            profile: format!(
+                "{} (a \"profile\" move should test one of these):\n- prefers worked examples",
+                crate::profile::HYPOTHESES_HEADER
+            ),
+            ..Default::default()
+        };
+        for policy in [AgentPolicy::L1, AgentPolicy::L2] {
+            let without = &prompt::decide_move(policy, &fresh)[0].content;
+            let with = &prompt::decide_move(policy, &with_hypothesis)[0].content;
+            assert!(!without.contains("profile"), "{policy:?} offered profile");
+            assert!(with.contains("profile"), "{policy:?} withheld profile");
+        }
     }
 
     #[test]

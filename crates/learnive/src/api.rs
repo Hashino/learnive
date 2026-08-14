@@ -113,6 +113,9 @@ pub struct ProposeObjectiveReq {
 pub struct ProposeObjectiveResp {
     text: String,
     non_goals: Vec<String>,
+    /// Short document name (§S12) — proposed here, persisted by
+    /// `create_document`, renameable afterwards via `rename_document`.
+    title: String,
 }
 
 pub async fn propose_objective(
@@ -127,7 +130,35 @@ pub async fn propose_objective(
     Ok(Json(ProposeObjectiveResp {
         text: proposal.text,
         non_goals: proposal.non_goals,
+        title: proposal.title,
     }))
+}
+
+/// The document's own metadata sidecar (§S12) — just its display name today.
+/// Separate from `outline.json`: renaming a document is not a curriculum
+/// change and must not read-modify-write the outline the `plan` move and
+/// sub-node spawning both mutate (`Store::update_outline_file`).
+#[derive(Serialize, Deserialize)]
+struct DocumentMeta {
+    name: String,
+}
+
+/// The document's display name, with the fallbacks a missing/blank sidecar
+/// needs: a document created before §S12 has no `document.json`, so it falls
+/// back to its topic, and finally to its id — never a blank entry in the
+/// sidebar's document list.
+fn document_name(state: &AppState, doc_id: &str, topic: &str) -> String {
+    let stored = state
+        .store
+        .read_doc_file(doc_id, "document.json")
+        .ok()
+        .and_then(|json| serde_json::from_str::<DocumentMeta>(&json).ok())
+        .map(|meta| meta.name);
+    match stored {
+        Some(name) if !name.trim().is_empty() => name,
+        _ if !topic.trim().is_empty() => topic.to_string(),
+        _ => doc_id.to_string(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -141,6 +172,10 @@ pub struct CreateReq {
     objective_text: String,
     #[serde(default)]
     non_goals: Vec<String>,
+    /// Document display name from `propose_objective` (§S12). Empty falls
+    /// back to the topic, same convention as `objective_text`.
+    #[serde(default)]
+    name: String,
 }
 
 /// One outline item as shown to the client (§S5): the graph's gate, resolved.
@@ -222,6 +257,7 @@ fn outline_view(
 #[derive(Serialize)]
 pub struct CreateResp {
     doc_id: String,
+    name: String,
     items: Vec<OutlineItemView>,
 }
 
@@ -259,6 +295,16 @@ pub async fn create_document(
         "outline.json",
         &serde_json::to_string(&outline).unwrap_or_default(),
     )?;
+    let name = if body.name.trim().is_empty() {
+        body.topic.trim().to_string()
+    } else {
+        body.name.trim().to_string()
+    };
+    state.store.write_doc_file(
+        &doc_id,
+        "document.json",
+        &serde_json::to_string(&DocumentMeta { name: name.clone() }).unwrap_or_default(),
+    )?;
     // Acquire a grounding source in the background (§11/§14): the outline returns
     // immediately and content starts streaming ungrounded; citations appear once
     // the source is fetched and indexed. Never blocks the user. Seeded with the
@@ -266,7 +312,148 @@ pub async fn create_document(
     // topic, and the only text guaranteed to already reflect the user's edits).
     spawn_acquisition(state.clone(), objective_text);
     let items = outline_view(&state, &doc_id, &outline)?;
-    Ok(Json(CreateResp { doc_id, items }))
+    Ok(Json(CreateResp {
+        doc_id,
+        name,
+        items,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct RenameReq {
+    name: String,
+}
+
+#[derive(Serialize)]
+pub struct RenameResp {
+    name: String,
+}
+
+/// Renames the living document (§S12). The name is a label the learner picks,
+/// nothing downstream reads it — it does not touch the outline, the objective,
+/// or any node, so unlike an objective revision (§S4) it needs no version
+/// chain: there is no learning trajectory to preserve in a title.
+pub async fn rename_document(
+    State(state): State<AppState>,
+    Path(doc_id): Path<String>,
+    Json(body): Json<RenameReq>,
+) -> Result<Json<RenameResp>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("empty document name".to_string()));
+    }
+    // Reject a rename of something that is not a document (no outline) —
+    // otherwise this would happily mint a `document.json` inside `corpus/`.
+    state.store.read_doc_file(&doc_id, "outline.json")?;
+    state.store.write_doc_file(
+        &doc_id,
+        "document.json",
+        &serde_json::to_string(&DocumentMeta {
+            name: name.to_string(),
+        })
+        .unwrap_or_default(),
+    )?;
+    Ok(Json(RenameResp {
+        name: name.to_string(),
+    }))
+}
+
+/// Deletes a living document and everything in it (§S12).
+///
+/// Guarded the same way `rename_document` is — the presence of `outline.json`
+/// is what makes a directory a document, and without that check this would be
+/// a "delete any directory under the data dir" endpoint, `corpus/` and the
+/// retrieval `index/` included. `DELETE`, never `GET` (§3.1).
+///
+/// The confirmation is the client's job: by the time the request arrives the
+/// learner has already said yes, and a server that asked again would only be
+/// able to ask about a document it can no longer show them.
+pub async fn delete_document(
+    State(state): State<AppState>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.store.read_doc_file(&doc_id, "outline.json")?;
+    state.store.delete_document(&doc_id)?;
+    Ok(Json(serde_json::json!({ "deleted": doc_id })))
+}
+
+/// One living document as shown on the cold-start screen (§S12).
+#[derive(Serialize)]
+pub struct DocumentSummary {
+    doc_id: String,
+    /// Display name (§S12) — `document_name`'s stored-name → topic → id chain.
+    name: String,
+    topic: String,
+    /// Current objective text (§S4), for a label the learner recognizes —
+    /// empty for a document whose `objective.json` predates §S4 or is
+    /// unreadable, same graceful-degradation convention as `topic_and_title`.
+    objective: String,
+    updated_ms: u64,
+    total: usize,
+    demonstrated: usize,
+    /// The last main-line outline item that has an actual node file on disk —
+    /// where reading left off. `None` for a document whose outline was
+    /// created but whose first node was never generated; the client then
+    /// shows the outline and waits for a click rather than spending tokens
+    /// generating on page load (§12.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_node_id: Option<String>,
+}
+
+/// Lists the living documents, most-recently-touched first (§4, §S12).
+///
+/// This is what makes the app reopen where the last session ended: documents
+/// were always persisted under `<data-dir>/<doc-id>/`, but nothing ever read
+/// them back — the client could only cold-start a new one. Read-only, so GET
+/// is fine (§3.1).
+///
+/// A subdirectory without an `outline.json` is not a document and is skipped:
+/// the data directory also holds `corpus/` and `index/` (§4/§10), which are
+/// siblings of the document directories.
+pub async fn list_documents(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
+    let mut docs = Vec::new();
+    for doc_id in state.store.list_documents()? {
+        let Ok(outline_json) = state.store.read_doc_file(&doc_id, "outline.json") else {
+            continue;
+        };
+        let Ok(outline) = serde_json::from_str::<Outline>(&outline_json) else {
+            continue;
+        };
+        let items = outline_view(&state, &doc_id, &outline)?;
+        let generated: std::collections::HashSet<String> = state
+            .store
+            .list_nodes(&doc_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let objective = state
+            .store
+            .read_doc_file(&doc_id, "objective.json")
+            .ok()
+            .and_then(|json| serde_json::from_str::<ObjectiveLog>(&json).ok())
+            .and_then(|log| log.current().map(|v| v.text.clone()))
+            .unwrap_or_default();
+
+        docs.push(DocumentSummary {
+            name: document_name(&state, &doc_id, &outline.topic),
+            doc_id: doc_id.clone(),
+            topic: outline.topic.clone(),
+            objective,
+            updated_ms: state.store.doc_updated_ms(&doc_id).unwrap_or(0),
+            total: items.len(),
+            demonstrated: items.iter().filter(|i| i.state == "demonstrated").count(),
+            resume_node_id: items
+                .iter()
+                .rev()
+                .map(|i| i.id.clone())
+                .find(|id| generated.contains(id)),
+        });
+    }
+    // Most recently touched first — the resume order.
+    docs.sort_by_key(|d| std::cmp::Reverse(d.updated_ms));
+    Ok(Json(docs))
 }
 
 #[derive(Deserialize)]
@@ -1045,6 +1232,11 @@ pub async fn skip_node(
 /// display; nothing here is regraded or re-served as gradeable.
 #[derive(Serialize)]
 struct InteractionView {
+    /// The item's stable id (§4.3). Sent because the client tags the
+    /// answer it splices into the document with it: that id is what a
+    /// follow-up question anchors to when the learner asks about the
+    /// answer itself, and it has to survive a reload unchanged.
+    id: String,
     kind: &'static str,
     body_html: String,
     /// Set for a `qa` thread that spawned a sub-node (§S8): the client
@@ -1119,29 +1311,33 @@ pub async fn get_node(
         .interaction
         .iter()
         .map(|item| match item {
-            InteractionItem::Annotation { body_html, .. } => InteractionView {
+            InteractionItem::Annotation { id, body_html, .. } => InteractionView {
+                id: id.clone(),
                 kind: "annotation",
                 body_html: body_html.clone(),
                 child_node_id: None,
                 anchor_block: None,
             },
             InteractionItem::Thread {
+                id,
                 kind: ThreadKind::Qa,
                 body_html,
                 anchor_block,
                 child_node_id,
-                ..
             } => InteractionView {
+                id: id.clone(),
                 kind: "qa",
                 body_html: body_html.clone(),
                 child_node_id: child_node_id.clone(),
                 anchor_block: anchor_block.clone(),
             },
             InteractionItem::Thread {
+                id,
                 kind: ThreadKind::Remediation,
                 body_html,
                 ..
             } => InteractionView {
+                id: id.clone(),
                 kind: "remediation",
                 body_html: body_html.clone(),
                 child_node_id: None,
@@ -1261,7 +1457,7 @@ fn sandbox_frame_response(page: String) -> Response {
 /// server-built HTML (the question/annotation text itself — never the
 /// model's reply, which is already HTML under `PROSE_HTML_CONTRACT`). The
 /// client also sanitizes every `body_html` at render (defense in depth,
-/// `sanitizeHtml` in `index.html`), but nothing here should ever depend on
+/// `sanitizeHtml` in `assets/core.js`), but nothing here should ever depend on
 /// that: user text is escaped before it is stored, not just before it is shown.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -1270,29 +1466,143 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Resolves a client-supplied anchor against the node's frozen content layer
-/// (§4.3) — rejecting one that doesn't resolve keeps the interaction layer's
-/// "always references real content IDs" invariant true by construction,
-/// rather than trusting whatever block id the client happens to send.
+/// Resolves a client-supplied anchor against the node (§4.3) — rejecting one
+/// that doesn't resolve keeps the interaction layer's "always references real
+/// IDs" invariant true by construction, rather than trusting whatever block id
+/// the client happens to send.
+///
+/// `Node::resolve` accepts a content block *or* an interaction item: a
+/// follow-up question asked inside an answer anchors to that answer, which is
+/// how the learner keeps going deeper without leaving the document.
 fn resolve_anchor(node: &Node, anchor: &Anchor) -> Result<(), ApiError> {
-    node.content.resolve(anchor).ok_or_else(|| {
-        ApiError::BadRequest("anchor does not resolve against this node's content".to_string())
+    node.resolve(anchor).ok_or_else(|| {
+        ApiError::BadRequest("anchor does not resolve against this node".to_string())
     })?;
     Ok(())
 }
 
-/// The exact text an anchor points at: the selected quote if present, else
-/// the whole anchored block's text (question-on-the-line, §9 — no
-/// selection, context = the reading line's current block).
-fn anchor_text(node: &Node, anchor: &Anchor) -> Option<String> {
-    match &anchor.quote {
-        Some(q) => Some(q.exact.clone()),
-        None => node
+/// How much of a neighbouring block to carry into the reading context. Enough
+/// for the tutor to see where the question sits without re-sending the node
+/// (`node_tail` already covers that, §14).
+const NEIGHBOUR_BUDGET: usize = 400;
+
+/// Where the learner is reading, as a labelled block for the prompt (§9).
+///
+/// Not just the selected span: a question about a selection is almost never
+/// answerable from the selection alone, so this carries the passage it sits
+/// in *and* its neighbours. With no selection at all the anchor is whatever
+/// block is nearest the viewport centre (the reading line) and the same
+/// surrounding text is what gives the question its subject. `None` only when
+/// the anchor names neither a content block nor an interaction item.
+fn reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
+    let idx = match node
+        .content
+        .blocks
+        .iter()
+        .position(|b| b.id == anchor.block_id)
+    {
+        Some(idx) => idx,
+        // Anchored inside an answer (the rabbit hole, §9): the passage the
+        // question is about is that answer, and what came *before* it is the
+        // passage the answer itself was answering — the thread the learner is
+        // following, in the order they read it.
+        None => return interaction_reading_context(node, anchor),
+    };
+    let blocks = &node.content.blocks;
+    let mut out = String::new();
+    if let Some(q) = &anchor.quote {
+        out.push_str(&format!("Selected text: \"{}\"\n", q.exact.trim()));
+    }
+    if idx > 0 {
+        out.push_str(&format!(
+            "Preceding passage: {}\n",
+            head_chars(&blocks[idx - 1].text, NEIGHBOUR_BUDGET)
+        ));
+    }
+    out.push_str(&format!(
+        "Passage the question is about: {}\n",
+        blocks[idx].text.trim()
+    ));
+    if let Some(next) = blocks.get(idx + 1) {
+        out.push_str(&format!(
+            "Following passage: {}",
+            head_chars(&next.text, NEIGHBOUR_BUDGET)
+        ));
+    }
+    Some(out)
+}
+
+/// `reading_context` for an anchor that lands in the interaction layer.
+///
+/// Walks one step back up the chain (answer → what it was anchored to) so the
+/// tutor sees the question in the thread that produced it, not floating on its
+/// own. Only one step: the whole node's tail is already in the prompt
+/// (`node_tail`), and each extra hop costs tokens on the app's hottest path
+/// (§14/§12.2).
+fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
+    let text = node.interaction_text(&anchor.block_id)?;
+    let mut out = String::new();
+    if let Some(q) = &anchor.quote {
+        out.push_str(&format!("Selected text: \"{}\"\n", q.exact.trim()));
+    }
+    if let Some(parent_id) = node.interaction_anchor_block(&anchor.block_id) {
+        let parent_text = node
             .content
             .blocks
             .iter()
-            .find(|b| b.id == anchor.block_id)
-            .map(|b| b.text.clone()),
+            .find(|b| b.id == parent_id)
+            .map(|b| b.text.clone())
+            .or_else(|| node.interaction_text(parent_id));
+        if let Some(parent_text) = parent_text {
+            out.push_str(&format!(
+                "Preceding passage (what this answer was answering): {}\n",
+                head_chars(&parent_text, NEIGHBOUR_BUDGET)
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "Passage the question is about (an earlier answer in this document): {}",
+        text.trim()
+    ));
+    Some(out)
+}
+
+/// The "You asked …" line that heads an answer in the document (§9).
+///
+/// When the question came from a selection, the selection is part of the
+/// header: an answer read weeks later has to say what it was an answer *to*,
+/// and by then the quote is the only thing that still identifies it — the
+/// passage around it may have been asked about several times over. Long
+/// selections are clipped; the header is a label, not a second copy of the
+/// text.
+fn question_header(question: &str, anchor: &Anchor) -> String {
+    let mut out = format!(
+        "<p class=\"question\"><strong>You asked:</strong> {}",
+        escape_html(question)
+    );
+    if let Some(quote) = &anchor.quote {
+        let exact = quote.exact.trim();
+        if !exact.is_empty() {
+            out.push_str(&format!(
+                " <span class=\"about\">about \u{201c}{}\u{201d}</span>",
+                escape_html(&head_chars(exact, QUOTE_HEADER_BUDGET))
+            ));
+        }
+    }
+    out.push_str("</p>");
+    out
+}
+
+/// How much of the selection the answer's header shows before clipping.
+const QUOTE_HEADER_BUDGET: usize = 120;
+
+/// First `max_chars` characters of `s` (char-boundary safe) — the
+/// neighbouring-block counterpart of `tail_chars`.
+fn head_chars(s: &str, max_chars: usize) -> String {
+    let s = s.trim();
+    match s.char_indices().nth(max_chars) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
     }
 }
 
@@ -1323,15 +1633,21 @@ pub struct AskReq {
     anchor: Anchor,
 }
 
-/// Discriminated by `kind` (§S8): `inline` is today's woven-reply behavior
-/// unchanged; `spawn` is a brand-new sub-node the client splices permanently
-/// into the document right after `anchor_block` — not a toggle, not a
-/// separate page.
+/// Discriminated by `kind` (§S8). Both kinds land *in the document*, at
+/// `anchor_block` — §9 "o documento é a resposta": `inline` is a short
+/// explanatory insertion woven in right after the passage that was asked
+/// about, `spawn` a brand-new sub-node spliced there instead. Neither is a
+/// reply appended to a transcript at the end of the page.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AskResp {
     Inline {
+        /// The interaction item's stable id (§4.3) — the client tags the
+        /// spliced answer with it so a follow-up question can anchor to
+        /// this answer, the same way it would anchor to a paragraph.
+        id: String,
         body_html: String,
+        anchor_block: String,
     },
     Spawn {
         node_id: String,
@@ -1367,7 +1683,7 @@ pub async fn ask_question(
     }
     let node = state.store.read_node(&doc_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
-    let context = anchor_text(&node, &body.anchor);
+    let context = reading_context(&node, &body.anchor);
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let node_tail = tail_chars(&node.content.html, NODE_TAIL_BUDGET);
 
@@ -1414,22 +1730,26 @@ pub async fn ask_question(
             .await?;
 
             let body_html = format!(
-                "<p class=\"question\"><strong>You asked:</strong> {}</p>\n<div class=\"answer\">{answer_html}</div>",
-                escape_html(question)
+                "{}\n<div class=\"answer\">{answer_html}</div>",
+                question_header(question, &body.anchor)
             );
             state.store.append_interaction(
                 &doc_id,
                 &node_id,
                 InteractionItem::Thread {
-                    id: move_id,
+                    id: move_id.clone(),
                     kind: ThreadKind::Qa,
-                    anchor_block: Some(body.anchor.block_id),
+                    anchor_block: Some(body.anchor.block_id.clone()),
                     body_html: body_html.clone(),
                     child_node_id: None,
                 },
             )?;
 
-            Ok(Json(AskResp::Inline { body_html }))
+            Ok(Json(AskResp::Inline {
+                id: move_id,
+                body_html,
+                anchor_block: body.anchor.block_id,
+            }))
         }
         AskDecision::Spawn { title: sub_title } => {
             let sub_id = engine::new_id();
@@ -1460,8 +1780,8 @@ pub async fn ask_question(
                 &learnive_core::prose_blocks_only(&sub_node.content.html),
             );
             let body_html = format!(
-                "<p class=\"question\"><strong>You asked:</strong> {}</p>\n<p>↳ spawned a new section: {}</p>",
-                escape_html(question),
+                "{}\n<p>↳ spawned a new section: {}</p>",
+                question_header(question, &body.anchor),
                 escape_html(&sub_title)
             );
             state.store.append_interaction(
@@ -2173,7 +2493,7 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
     // branch below with the wrong JSON shape.
     if text.contains("cold start of a living curriculum") {
         // engine::prompt::propose_objective (§6.1/§S4) contract.
-        return r#"{"text":"Learn the essentials of the requested topic, well enough to explain and apply it","non_goals":[]}"#.to_string();
+        return r#"{"text":"Learn the essentials of the requested topic, well enough to explain and apply it","non_goals":[],"title":"Demo document"}"#.to_string();
     }
     if text.contains("choosing the next move") {
         // movement::decide_move (L1/L2) contract.
@@ -2244,6 +2564,46 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+    use learnive_core::QuoteSelector;
+
+    #[test]
+    fn answer_header_names_the_selection_it_was_asked_on() {
+        let plain = question_header("why?", &Anchor::block("b1"));
+        assert!(plain.contains("You asked:</strong> why?"));
+        assert!(!plain.contains("about"));
+
+        let selected = question_header(
+            "why <that>?",
+            &Anchor {
+                block_id: "b1".to_string(),
+                quote: Some(QuoteSelector {
+                    exact: "  entropy never decreases  ".to_string(),
+                    prefix: None,
+                    suffix: None,
+                }),
+            },
+        );
+        // Question and quote are both escaped — a selection is user-chosen
+        // document text and reaches the page through `innerHTML`.
+        assert!(selected.contains("why &lt;that&gt;?"));
+        assert!(selected.contains("about \u{201c}entropy never decreases\u{201d}"));
+
+        // A long selection is clipped, not reproduced.
+        let long = "x".repeat(QUOTE_HEADER_BUDGET + 50);
+        let clipped = question_header(
+            "?",
+            &Anchor {
+                block_id: "b1".to_string(),
+                quote: Some(QuoteSelector {
+                    exact: long,
+                    prefix: None,
+                    suffix: None,
+                }),
+            },
+        );
+        assert!(clipped.contains('…'));
+        assert!(clipped.len() < QUOTE_HEADER_BUDGET + 120);
+    }
 
     /// Guards the fix noted at the top of `demo_responder`: without the
     /// movement-specific branches ordered first, a `test` move's prompt

@@ -1,0 +1,793 @@
+/* learnive — page style, from the author's blog (https://hashino.github.io):
+   Nord palette, monospace font, translucent blurred cards and a starfield.
+   Fonts are local (no external @import) to respect the §3.1 CSP and §15
+   offline portability; the starfield uses SVG in a data: URI (covered by
+   img-src data:). */
+
+:root {
+  /* Nord palette (fixed). The Polar Night (0-3) and Snow Storm (4-6)
+     halves swap roles between the dark and light themes below. */
+  --nord0: #2e3440;
+  --nord1: #3b4252;
+  --nord2: #434c5e;
+  --nord3: #4c566a;
+  --nord4: #d8dee9;
+  --nord5: #e5e9f0;
+  --nord6: #eceff4;
+  --nord7: #8fbcbb;
+  --nord8: #88c0d0;
+  --nord9: #81a1c1;
+  --nord10: #5e81ac;
+  --nord11: #bf616a;
+  --nord13: #ebcb8b;
+  --nord14: #a3be8c;
+  --roundness: 3px;
+  --mono: "Ubuntu Mono", "JetBrains Mono", "Fira Code", Consolas,
+    "Liberation Mono", Menlo, Courier, monospace;
+}
+
+/* Dark theme (default): semantic role tokens. The rules below only ever
+   reference these, so switching themes = swapping this token block. */
+:root,
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: linear-gradient(
+    135deg,
+    var(--nord0) 0%,
+    var(--nord1) 50%,
+    var(--nord2) 100%
+  );
+  --fg: var(--nord4);
+  --heading: var(--nord6);
+  --heading-2: var(--nord5);
+  /* Chrome surfaces that float over the document: the sidebar and the
+     ask bar. Opaquer than a card — they overlap text and must stay
+     readable on top of it. */
+  --chrome-bg: rgba(46, 52, 64, 0.95);
+  --card-bg: rgba(59, 66, 82, 0.6);
+  --card-border: var(--nord3);
+  --card-shadow: rgba(46, 52, 64, 0.4);
+  --link: var(--nord8);
+  --link-hover: var(--nord7);
+  --muted: var(--nord9);
+  --accent: var(--nord8);
+  --code-bg: var(--nord1);
+  --code-fg: var(--nord13);
+  --pre-bg: var(--nord0);
+  --field-bg: rgba(76, 86, 106, 0.6);
+  --field-fg: var(--nord6);
+  --btn-bg: var(--nord10);
+  --btn-hover: var(--nord9);
+  --btn-fg: var(--nord6);
+  --star-filter: none;
+  --star-opacity: 1;
+  /* Reading line (§9): the block nearest the viewport centre. Ephemeral
+     client state — deliberately quiet, it marks where you are, it does
+     not annotate the text. */
+  --reading-line: rgba(136, 192, 208, 0.1);
+  /* Layout vocabulary of generated prose (§4.4). Quiet on purpose: these
+     shapes sit *inside* a card, so a strong fill would read as a second
+     card rather than as an aside. */
+  --callout-bg: rgba(76, 86, 106, 0.4);
+  --panel-bg: rgba(46, 52, 64, 0.35);
+  --term-fg: var(--nord7);
+  --hl-bg: rgba(235, 203, 139, 0.3);
+}
+
+/* Light theme: Snow Storm backgrounds, Polar Night text, darker accents
+   for contrast. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: linear-gradient(
+    135deg,
+    var(--nord6) 0%,
+    var(--nord5) 50%,
+    var(--nord4) 100%
+  );
+  --fg: var(--nord1);
+  --heading: var(--nord0);
+  --heading-2: var(--nord1);
+  --chrome-bg: rgba(236, 239, 244, 0.9);
+  --card-bg: rgba(255, 255, 255, 0.72);
+  --card-border: var(--nord4);
+  --card-shadow: rgba(76, 86, 106, 0.15);
+  --link: var(--nord10);
+  --link-hover: var(--nord9);
+  --muted: var(--nord3);
+  --accent: var(--nord10);
+  --code-bg: var(--nord5);
+  --code-fg: var(--nord10);
+  --pre-bg: var(--nord5);
+  --field-bg: rgba(255, 255, 255, 0.85);
+  --field-fg: var(--nord0);
+  --btn-bg: var(--nord10);
+  --btn-hover: var(--nord9);
+  --btn-fg: var(--nord6);
+  --star-filter: invert(1);
+  --star-opacity: 0.35;
+  --reading-line: rgba(94, 129, 172, 0.12);
+  --callout-bg: rgba(216, 222, 233, 0.55);
+  --panel-bg: rgba(255, 255, 255, 0.6);
+  --term-fg: var(--nord10);
+  --hl-bg: rgba(235, 203, 139, 0.45);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--mono);
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  background-attachment: fixed;
+}
+
+/* Animated starfield (the blog's signature). Inverted + dimmed in light. */
+#stars,
+#stars2,
+#stars3 {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  opacity: var(--star-opacity);
+  filter: var(--star-filter);
+}
+#stars {
+  background: transparent
+    url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><circle cx="75" cy="75" r="1" fill="white" opacity="0.8"/><circle cx="150" cy="30" r="1" fill="white" opacity="0.6"/><circle cx="225" cy="180" r="1" fill="white" opacity="0.9"/><circle cx="50" cy="200" r="1" fill="white" opacity="0.7"/><circle cx="280" cy="120" r="1" fill="white" opacity="0.5"/></svg>')
+    repeat;
+  animation: moveStars 15s linear infinite;
+}
+#stars2 {
+  background: transparent
+    url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><circle cx="100" cy="50" r="0.8" fill="white" opacity="0.4"/><circle cx="40" cy="120" r="0.8" fill="white" opacity="0.6"/><circle cx="160" cy="170" r="0.8" fill="white" opacity="0.3"/></svg>')
+    repeat;
+  animation: moveStars 45s linear infinite;
+}
+#stars3 {
+  background: transparent
+    url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="250" height="250"><circle cx="200" cy="100" r="0.6" fill="white" opacity="0.8"/><circle cx="80" cy="200" r="0.6" fill="white" opacity="0.4"/><circle cx="20" cy="50" r="0.6" fill="white" opacity="0.7"/></svg>')
+    repeat;
+  animation: moveStars 90s linear infinite;
+}
+@keyframes moveStars {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-300px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #stars,
+  #stars2,
+  #stars3 {
+    animation: none;
+  }
+}
+
+/* Central content column. There is no top bar to clear: the page is the
+   document and nothing frames it permanently — the two controls the bar
+   held live in the sidebar footer, which is only there when asked for. */
+.main-container {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 3rem 2rem;
+}
+
+/* Translucent card (.blog-content style). */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  box-shadow: 0 10px 40px var(--card-shadow);
+  backdrop-filter: blur(10px);
+  padding: 2rem 2.5rem 2.5rem;
+}
+.card + .card {
+  margin-top: 1.5rem;
+}
+
+h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--heading);
+  margin: 0 0 1rem;
+}
+h2 {
+  color: var(--heading-2);
+  margin: 1.5rem 0 0.8rem;
+}
+h3 {
+  color: var(--heading-2);
+}
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+code {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+pre {
+  background: var(--pre-bg);
+  border-radius: var(--roundness);
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+pre code {
+  background: none;
+  color: var(--fg);
+  padding: 0;
+}
+blockquote {
+  border-left: 4px solid var(--accent);
+  margin: 1rem 0;
+  padding-left: 1rem;
+  font-style: italic;
+  opacity: 0.9;
+}
+
+textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.6rem;
+  color: var(--field-fg);
+  background: var(--field-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+}
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.rem-answer {
+  margin-top: 0.8rem;
+}
+button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  color: var(--btn-fg);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-bg);
+  border-radius: var(--roundness);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+button:hover:not(:disabled) {
+  background: var(--btn-hover);
+  border-color: var(--btn-hover);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- Left sidebar: document name + outline (§S12) -------------------
+   An overlay, not a column: it slides in when the pointer reaches the
+   left edge and slides back out, so the reading column keeps the full
+   width and stays centred either way. `#sidebarEdge` is the invisible
+   hover target that catches the pointer before the panel is there. */
+#sidebarEdge {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 14px;
+  height: 100vh;
+  z-index: 900;
+}
+#sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 950;
+  width: 300px;
+  max-width: 85vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  overflow-y: auto;
+  background: var(--chrome-bg);
+  border-right: 1px solid var(--card-border);
+  backdrop-filter: blur(10px);
+  transform: translateX(-100%);
+  transition: transform 0.18s ease;
+}
+#sidebar.open {
+  transform: none;
+}
+/* A hairline that stays visible while the panel is away, so the edge
+   reads as an affordance rather than a hidden gesture. */
+#sidebarEdge::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 84px;
+  border-radius: 0 3px 3px 0;
+  background: var(--card-border);
+  transition: background 0.18s ease;
+}
+#sidebarEdge:hover::before {
+  background: var(--accent);
+}
+/* With the panel out, the strip would otherwise sit on top of the
+   sidebar's own left margin and swallow clicks there. */
+#sidebar.open ~ #sidebarEdge {
+  pointer-events: none;
+}
+#sidebar.open ~ #sidebarEdge::before {
+  opacity: 0;
+}
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--card-border);
+}
+/* Ghost buttons — the back arrow in the head, setup and theme in the
+   foot. Quiet by default, accent on hover: chrome should be findable
+   without competing with the text. */
+.sidebar-head button,
+.icon-btn {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  padding: 0.15rem 0.45rem;
+  line-height: 1.2;
+  text-decoration: none;
+  font: inherit;
+  cursor: pointer;
+}
+.sidebar-head button:hover:not(:disabled),
+.icon-btn:hover {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Sidebar footer. `margin-top: auto` in the flex column parks it at the
+   bottom of the panel whatever the outline's length. */
+.sidebar-foot {
+  display: flex;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--card-border);
+}
+.sidebar-foot .icon-btn {
+  font-size: 1rem;
+  padding: 0.25rem 0.5rem;
+}
+#docName {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--heading);
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+#docName:hover {
+  color: var(--accent);
+}
+#docNameInput {
+  flex: 1;
+  width: 100%;
+  font: inherit;
+  font-weight: 700;
+  padding: 0.2rem 0.4rem;
+  color: var(--field-fg);
+  background: var(--field-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--roundness);
+}
+.sidebar-section {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+#docList {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+#docList li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 0.4rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: var(--roundness);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+#docList .doc-name {
+  overflow-wrap: anywhere;
+}
+/* The trash sits out of the way until the row is hovered or the button
+   itself is focused — deleting is not something to invite by accident,
+   but it must not be a hidden gesture either. */
+#docList .doc-trash {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  opacity: 0;
+}
+#docList li:hover .doc-trash,
+#docList .doc-trash:focus-visible {
+  opacity: 1;
+}
+#docList .doc-trash:hover {
+  color: var(--nord11);
+  border-color: var(--nord11);
+}
+/* Inline confirmation, spanning the row it belongs to. */
+#docList .doc-confirm {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--card-border);
+  font-size: 0.8rem;
+  color: var(--fg);
+  cursor: default;
+}
+#docList .doc-confirm button {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+#docList .doc-confirm button.danger {
+  background: var(--nord11);
+  border-color: var(--nord11);
+}
+#docList li:hover {
+  background: var(--card-bg);
+  color: var(--accent);
+}
+#docList li.current {
+  color: var(--accent);
+}
+#docList .doc-meta {
+  grid-column: 1;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+#newDocBtn {
+  margin-top: 0.75rem;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+#outline {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin: 0;
+  padding-left: 1.2rem;
+}
+#outline li.current {
+  font-weight: 700;
+  color: var(--accent);
+}
+/* §S5 gate state: locked items are visible (so the graph shape reads)
+   but not reachable; available/demonstrated items are clickable. */
+#outline li.state-locked {
+  opacity: 0.5;
+}
+#outline li.state-available,
+#outline li.state-demonstrated {
+  cursor: pointer;
+}
+#outline li.state-available:hover,
+#outline li.state-demonstrated:hover {
+  color: var(--accent);
+}
+#prose {
+  min-height: 2rem;
+}
+
+/* --- Layout vocabulary of generated prose (§4.4) ---------------------
+   The model shapes its section with <div>/<span>, but only with the class
+   names below: `sanitizeHtml` (core.js) strips every other one, so this
+   block and ALLOWED_CLASSES are the same list seen from two sides — add a
+   shape here and it has to be added there and in PROSE_HTML_CONTRACT, or
+   it silently disappears on render.
+
+   Deliberately small. The point is that the SHAPE of an explanation can
+   carry meaning (an aside, a warning, a side-by-side contrast), not that
+   the model gets a design system: everything here is scoped to #prose and
+   built from the theme tokens, so generated content cannot drift away
+   from the page's own look or imitate the app's chrome. */
+
+/* An aside worth pausing on. `key` and `warning` change only the edge
+   colour: the callout is the shape, the modifier is the tone. */
+#prose .callout {
+  border-left: 3px solid var(--card-border);
+  background: var(--callout-bg);
+  border-radius: var(--roundness);
+  padding: 0.7rem 0.9rem;
+  margin: 1rem 0;
+}
+#prose .callout.key {
+  border-left-color: var(--accent);
+}
+#prose .callout.warning {
+  border-left-color: var(--nord11);
+}
+/* Callouts hold prose, whose first/last child brings its own outer
+   margin — without this every callout is padded twice at top and bottom. */
+#prose .callout > :first-child {
+  margin-top: 0;
+}
+#prose .callout > :last-child {
+  margin-bottom: 0;
+}
+
+/* Two or three panels side by side (a contrast, before/after, a rule next
+   to its worked example). auto-fit rather than a fixed count so the model
+   can put two or three in without the CSS caring, and so it stacks by
+   itself when the column gets narrow. */
+#prose .columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.9rem;
+  margin: 1rem 0;
+}
+#prose .panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  padding: 0.7rem 0.9rem;
+}
+#prose .panel > :first-child {
+  margin-top: 0;
+}
+#prose .panel > :last-child {
+  margin-bottom: 0;
+}
+
+/* A term being defined, and a phrase to make stand out. Both inline, both
+   weaker than <strong> — they mark a role, they don't shout. */
+#prose .term {
+  color: var(--term-fg);
+  font-weight: 700;
+}
+#prose .hl {
+  background: var(--hl-bg);
+  border-radius: 2px;
+  padding: 0 0.15em;
+}
+/* A spawned sub-node (§S8), spliced permanently into the reading flow
+   right after the paragraph that prompted it — not a toggle, always
+   rendered. The left border marks it as a distinct section without
+   hiding it behind an expand/collapse affordance. */
+.subnode {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.9rem;
+  margin: 1rem 0;
+}
+.subnode > .subnode-title {
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 0.4rem;
+}
+.subnode > .subnode-question {
+  font-size: 0.9rem;
+  font-style: italic;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+figure[data-interactive] {
+  margin: 1rem 0;
+}
+iframe.sandbox {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  /* Height is set by JS from the iframe's reported content height (no
+     internal scroll). Small min just covers the brief pre-measure moment. */
+  min-height: 2.5rem;
+  background: var(--field-bg);
+}
+.grade {
+  border-left: 3px solid var(--card-border);
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+}
+.grade.demonstrated {
+  border-color: var(--nord14);
+}
+.grade.partial {
+  border-color: var(--nord13);
+}
+.grade.not_demonstrated {
+  border-color: var(--nord11);
+}
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.error {
+  color: var(--nord11);
+}
+/* §S6 reading interactions (§9): the append-only Q&A/annotation/
+   remediation history, each visually distinct so the source of a
+   given entry (asked, noted, or a failed-check walkthrough) reads at
+   a glance. */
+#interactions > div {
+  border-left: 3px solid var(--card-border);
+  padding-left: 0.75rem;
+  margin: 0.75rem 0;
+}
+#interactions > .qa {
+  border-color: var(--accent);
+}
+#interactions > .annotation {
+  border-color: var(--nord13);
+}
+/* MathML (§4.2): the server converts the model's LaTeX at freeze time
+   (`learnive_core::render_math`), so math arrives as real MathML and the
+   browser typesets it natively — no KaTeX/MathJax, nothing for the §3.1
+   CSP to allow. Only layout is styled here; glyph shaping is the
+   browser's job. */
+/* Bumped, and again for display: MathML sets numerator/denominator at
+   script size, so a fraction at 1em reads noticeably smaller than the
+   monospace prose around it. */
+math {
+  font-size: 1.15em;
+}
+/* A display equation gets its own centered line and scrolls on its own
+   when wider than the column, so a long formula never makes the page
+   scroll sideways. */
+/* Centered with auto margins on a fit-content box, not `text-align`:
+   the <math> box is laid out as math, and text-align does not reach
+   inside it. `max-width` keeps the fit-content box from overflowing the
+   column, so `overflow-x` still has something to scroll. */
+math[display="block"] {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  font-size: 1.35em;
+  margin: 1.2rem auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Reading line (§9): the block nearest the viewport centre, marked as
+   ephemeral client state — never written into the node (§4.3). */
+#prose [data-block-id].reading-line {
+  background: var(--reading-line);
+  box-shadow: -0.7rem 0 0 var(--reading-line), 0.7rem 0 0 var(--reading-line);
+  border-radius: 2px;
+}
+
+/* --- Bottom ask bar (§S6/§9) ----------------------------------------
+   Replaces the old selection popover: one bar, always in the same
+   place, that slides up when there is a selection or when the pointer
+   nears the bottom edge. Direct child of <body> on purpose — a fixed
+   element nested in `.card` would be positioned against the card, not
+   the viewport, because `backdrop-filter` makes the card a containing
+   block. */
+#askBar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 960;
+  padding: 0.7rem 1rem;
+  background: var(--chrome-bg);
+  border-top: 1px solid var(--card-border);
+  backdrop-filter: blur(10px);
+  transform: translateY(105%);
+  /* `visibility` rather than `hidden`/`display:none`: it keeps the
+     slide transition, and it keeps the closed bar out of the tab order
+     instead of leaving a focusable form parked off-screen. */
+  visibility: hidden;
+  transition: transform 0.18s ease, visibility 0.18s;
+}
+#askBar.open {
+  transform: none;
+  visibility: visible;
+}
+#askBarInner {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.ask-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+#askInput {
+  flex: 1;
+  resize: none;
+  max-height: 30vh;
+}
+#askContext {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#askContext .ask-quote {
+  color: var(--accent);
+}
+#askStatus {
+  margin: 0.35rem 0 0;
+}
+/* An answer woven into the document at the passage it was asked about
+   (§9) — same "distinct but part of the text" treatment as a spawned
+   sub-node, one notch lighter since it is an insertion, not a section. */
+.inline-answer {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.9rem;
+  margin: 1rem 0;
+}
+/* Rabbit hole (§9): an answer is itself askable, so answers nest. Each
+   level steps right and fades its rule, which is the only cue that says
+   "you are three questions deep off this paragraph" — and the reason it
+   is an indent rather than a collapsible thread is that the whole point
+   is that it stays part of the document you are reading. The indent is
+   computed from `--depth` (set by `spliceInlineAnswer`) and clamped, so
+   an arbitrarily deep hole never eats the column. */
+.inline-answer {
+  margin-left: calc(min(var(--depth, 1) - 1, 3) * 1.1rem);
+}
+.inline-answer[data-depth="2"] {
+  border-left-color: var(--nord9);
+}
+.inline-answer[data-depth="3"] {
+  border-left-color: var(--nord10);
+}
+.inline-answer:not([data-depth="1"]):not([data-depth="2"]):not(
+    [data-depth="3"]
+  ) {
+  border-left-color: var(--muted);
+}
+.inline-answer > .question {
+  font-size: 0.85rem;
+  font-style: italic;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+/* "about <selection>" — what the question was asked on. Quoted and
+   accented so it reads as the passage rather than as more of the
+   question, which is the whole point of putting it here: an answer read
+   back later has to say what it answered. */
+.question > .about {
+  color: var(--accent);
+  font-style: normal;
+}

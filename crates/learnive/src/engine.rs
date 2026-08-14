@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use rand::{Rng, distributions::Alphanumeric};
 use serde::{Deserialize, Serialize};
 
-use learnive_core::{Node, ObjectiveType, ensure_block_ids};
+use learnive_core::{Node, ObjectiveType, ensure_block_ids, render_math};
 
 use crate::ai::{Ai, ChatMessage, ProviderError, Tier};
 
@@ -77,6 +77,14 @@ pub struct ObjectiveProposal {
     pub text: String,
     #[serde(default)]
     pub non_goals: Vec<String>,
+    /// Short display name for the living document (§S12) — what the sidebar
+    /// shows and what the learner renames. Ridden along on this call rather
+    /// than given one of its own: the cold start already pays for a fast-tier
+    /// round trip here, and a second one just to title the document would be
+    /// latency (§14) and tokens (§12.2) for a label. Empty when the model
+    /// omits it; the caller falls back to the topic.
+    #[serde(default)]
+    pub title: String,
 }
 
 /// A rubric objective, locked at node creation (§8).
@@ -257,12 +265,17 @@ pub async fn remediate(
         .map(|g| format!("- {}: {}", g.objective_id, g.feedback))
         .collect::<Vec<_>>()
         .join("\n");
-    collect(
+    let html = collect(
         ai,
         Tier::Robust,
         prompt::remediation(item_title, exercise_html, answer, &unmet_summary, attempt),
     )
-    .await
+    .await?;
+    // Rendered here, not at assembly: this prose goes straight into the
+    // append-only interaction layer (§4.3) as `body_html` and never passes
+    // through `assemble_node`, which is where every other path picks up math
+    // rendering. Applying it in both places would be a wasted second pass.
+    Ok(render_math(&html))
 }
 
 /// Answers a question asked mid-reading (§S6, §9 "the document is the
@@ -278,15 +291,17 @@ pub async fn answer_question(
     topic: &str,
     item_title: &str,
     node_context: &str,
-    anchor_text: Option<&str>,
+    reading_context: Option<&str>,
     question: &str,
 ) -> Result<String, EngineError> {
-    collect(
+    let html = collect(
         ai,
         Tier::Robust,
-        prompt::answer_question(topic, item_title, node_context, anchor_text, question),
+        prompt::answer_question(topic, item_title, node_context, reading_context, question),
     )
-    .await
+    .await?;
+    // Interaction layer, not assembled — same reason as `remediate`.
+    Ok(render_math(&html))
 }
 
 /// What the tutor decided about a question asked mid-reading (§7/§S8): answer
@@ -315,11 +330,11 @@ pub async fn decide_ask_response(
     topic: &str,
     item_title: &str,
     node_context: &str,
-    anchor_text: Option<&str>,
+    reading_context: Option<&str>,
     question: &str,
 ) -> Result<AskDecision, EngineError> {
     let messages =
-        prompt::decide_ask_response(topic, item_title, node_context, anchor_text, question);
+        prompt::decide_ask_response(topic, item_title, node_context, reading_context, question);
     let text = collect(ai, Tier::Fast, messages.clone()).await?;
     if let Ok(d) = parse::ask_decision(&text) {
         return Ok(d);
@@ -344,7 +359,7 @@ pub async fn generate_subnode_prose(
     sub_title: &str,
     parent_title: &str,
     node_context: &str,
-    anchor_text: Option<&str>,
+    reading_context: Option<&str>,
     question: &str,
 ) -> Result<String, EngineError> {
     collect(
@@ -355,7 +370,7 @@ pub async fn generate_subnode_prose(
             sub_title,
             parent_title,
             node_context,
-            anchor_text,
+            reading_context,
             question,
         ),
     )
@@ -408,7 +423,7 @@ pub fn assemble_node(
     exercise_id: &str,
     rubric_id: &str,
 ) -> Result<Node, EngineError> {
-    let blocks = ensure_block_ids(prose_inner_html, &format!("{node_id}-b"));
+    let blocks = ensure_block_ids(&render_math(prose_inner_html), &format!("{node_id}-b"));
     let form = ensure_form_ids(exercise_html, exercise_id, rubric_id);
     let article = format!(
         "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
@@ -428,7 +443,7 @@ pub fn assemble_content_node(
     node_id: &str,
     prose_inner_html: &str,
 ) -> Result<Node, EngineError> {
-    let blocks = ensure_block_ids(prose_inner_html, &format!("{node_id}-b"));
+    let blocks = ensure_block_ids(&render_math(prose_inner_html), &format!("{node_id}-b"));
     let article = format!(
         "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
          <section data-layer=\"content\">\n{blocks}\n  </section>\n  \
@@ -482,7 +497,7 @@ fn ensure_form_ids(exercise_html: &str, exercise_id: &str, rubric_id: &str) -> S
 /// artifact back to the parent.
 ///
 /// This used to be built **client-side** as `iframe.srcdoc` (harness inlined
-/// in `index.html`). `srcdoc` documents inherit the parent page's CSP — not
+/// in the page script). `srcdoc` documents inherit the parent page's CSP — not
 /// an oversight, a browser rule — so the moment the app's own CSP drops
 /// `'unsafe-inline'` (a planned hardening), the inline harness `<script>`
 /// here would stop running too. Serving this as a real HTTP response lets
@@ -540,7 +555,7 @@ pub mod prompt {
 
     /// HTML contract for **sanitized** surfaces (prose, remediation): this content
     /// is inserted into the app origin and passes through the client `sanitizeHtml`
-    /// (`assets/index.html`), which silently REMOVES anything outside the contract.
+    /// (`assets/core.js`), which silently REMOVES anything outside the contract.
     /// Telling the model prevents it from generating something that vanishes on
     /// render (§3.1/§4.4). **Keep in sync with the sanitizer** — the list of
     /// blocked tags/attributes here mirrors the one there.
@@ -552,7 +567,7 @@ pub mod prompt {
     /// `movement::IslandGate` gates the island's raw HTML out of the live SSE
     /// `token` frames, injects a block id once it sees the closing tag, and
     /// `api::block_frame` serves it through its own sandboxed iframe
-    /// (`assets/index.html`'s `hydrateIslands`), exactly like
+    /// (`assets/node.js`'s `hydrateIslands`), exactly like
     /// `exercise_frame` already does for the exercise. Every other caller of
     /// THIS constant (the **structured** JSON-envelope path for
     /// profile/plan/other moves, the remediation explanation, a sub-node's
@@ -561,15 +576,51 @@ pub mod prompt {
     /// inside a JSON string field risks breaking the JSON envelope itself
     /// (escaping, truncation). So it stays out of the shared contract and is
     /// opt-in per call site.
+    ///
+    /// On the math rule: it deliberately does NOT forbid LaTeX. The model
+    /// writes math in LaTeX because that is what its training data is, so a
+    /// prohibition would be an *unenforced* request — unlike the HTML rules
+    /// above, which the sanitizer actually enforces — and it would cap notation
+    /// at what Unicode can express, a permanent quality ceiling for any real
+    /// mathematics. The server converts LaTeX to MathML at freeze time instead
+    /// (`learnive_core::render_math`). What the rule is for is fixing the
+    /// *form*: the converter can only find math that is delimited, and a bare
+    /// `\frac{1}{2}` mid-sentence is not safely recoverable. Same bargain
+    /// [`ISLAND_CONTRACT`] makes — the model commits to literal markers, the
+    /// server does the rest.
+    ///
+    /// Written as one flat literal on purpose: this constant is interpolated
+    /// *into* other `format!` strings, so a `{PLACEHOLDER}` for a second
+    /// constant would never be expanded and would ship to the model verbatim
+    /// (`contract_tests` guards exactly that).
     pub const PROSE_HTML_CONTRACT: &str = "\
 HTML rules (the content is sanitized — anything that violates them disappears on render):\n\
 - Use ONLY static semantic HTML: <h2>-<h4>, <p>, <ul>/<ol>/<li>, <table>/<tr>/\
-<td>, <code>/<pre>, <blockquote>, <strong>/<em>, <a href> (only http(s), mailto: \
-or #) and <img> (only src https: or data:image/).\n\
+<td>, <code>/<pre>, <blockquote>, <strong>/<em>, <div>, <span>, <a href> (only \
+http(s), mailto: or #) and <img> (only src https: or data:image/).\n\
+- Layout: shape the page with <div>/<span>, but ONLY with these class values \
+(any other class is stripped on render): \"callout\" an aside worth pausing on; \
+\"callout key\" the central idea of the section; \"callout warning\" a common \
+mistake or misconception; \"columns\" a side-by-side comparison, holding two or \
+three <div class=\"panel\">; \"panel\" one bounded unit; and on <span>: \"term\" a \
+term you are defining, \"hl\" a phrase to make stand out. Nest and combine them \
+freely — use them when the SHAPE of the content carries meaning (a contrast, a \
+warning, a definition), not for decoration.\n\
+- Keep the section a SEQUENCE of several top-level elements. Never wrap the \
+whole thing in one outer <div>: the reader navigates, highlights and asks \
+questions per top-level block, so a single wrapper collapses all of that into \
+one undifferentiated blob.\n\
 - NEVER use: <script>, <style>, <form>, <iframe>, <object>, <embed>, <link>, \
 <meta>, <base>; nor on* attributes (onclick, onerror...), nor inline style \
 attributes, nor javascript: URLs. All of that is discarded.\n\
-- Do not generate id/data-* attributes — the server assigns them.";
+- Do not generate id/data-* attributes — the server assigns them.\n\
+- Write in HTML, not Markdown: no ###, **bold**, or ``` fences — use <h3>, \
+<strong>, <pre><code>. Markdown reaches the reader as literal characters.\n\
+- Math: write it in LaTeX and ALWAYS delimit it — $$…$$ or \\[…\\] for a \
+formula on its own line, \\(…\\) or $…$ inline. The server typesets it. \
+Undelimited LaTeX (a bare \\frac{1}{2} in a sentence) cannot be typeset and \
+reaches the reader as raw source, so never write one. Prefer plain text or \
+Unicode for anything that is not really math (H₂O, 25 °C, 3 × 4).";
 
     /// Addendum to [`PROSE_HTML_CONTRACT`] for the ONE call site with a real
     /// mechanism behind it (`movement::prompt::generate_move_streamed`) —
@@ -622,8 +673,11 @@ include the solution anywhere in the exercise_html. The student must produce it.
                  compact, single-sentence curriculum objective — concrete enough to \
                  anchor every future decision, not a restatement of the topic. If \
                  the request has an obvious scope boundary (what it does NOT cover), \
-                 list 1-3 short non-goals; otherwise leave non_goals empty. Respond \
-                 ONLY with JSON: {\"text\":\"...\",\"non_goals\":[\"...\"]}.",
+                 list 1-3 short non-goals; otherwise leave non_goals empty. Also \
+                 give the document a short title (2-5 words, same language as the \
+                 request) — a name the learner will recognize in a list of their \
+                 documents, not a sentence. Respond ONLY with JSON: \
+                 {\"text\":\"...\",\"non_goals\":[\"...\"],\"title\":\"...\"}.",
             ),
             ChatMessage::user(format!("Learner's request: {topic}")),
         ]
@@ -713,40 +767,54 @@ to the \"no data-* attributes\" rule.";
         ]
     }
 
-    /// A question asked mid-reading (§S6, §9). `anchor_text` is the exact
-    /// selected span (selection→question) or the whole current block's text
-    /// (question-on-the-line, no selection) — either way the caller already
-    /// resolved it against the frozen content layer; `None` only if neither
-    /// applies. Same adversarial-not-flattering instruction `confront` uses
-    /// (§7), but scoped to only when the question actually states a
-    /// position — a plain clarifying question just gets a clear answer.
+    /// Formats the caller's reading context (`api::reading_context`) — the
+    /// passage the question is about plus its neighbours, and the selected
+    /// span when there was a selection — as its own labelled block. Shared by
+    /// the three question-handling prompts so they describe the learner's
+    /// position in the document identically. Empty when the anchor didn't
+    /// resolve to a block.
+    fn reading_context_block(reading_context: Option<&str>) -> String {
+        match reading_context {
+            Some(t) => format!("\n\nWHERE THE LEARNER IS READING:\n{t}"),
+            None => String::new(),
+        }
+    }
+
+    /// A question asked mid-reading (§S6, §9). `reading_context` locates the
+    /// question in the document — the passage it was asked from, what
+    /// surrounds it, and the exact selected span if there was one; `None`
+    /// only when the anchor names no block. Same adversarial-not-flattering
+    /// instruction `confront` uses (§7), but scoped to only when the question
+    /// actually states a position — a plain clarifying question just gets a
+    /// clear answer.
     pub fn answer_question(
         topic: &str,
         item_title: &str,
         node_context: &str,
-        anchor_text: Option<&str>,
+        reading_context: Option<&str>,
         question: &str,
     ) -> Vec<ChatMessage> {
-        let anchor_line = match anchor_text {
-            Some(t) => format!("\nThe learner selected/is reading this exact passage: \"{t}\""),
-            None => String::new(),
-        };
+        let anchor_block = reading_context_block(reading_context);
         vec![
             ChatMessage::system(format!(
                 "The learner is reading a node of a living document and asked a \
-                 question, in place — your answer becomes part of the document \
-                 itself, not a side chat (§9). Answer directly and honestly, grounded \
+                 question, in place. Your answer is not a reply in a chat — it is \
+                 spliced into the document itself, immediately after the passage \
+                 they asked about (§9). Write it as the explanation that passage \
+                 was missing for this learner: it has to read as part of the text \
+                 at that point. Do not open with pleasantries, do not restate the \
+                 question, do not sign off. Answer directly and honestly, grounded \
                  in the node's content. If the question states a position or \
                  disagreement, engage with it dialectically — build the strongest \
                  honest counter-argument rather than flattering or simply validating \
                  it (§7) — but only when there is actually a stance to engage with; a \
                  plain clarifying question just gets a clear, honest answer. Do not \
-                 repeat the whole node; answer the specific question.\n\n\
+                 repeat the whole node; resolve the specific doubt.\n\n\
                  {PROSE_HTML_CONTRACT}"
             )),
             ChatMessage::user(format!(
                 "Topic: {topic}\nConcept of this node: {item_title}\n\
-                 Node content so far: {node_context}{anchor_line}\n\nQuestion: {question}"
+                 Node content so far: {node_context}{anchor_block}\n\nQuestion: {question}"
             )),
         ]
     }
@@ -757,13 +825,10 @@ to the \"no data-* attributes\" rule.";
         topic: &str,
         item_title: &str,
         node_context: &str,
-        anchor_text: Option<&str>,
+        reading_context: Option<&str>,
         question: &str,
     ) -> Vec<ChatMessage> {
-        let anchor_line = match anchor_text {
-            Some(t) => format!("\nThe learner selected/is reading this exact passage: \"{t}\""),
-            None => String::new(),
-        };
+        let anchor_block = reading_context_block(reading_context);
         vec![
             ChatMessage::system(
                 "The learner asked a question while reading a node of a living \
@@ -782,7 +847,7 @@ to the \"no data-* attributes\" rule.";
             ),
             ChatMessage::user(format!(
                 "Topic: {topic}\nConcept of this node: {item_title}\n\
-                 Node content so far: {node_context}{anchor_line}\n\nQuestion: {question}"
+                 Node content so far: {node_context}{anchor_block}\n\nQuestion: {question}"
             )),
         ]
     }
@@ -795,13 +860,10 @@ to the \"no data-* attributes\" rule.";
         sub_title: &str,
         parent_title: &str,
         node_context: &str,
-        anchor_text: Option<&str>,
+        reading_context: Option<&str>,
         question: &str,
     ) -> Vec<ChatMessage> {
-        let anchor_line = match anchor_text {
-            Some(t) => format!("\nThe learner selected/is reading this exact passage: \"{t}\""),
-            None => String::new(),
-        };
+        let anchor_block = reading_context_block(reading_context);
         vec![
             ChatMessage::system(format!(
                 "The learner asked a question that warrants a real new section of \
@@ -816,7 +878,7 @@ to the \"no data-* attributes\" rule.";
             )),
             ChatMessage::user(format!(
                 "Topic: {topic}\nParent concept: {parent_title}\nNew section title: \
-                 {sub_title}\nParent node content so far: {node_context}{anchor_line}\n\n\
+                 {sub_title}\nParent node content so far: {node_context}{anchor_block}\n\n\
                  Question: {question}"
             )),
         ]
@@ -1256,5 +1318,26 @@ mod tests {
             .await
             .unwrap();
         assert!(a.all_demonstrated());
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    /// The math sub-contract must actually reach the model. `PROSE_HTML_CONTRACT`
+    /// is a `const` that gets interpolated *into* other format strings, so a
+    /// `{MATH_CONTRACT}` placeholder inside it is never expanded — it would ship
+    /// to the model as the literal seven characters. This guards that.
+    #[test]
+    fn prose_contract_embeds_the_math_rules_not_a_placeholder() {
+        let c = super::prompt::PROSE_HTML_CONTRACT;
+        assert!(
+            !c.contains("{MATH_CONTRACT}"),
+            "unexpanded placeholder: {c}"
+        );
+        assert!(
+            c.contains("$$"),
+            "math delimiters missing from the contract"
+        );
+        assert!(c.contains("Markdown"), "markdown rule missing");
     }
 }
