@@ -22,6 +22,9 @@
   --nord13: #ebcb8b;
   --nord14: #a3be8c;
   --roundness: 3px;
+  /* Horizontal room an inline answer reserves for its depth rules. Fixed:
+     it must not grow with nesting, or depth becomes an indent again. */
+  --answer-pad: 1.2rem;
   --mono: "Ubuntu Mono", "JetBrains Mono", "Fira Code", Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
 }
@@ -749,33 +752,47 @@ math[display="block"] {
   margin: 0.35rem 0 0;
 }
 /* An answer woven into the document at the passage it was asked about
-   (§9) — same "distinct but part of the text" treatment as a spawned
-   sub-node, one notch lighter since it is an insertion, not a section. */
+   (§9), and the rabbit hole it opens: an answer is itself askable, so
+   answers nest.
+
+   Depth is drawn, not indented. Rules run down BOTH edges of the answer
+   and the number of rules is the depth — an answer inside an answer has
+   two. Nothing steps right: an indent would spend column width on
+   nesting and make the deepest text, which is where the learner actually
+   is, the narrowest on the page. The rules are painted as repeating
+   gradients sized from `--depth` (set by `spliceInlineAnswer`), so one
+   rule handles any depth; the count is clamped at 4 because past that
+   the band would need more room than the padding has. */
 .inline-answer {
-  border-left: 3px solid var(--accent);
-  padding-left: 0.9rem;
+  --rule-w: 2px;
+  --rule-gap: 3px;
+  --rule-band: calc(min(var(--depth, 1), 4) * (var(--rule-w) + var(--rule-gap)));
   margin: 1rem 0;
+  padding: 0.2rem var(--answer-pad);
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      var(--accent) 0 var(--rule-w),
+      transparent var(--rule-w) calc(var(--rule-w) + var(--rule-gap))
+    ),
+    repeating-linear-gradient(
+      to left,
+      var(--accent) 0 var(--rule-w),
+      transparent var(--rule-w) calc(var(--rule-w) + var(--rule-gap))
+    );
+  background-size: var(--rule-band) 100%;
+  background-position:
+    left center,
+    right center;
+  background-repeat: no-repeat;
 }
-/* Rabbit hole (§9): an answer is itself askable, so answers nest. Each
-   level steps right and fades its rule, which is the only cue that says
-   "you are three questions deep off this paragraph" — and the reason it
-   is an indent rather than a collapsible thread is that the whole point
-   is that it stays part of the document you are reading. The indent is
-   computed from `--depth` (set by `spliceInlineAnswer`) and clamped, so
-   an arbitrarily deep hole never eats the column. */
-.inline-answer {
-  margin-left: calc(min(var(--depth, 1) - 1, 3) * 1.1rem);
-}
-.inline-answer[data-depth="2"] {
-  border-left-color: var(--nord9);
-}
-.inline-answer[data-depth="3"] {
-  border-left-color: var(--nord10);
-}
-.inline-answer:not([data-depth="1"]):not([data-depth="2"]):not(
-    [data-depth="3"]
-  ) {
-  border-left-color: var(--muted);
+/* A nested answer bleeds back out through its parent's padding so every
+   answer, at every depth, is exactly as wide as the document column and
+   its text starts at the same x. Without this the paddings would stack
+   and nesting would indent after all — by the back door. */
+.inline-answer .inline-answer {
+  margin-left: calc(-1 * var(--answer-pad));
+  margin-right: calc(-1 * var(--answer-pad));
 }
 .inline-answer > .question {
   font-size: 0.85rem;
