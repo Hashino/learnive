@@ -22,9 +22,16 @@
   --nord13: #ebcb8b;
   --nord14: #a3be8c;
   --roundness: 3px;
-  /* Horizontal room an inline answer reserves for its depth rules. Fixed:
-     it must not grow with nesting, or depth becomes an indent again. */
-  --answer-pad: 1.2rem;
+  /* Horizontal padding of the reading card, as a token: an inline answer
+     bleeds back out through exactly this much to reach the card's own
+     border, so the two must move together. */
+  --card-pad-x: 2.5rem;
+  /* How far an answer's depth rules stop short of that border. */
+  --answer-bleed: 4px;
+  /* Room an answer reserves for its rules — exactly what it bled out, so
+     its text lands back on the column's text edge. Fixed: it must not
+     grow with nesting, or depth becomes an indent again. */
+  --answer-pad: calc(var(--card-pad-x) - var(--answer-bleed));
   --mono: "Ubuntu Mono", "JetBrains Mono", "Fira Code", Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
 }
@@ -188,7 +195,7 @@ body {
   border-radius: var(--roundness);
   box-shadow: 0 10px 40px var(--card-shadow);
   backdrop-filter: blur(10px);
-  padding: 2rem 2.5rem 2.5rem;
+  padding: 2rem var(--card-pad-x) 2.5rem;
 }
 .card + .card {
   margin-top: 1.5rem;
@@ -767,7 +774,13 @@ math[display="block"] {
   --rule-w: 2px;
   --rule-gap: 3px;
   --rule-band: calc(min(var(--depth, 1), 4) * (var(--rule-w) + var(--rule-gap)));
-  margin: 1rem 0;
+  /* Out through the containing padding, so the rules land on the card's
+     real edge instead of floating somewhere in its margin — and back in
+     by the same amount, so the answer's text keeps the column's text
+     edge. One expression serves every depth: a nested answer bleeds out
+     of its parent answer's padding exactly as the first bled out of the
+     card's, which is why their rules stack at the same edge. */
+  margin: 1rem calc(-1 * var(--answer-pad));
   padding: 0.2rem var(--answer-pad);
   background-image:
     repeating-linear-gradient(
@@ -786,13 +799,14 @@ math[display="block"] {
     right center;
   background-repeat: no-repeat;
 }
-/* A nested answer bleeds back out through its parent's padding so every
-   answer, at every depth, is exactly as wide as the document column and
-   its text starts at the same x. Without this the paddings would stack
-   and nesting would indent after all — by the back door. */
-.inline-answer .inline-answer {
-  margin-left: calc(-1 * var(--answer-pad));
-  margin-right: calc(-1 * var(--answer-pad));
+/* Containers that are not the reading card have their own, much smaller
+   padding — an answer inside one bleeds to *its* edge, not to a card
+   edge 36px further out that it would overshoot into. */
+.subnode {
+  --answer-pad: 0.9rem;
+}
+#interactions {
+  --answer-pad: 0.75rem;
 }
 .inline-answer > .question {
   font-size: 0.85rem;
