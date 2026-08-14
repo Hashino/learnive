@@ -68,6 +68,23 @@ pub fn extract_block_by_id(content_html: &str, block_id: &str) -> Option<String>
         .map(|el| el.html())
 }
 
+/// Finds an element by `data-block-id` **anywhere** in the fragment, not only
+/// at the top level, and returns its raw HTML.
+///
+/// The top-level-only [`extract_block_by_id`] is right for the content layer,
+/// where blocks are the frozen top-level elements by construction. An
+/// interaction item is not shaped that way: its `body_html` is a header plus
+/// a wrapper around the answer, and the anchorable paragraphs sit one level
+/// down inside that wrapper (§4.3 — an answer is several paragraphs, each one
+/// a place the learner can ask about).
+pub fn find_block_html(html: &str, block_id: &str) -> Option<String> {
+    let frag = Html::parse_fragment(html);
+    let sel = Selector::parse("[data-block-id]").expect("static selector");
+    frag.select(&sel)
+        .find(|el| el.value().attr("data-block-id") == Some(block_id))
+        .map(|el| el.html())
+}
+
 /// Empties every top-level `data-interactive` block (§4.4) in place: keeps
 /// its opening tag and attributes (so the client can still find it by
 /// `data-block-id` and hydrate it) but drops its raw HTML/JS content. The

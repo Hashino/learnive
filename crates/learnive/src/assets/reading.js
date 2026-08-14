@@ -29,7 +29,15 @@ function setReadingToolsEnabled(enabled) {
 // never assumed to be `state.nodeId`, since a spliced sub-node's
 // blocks live inside `#prose` too.
 function currentReadingBlock() {
-  const blocks = el("prose").querySelectorAll("[data-block-id]");
+  // Leaf-most blocks only. An answer carries a block id for the whole item
+  // *and* one per paragraph (§4.3), so its wrapper would otherwise compete
+  // with its own paragraphs for the reading line and win by being taller —
+  // putting the highlight on the entire answer instead of the line you are
+  // on. An answer written before per-paragraph ids has no inner block and
+  // stays its own leaf.
+  const blocks = [...el("prose").querySelectorAll("[data-block-id]")].filter(
+    (b) => !b.querySelector("[data-block-id]"),
+  );
   if (blocks.length === 0) return null;
   const center = window.innerHeight / 2;
   let best = blocks[0];

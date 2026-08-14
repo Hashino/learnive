@@ -25,7 +25,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use learnive_core::{Anchor, InteractionItem, Node, ThreadKind};
+use learnive_core::{Anchor, InteractionItem, Node, ThreadKind, ensure_block_ids};
 
 use crate::ai::{Ai, MockProvider, Models, OpenAiCompat, Provider, Tier};
 use crate::app::AppState;
@@ -1540,12 +1540,12 @@ fn reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
 /// (`node_tail`), and each extra hop costs tokens on the app's hottest path
 /// (§14/§12.2).
 fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
-    let text = node.interaction_text(&anchor.block_id)?;
+    let target = node.resolve_interaction(&anchor.block_id)?;
     let mut out = String::new();
     if let Some(q) = &anchor.quote {
         out.push_str(&format!("Selected text: \"{}\"\n", q.exact.trim()));
     }
-    if let Some(parent_id) = node.interaction_anchor_block(&anchor.block_id) {
+    if let Some(parent_id) = target.item.anchor_block() {
         let parent_text = node
             .content
             .blocks
@@ -1562,8 +1562,17 @@ fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
     }
     out.push_str(&format!(
         "Passage the question is about (an earlier answer in this document): {}",
-        text.trim()
+        target.text.trim()
     ));
+    // Anchored at one paragraph of a longer answer: the rest of that answer is
+    // the passage's own context, and without it the tutor is reading a
+    // sentence out of the middle of its own previous reply.
+    if target.item.id() != anchor.block_id {
+        out.push_str(&format!(
+            "\nThe answer that paragraph belongs to: {}",
+            head_chars(&node.interaction_text(target.item.id())?, NODE_TAIL_BUDGET)
+        ));
+    }
     Some(out)
 }
 
@@ -1729,6 +1738,12 @@ pub async fn ask_question(
             )
             .await?;
 
+            // Each paragraph of the answer gets its own `data-block-id`, on
+            // the same `{id}-b{n}` scheme the content layer uses: an answer is
+            // several paragraphs and the learner asks about *one* of them, so
+            // it has to be addressable at that grain (§4.3) rather than as one
+            // undifferentiated blob.
+            let answer_html = ensure_block_ids(&answer_html, &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
                 question_header(question, &body.anchor)

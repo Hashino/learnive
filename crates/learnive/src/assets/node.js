@@ -20,15 +20,18 @@ function answerDepth(elm) {
 
 // Inserts an answered question into the document at its anchor (§9).
 //
-// The anchor is a content block *or* another answer: asking about an
-// answer is how the learner falls into a rabbit hole, and the thread has
-// to keep reading in order. So the insertion point is after the anchor
-// and after everything already hanging off it — its own follow-ups
-// (deeper) and the answers asked before this one at the same depth —
-// but never past a sibling that belongs to a shallower part of the page.
-// `id` is the interaction item's stable id (§4.3): tagging it as a block
-// id is what makes this answer itself askable, in this session and after
-// a reload. Falls back to the interaction panel only if the anchor is
+// The anchor is a content block, another answer, or one paragraph of
+// another answer: asking about an answer is how the learner falls into a
+// rabbit hole, and the thread has to keep reading in order. So the
+// insertion point is after the anchor and after everything already
+// hanging off it — its own follow-ups (deeper) and the answers asked
+// before this one at the same depth — but never past a sibling that
+// belongs to a shallower part of the page. Anchored at a paragraph, the
+// follow-up lands right under that paragraph, inside the answer it is
+// about. `id` is the interaction item's stable id (§4.3): tagging it as
+// a block id is what makes this answer askable as a whole, in this
+// session and after a reload (its paragraphs carry their own ids, from
+// the server). Falls back to the interaction panel only if the anchor is
 // not on the page (a node the answer doesn't belong to).
 function spliceInlineAnswer(blockId, bodyHtml, scroll, id) {
   const div = document.createElement("div");
@@ -40,7 +43,11 @@ function spliceInlineAnswer(blockId, bodyHtml, scroll, id) {
     el("interactions").appendChild(div);
     return;
   }
-  const depth = answerDepth(anchorEl) + 1;
+  // Depth comes from the answer the anchor belongs to, not from the anchor
+  // element itself: anchoring on one paragraph of an answer is still asking
+  // about that answer, one level deeper.
+  const owner = anchorEl.closest(".inline-answer");
+  const depth = answerDepth(owner) + 1;
   div.dataset.depth = String(depth);
   div.style.setProperty("--depth", String(depth));
   let after = anchorEl;

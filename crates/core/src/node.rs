@@ -239,10 +239,10 @@ impl Node {
         if let Some(resolved) = self.content.resolve(anchor) {
             return Some(resolved);
         }
-        let text = self.interaction_text(&anchor.block_id)?;
+        let target = self.resolve_interaction(&anchor.block_id)?;
         let range = match &anchor.quote {
             None => None,
-            Some(quote) => Some(resolve_quote(&text, quote)?),
+            Some(quote) => Some(resolve_quote(&target.text, quote)?),
         };
         Some(ResolvedAnchor {
             block_id: anchor.block_id.clone(),
@@ -250,48 +250,91 @@ impl Node {
         })
     }
 
-    /// Plain text of an interaction item, by id — the anchoring surface for a
-    /// question asked inside an answer, and the passage such a question is
-    /// "about" when the tutor is given its reading context.
+    /// Resolves an id against the interaction layer, at either granularity:
+    /// a whole item, or one addressable block *inside* it.
+    ///
+    /// An answer is several paragraphs, and the learner asks about one of
+    /// them — so its paragraphs carry their own `data-block-id`s (assigned
+    /// when the answer is written, see `api::ask_question`) and anchor
+    /// individually, exactly like the prose they hang under. The whole-item
+    /// id still resolves: it is what an answer written before per-paragraph
+    /// ids existed has, and what a whole-answer anchor means.
+    pub fn resolve_interaction(&self, block_id: &str) -> Option<InteractionTarget<'_>> {
+        if let Some(item) = self.interaction.iter().find(|i| i.id() == block_id) {
+            return Some(InteractionTarget {
+                item,
+                text: html_text(item.body_html()),
+            });
+        }
+        self.interaction.iter().find_map(|item| {
+            let block = crate::assemble::find_block_html(item.body_html(), block_id)?;
+            Some(InteractionTarget {
+                item,
+                text: html_text(&block),
+            })
+        })
+    }
+
+    /// Plain text of an interaction item, by item id.
     pub fn interaction_text(&self, id: &str) -> Option<String> {
-        let html = self.interaction.iter().find_map(|item| match item {
-            InteractionItem::Thread {
-                id: item_id,
-                body_html,
-                ..
-            }
-            | InteractionItem::Annotation {
-                id: item_id,
-                body_html,
-                ..
-            } if item_id == id => Some(body_html),
-            _ => None,
-        })?;
-        Some(
-            Html::parse_fragment(html)
-                .root_element()
-                .text()
-                .collect::<String>(),
-        )
+        let item = self.interaction.iter().find(|i| i.id() == id)?;
+        Some(html_text(item.body_html()))
     }
 
     /// The content block an interaction item hangs off, if it names one —
     /// what an answer was an answer *to*.
     pub fn interaction_anchor_block(&self, id: &str) -> Option<&str> {
-        self.interaction.iter().find_map(|item| match item {
-            InteractionItem::Thread {
-                id: item_id,
-                anchor_block,
-                ..
-            } if item_id == id => anchor_block.as_deref(),
-            InteractionItem::Annotation {
-                id: item_id,
-                anchor,
-                ..
-            } if item_id == id => Some(anchor.block_id.as_str()),
-            _ => None,
-        })
+        self.interaction
+            .iter()
+            .find(|i| i.id() == id)
+            .and_then(|i| i.anchor_block())
     }
+}
+
+/// Where an anchor into the interaction layer landed (§4.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionTarget<'a> {
+    /// The item that owns the anchored text — an answer's own paragraph is
+    /// still, for every purpose downstream, part of that answer.
+    pub item: &'a InteractionItem,
+    /// The text a quote resolves against: the whole item, or just the block
+    /// inside it when the anchor named one.
+    pub text: String,
+}
+
+impl InteractionItem {
+    /// Stable id of the item (§4.3), whichever variant it is.
+    pub fn id(&self) -> &str {
+        match self {
+            InteractionItem::Annotation { id, .. } | InteractionItem::Thread { id, .. } => id,
+        }
+    }
+
+    /// The item's rendered body.
+    pub fn body_html(&self) -> &str {
+        match self {
+            InteractionItem::Annotation { body_html, .. }
+            | InteractionItem::Thread { body_html, .. } => body_html,
+        }
+    }
+
+    /// What this item hangs off, if anything: a content block, another
+    /// interaction item, or nothing at all (a thread appended to the node).
+    pub fn anchor_block(&self) -> Option<&str> {
+        match self {
+            InteractionItem::Annotation { anchor, .. } => Some(anchor.block_id.as_str()),
+            InteractionItem::Thread { anchor_block, .. } => anchor_block.as_deref(),
+        }
+    }
+}
+
+/// Plain text of an HTML fragment — the surface a quote anchor resolves
+/// against, since a selection carries what the learner saw, not markup.
+fn html_text(html: &str) -> String {
+    Html::parse_fragment(html)
+        .root_element()
+        .text()
+        .collect::<String>()
 }
 
 fn parse_content(content_el: &ElementRef) -> ContentLayer {
@@ -689,6 +732,48 @@ mod tests {
         // And the answer remembers what it was an answer to.
         assert_eq!(node.interaction_anchor_block("qa1"), Some("b1"));
         assert!(node.interaction_text("nope").is_none());
+    }
+
+    #[test]
+    fn resolves_a_single_paragraph_of_an_answer() {
+        // An answer is several paragraphs and the learner asks about one of
+        // them — anchoring must land on that paragraph, not on the whole
+        // answer, or every follow-up is "about" the entire previous reply.
+        let mut node = Node::parse(SAMPLE).unwrap();
+        node.push_interaction(InteractionItem::Thread {
+            id: "qa1".to_string(),
+            kind: ThreadKind::Qa,
+            anchor_block: Some("b1".to_string()),
+            body_html: "<p class=\"question\">You asked: why?</p>\n<div class=\"answer\">\
+                        <p data-block-id=\"qa1-b1\">First, the reversible case.</p>\
+                        <p data-block-id=\"qa1-b2\">Then the irreversible one.</p></div>"
+                .to_string(),
+            child_node_id: None,
+        });
+
+        let target = node.resolve_interaction("qa1-b2").unwrap();
+        assert_eq!(target.item.id(), "qa1");
+        assert_eq!(target.text.trim(), "Then the irreversible one.");
+
+        // The quote resolves inside that paragraph only: text from a
+        // *different* paragraph of the same answer must not match.
+        assert!(
+            node.resolve(&Anchor {
+                block_id: "qa1-b2".to_string(),
+                quote: Some(QuoteSelector {
+                    exact: "reversible case".to_string(),
+                    prefix: None,
+                    suffix: None,
+                }),
+            })
+            .is_none()
+        );
+
+        // The whole-answer id still resolves — that is what an answer written
+        // before per-paragraph ids has, and what a whole-answer anchor means.
+        let whole = node.resolve_interaction("qa1").unwrap();
+        assert!(whole.text.contains("First, the reversible case."));
+        assert!(whole.text.contains("Then the irreversible one."));
     }
 
     #[test]
