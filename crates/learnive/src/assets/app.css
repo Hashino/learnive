@@ -192,16 +192,18 @@ body {
    block can only become the reading line if it can *reach* the centre —
    and the first and last blocks of a document never could: there was
    nothing above the first one to scroll past, and nothing below the last
-   one. Half a screen of slack at each end fixes both, which is why it is
-   `50vh` and not a round number of rems.
+   one. Slack at each end fixes both, sized in `vh` rather than rems
+   because what it has to cover is half a viewport. Under half (40vh): the
+   card's own padding makes up the rest, and overshooting only buys empty
+   scroll past the centred first block.
 
    The slack sits outside the card, as page background, and the reading
    view scrolls itself past the top one when it opens (`parkAtDocumentTop`
    in outline.js) — otherwise every node would start with half a screen of
    nothing. Only the document has it; the cold start is a form. */
 #doc {
-  margin-top: 50vh;
-  margin-bottom: 50vh;
+  margin-top: 40vh;
+  margin-bottom: 40vh;
 }
 
 /* Translucent card (.blog-content style). */

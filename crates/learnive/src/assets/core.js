@@ -22,6 +22,15 @@ function postJson(path, body) {
 }
 
 const el = (id) => document.getElementById(id);
+
+// The page rebuilds its document from the server on every load, so the
+// browser's remembered scroll offset means nothing here — and it is
+// restored *asynchronously, after* boot has already placed the view
+// (`parkAtDocumentTop`), silently undoing it. We position the view
+// ourselves; the browser must not second-guess it.
+if ("scrollRestoration" in history) {
+  history.scrollRestoration = "manual";
+}
 // items: [{id, title, state}] from the server (§S5) — state is
 // "locked" | "available" | "demonstrated", the graph's gate resolved.
 // currentId is the outline item id being generated/answered; nodeId
