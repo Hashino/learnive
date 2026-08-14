@@ -204,6 +204,7 @@ async function generateNode(id) {
   el("controls").innerHTML = '<p class="muted">generating…</p>';
   setReadingToolsEnabled(false);
   clearReadingLine();
+  parkAtDocumentTop();
 
   let prose = "";
   try {

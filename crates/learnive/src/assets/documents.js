@@ -192,6 +192,8 @@ async function openDocument(summary) {
   } else {
     el("controls").innerHTML =
       '<p class="muted">Pick a concept from the outline to begin.</p>';
+    // No node to open, but the card still sits below the typewriter slack.
+    parkAtDocumentTop();
   }
 }
 

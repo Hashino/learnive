@@ -143,6 +143,18 @@ async function openNode(id) {
 // prose, the append-only interaction history, and — if not yet
 // demonstrated — the still-active exercise, answerable exactly like a
 // freshly generated one.
+// The document carries half a screen of slack above it so the first
+// block can reach the reading line (§9, `#doc` in app.css). That slack is
+// scrolled past whenever a node opens: the learner asked for a node, not
+// for half a screen of starfield. Instant, never smooth — this is the
+// view arriving, not moving.
+function parkAtDocumentTop() {
+  const doc = el("doc");
+  if (doc.hidden) return;
+  const top = doc.getBoundingClientRect().top + window.scrollY;
+  window.scrollTo({ top: Math.max(0, top - 16), behavior: "auto" });
+}
+
 async function renderExistingNode(id, data) {
   state.currentId = id;
   state.nodeId = id;
@@ -171,6 +183,7 @@ async function renderExistingNode(id, data) {
   }
   setReadingToolsEnabled(true);
   armReadToEndWatcher();
+  parkAtDocumentTop();
   scheduleReadingLine();
 }
 
