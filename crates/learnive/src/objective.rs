@@ -32,9 +32,6 @@ pub enum ObjectiveSource {
 pub struct ObjectiveVersion {
     pub version: u32,
     pub text: String,
-    /// Explicit scope exclusions, when the negotiation produced any.
-    #[serde(default)]
-    pub non_goals: Vec<String>,
     pub source: ObjectiveSource,
     /// Unix epoch milliseconds — same convention as `events::Event::ts`.
     pub ts: u64,
@@ -58,12 +55,11 @@ impl ObjectiveLog {
 
     /// Appends a new version (§5 non-destructive) — never mutates or removes
     /// any prior entry.
-    pub fn push(&mut self, text: String, non_goals: Vec<String>, source: ObjectiveSource) {
+    pub fn push(&mut self, text: String, source: ObjectiveSource) {
         let version = self.versions.last().map_or(1, |v| v.version + 1);
         self.versions.push(ObjectiveVersion {
             version,
             text,
-            non_goals,
             source,
             ts: now_ms(),
         });
@@ -78,20 +74,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// One compact line for `decide_move`'s prompt (§14 budget: ~100 tokens) —
-/// text plus non-goals, never the whole version history.
-pub fn summarize(current: &ObjectiveVersion) -> String {
-    if current.non_goals.is_empty() {
-        current.text.clone()
-    } else {
-        format!(
-            "{} (explicitly NOT: {})",
-            current.text,
-            current.non_goals.join("; ")
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,17 +81,12 @@ mod tests {
     #[test]
     fn push_is_non_destructive_and_increments_version() {
         let mut log = ObjectiveLog::default();
-        log.push(
-            "Learn calculus".to_string(),
-            vec![],
-            ObjectiveSource::ColdStart,
-        );
+        log.push("Learn calculus".to_string(), ObjectiveSource::ColdStart);
         assert_eq!(log.versions.len(), 1);
         assert_eq!(log.current().unwrap().version, 1);
 
         log.push(
             "Learn calculus, focused on limits and derivatives".to_string(),
-            vec!["integration".to_string()],
             ObjectiveSource::Plan,
         );
         assert_eq!(log.versions.len(), 2, "old version must stay in place");
@@ -121,27 +98,5 @@ mod tests {
     #[test]
     fn current_is_none_on_an_empty_log() {
         assert!(ObjectiveLog::default().current().is_none());
-    }
-
-    #[test]
-    fn summarize_includes_non_goals_only_when_present() {
-        let mut log = ObjectiveLog::default();
-        log.push(
-            "Learn calculus".to_string(),
-            vec![],
-            ObjectiveSource::ColdStart,
-        );
-        assert_eq!(summarize(log.current().unwrap()), "Learn calculus");
-
-        let mut log = ObjectiveLog::default();
-        log.push(
-            "Learn calculus".to_string(),
-            vec!["integration".to_string(), "series".to_string()],
-            ObjectiveSource::ColdStart,
-        );
-        assert_eq!(
-            summarize(log.current().unwrap()),
-            "Learn calculus (explicitly NOT: integration; series)"
-        );
     }
 }

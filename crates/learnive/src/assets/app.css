@@ -362,6 +362,64 @@ button:disabled {
 #sidebar.open ~ #sidebarEdge::before {
   opacity: 0;
 }
+/* --- Right panel: read-only source viewer (§11) ----------------------
+   Same overlay idiom as #sidebar, mirrored to the right edge — the seam
+   the eventual PDF split-view (§11.1) will occupy, so a citation click
+   already opens on the side that view will live on. Opened/closed only by
+   a citation click / its close button, never a hover edge (unlike the
+   sidebar, this isn't meant to be reached for on every page). */
+#sourcePanel {
+  position: fixed;
+  right: 0;
+  top: 0;
+  z-index: 950;
+  width: 380px;
+  max-width: 90vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  overflow-y: auto;
+  background: var(--chrome-bg);
+  border-left: 1px solid var(--card-border);
+  backdrop-filter: blur(10px);
+  transform: translateX(100%);
+  transition: transform 0.18s ease;
+}
+#sourcePanel.open {
+  transform: none;
+}
+.source-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--card-border);
+}
+#sourceTitle {
+  font-weight: 700;
+  color: var(--heading-2);
+}
+#sourceBody section {
+  margin-bottom: 1.4rem;
+}
+#sourceBody section > h3 {
+  font-size: 0.95rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+#sourceBody section.current {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.7rem;
+  margin-left: -0.9rem;
+}
+#sourceBody p {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
 .sidebar-head {
   display: flex;
   align-items: center;
@@ -612,6 +670,20 @@ button:disabled {
   background: var(--hl-bg);
   border-radius: 2px;
   padding: 0 0.15em;
+}
+/* A grounded claim's citation (§4.3/§10). Styled by the tag itself, not a
+   class — `sanitizeHtml` only allowlists `ALLOWED_CLASSES`, and widening
+   that set just for this would be the wrong lever. Superscript-shaped so it
+   reads as a reference mark, not as more prose; clickable (opens the source
+   panel, `node.js`'s citation click-delegation). */
+#prose cite {
+  font-style: normal;
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px dotted currentColor;
+}
+#prose cite:hover {
+  color: var(--link-hover);
 }
 /* A spawned sub-node (§S8), spliced permanently into the reading flow
    right after the paragraph that prompted it — not a toggle, always

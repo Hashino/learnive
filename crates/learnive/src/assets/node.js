@@ -445,11 +445,93 @@ function appendGrades(grades) {
 // answer never revealed. Server-side that new problem becomes the node's
 // active rubric, so its submission (via postMessage → submitAnswer) grades
 // the new problem and either advances or remediates again.
+// --- Source viewer (§11) -----------------------------------------------
+// A citation (`<cite data-source-id data-locator>`, §4.3/§10) opens the
+// corpus's already-normalized text on the right (`#sourcePanel`) — the seam
+// the eventual PDF split-view (§11.1) will occupy once the acquisition
+// layer stores original files and page locations. Read-only: nothing here
+// is ever written back.
+const sourceCache = new Map();
+
+// Delegated, not bound per-citation: citations arrive incrementally as
+// prose streams in (§14), so binding at insert time would miss most of them.
+document.addEventListener("click", (e) => {
+  const cite = e.target.closest("cite[data-source-id]");
+  if (!cite) return;
+  openSourcePanel(cite.dataset.sourceId, cite.dataset.locator || "");
+});
+
+async function openSourcePanel(sourceId, locator) {
+  el("sourcePanel").classList.add("open");
+  el("sourceTitle").textContent = "Loading…";
+  el("sourceMeta").textContent = "";
+  el("sourceBody").innerHTML = "";
+  try {
+    let source = sourceCache.get(sourceId);
+    if (!source) {
+      const resp = await api(
+        `/api/sources/${encodeURIComponent(sourceId)}`,
+      );
+      if (!resp.ok) throw new Error(await resp.text());
+      source = await resp.json();
+      sourceCache.set(sourceId, source);
+    }
+    renderSource(source, locator);
+  } catch (err) {
+    el("sourceTitle").textContent = "Source unavailable";
+    el("sourceMeta").textContent = String(err);
+  }
+}
+
+function renderSource(source, locator) {
+  el("sourceTitle").textContent = source.meta.title;
+  const bits = [];
+  if (source.meta.authors && source.meta.authors.length) {
+    bits.push(source.meta.authors.join(", "));
+  }
+  if (source.meta.license) bits.push(source.meta.license);
+  el("sourceMeta").textContent = bits.join(" · ");
+
+  const body = el("sourceBody");
+  let current = null;
+  for (const section of source.sections || []) {
+    const sec = document.createElement("section");
+    if (section.locator === locator) {
+      sec.className = "current";
+      current = sec;
+    }
+    const h = document.createElement("h3");
+    h.textContent = section.title || section.locator;
+    const p = document.createElement("p");
+    p.textContent = section.text;
+    sec.appendChild(h);
+    sec.appendChild(p);
+    body.appendChild(sec);
+  }
+  (current || body.firstElementChild)?.scrollIntoView({ block: "start" });
+}
+
+function closeSourcePanel() {
+  el("sourcePanel").classList.remove("open");
+}
+el("sourceCloseBtn").addEventListener("click", closeSourcePanel);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && el("sourcePanel").classList.contains("open")) {
+    closeSourcePanel();
+  }
+});
+
 function appendRemediation(explanationHtml) {
-  // Freeze earlier remediation problems so only the latest is answerable —
-  // the log still reads as the full history (§4.3).
-  document
-    .querySelectorAll("#interactions .remediation .sandbox")
+  // Freeze every previously-active exercise iframe — the node's ORIGINAL
+  // check (`exerciseFrame`, still live in #exercise) as well as any earlier
+  // remediation problems — so only the latest is answerable. The server just
+  // overwrote the rubric sidecar in place (§8.2): a stale submission from an
+  // old iframe would silently grade against the NEW problem, producing
+  // remediation that talks about a different exercise than the one the
+  // learner actually answered. The log still reads as the full history
+  // (§4.3) — this only disables the stale iframes, it doesn't remove them.
+  [exerciseFrame, ...document.querySelectorAll("#interactions .remediation .sandbox")]
+    .filter(Boolean)
     .forEach((f) => {
       f.style.pointerEvents = "none";
       f.style.opacity = "0.55";

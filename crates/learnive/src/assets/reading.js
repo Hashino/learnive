@@ -134,9 +134,6 @@ function anchorFromSelection() {
 // holds `{anchor, nodeId, quote}` until the question is sent or dropped.
 let pendingSelection = null;
 
-function askBarOpen() {
-  return el("askBar").classList.contains("open");
-}
 function showAskBar() {
   if (!askEligible) return;
   // Not while the sidebar is out: they are the two things that overlay the

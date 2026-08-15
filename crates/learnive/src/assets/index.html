@@ -80,6 +80,20 @@
     <!-- Invisible hover target along the left edge that reveals the sidebar. -->
     <div id="sidebarEdge"></div>
 
+    <!-- Source viewer (§11): opens on a <cite> click, on the right — the same
+         edge the future PDF split-view will occupy (§11.1). Read-only: no
+         annotation lands here, only in the living document. -->
+    <aside id="sourcePanel" aria-label="Source">
+      <div class="source-head">
+        <div>
+          <div id="sourceTitle"></div>
+          <div id="sourceMeta" class="muted"></div>
+        </div>
+        <button type="button" id="sourceCloseBtn" aria-label="Close">×</button>
+      </div>
+      <div id="sourceBody"></div>
+    </aside>
+
     <div class="main-container">
       <!-- Cold start (§6.1): a single generic question, then a confirmable
            objective (§S4) before the outline is generated. -->
@@ -100,8 +114,6 @@
             if this isn't quite right.
           </p>
           <textarea id="objectiveText" rows="2"></textarea>
-          <p class="muted">Non-goals (comma-separated, optional):</p>
-          <textarea id="nonGoalsText" rows="1"></textarea>
           <p>
             <button type="button" id="objectiveConfirmBtn">Confirm</button>
             <button type="button" id="objectiveBackBtn">Back</button>

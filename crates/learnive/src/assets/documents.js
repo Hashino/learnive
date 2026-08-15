@@ -22,7 +22,6 @@ el("startForm").addEventListener("submit", async (e) => {
     const data = await resp.json();
     pendingName = data.title || "";
     el("objectiveText").value = data.text;
-    el("nonGoalsText").value = (data.non_goals || []).join(", ");
     el("startStatus").textContent = "";
     el("startForm").hidden = true;
     el("objectiveConfirm").hidden = false;
@@ -39,16 +38,11 @@ el("objectiveBackBtn").addEventListener("click", () => {
 
 el("objectiveConfirmBtn").addEventListener("click", async () => {
   const objective_text = el("objectiveText").value.trim();
-  const non_goals = el("nonGoalsText")
-    .value.split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
   el("startStatus").textContent = "planning the curriculum…";
   try {
     const resp = await postJson("/api/documents", {
       topic: pendingTopic,
       objective_text,
-      non_goals,
       name: pendingName,
     });
     if (!resp.ok) throw new Error(await resp.text());
