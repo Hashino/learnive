@@ -93,6 +93,16 @@ pub enum EventKind {
     /// persistence + `finalize` merging interactions accumulated mid-draft),
     /// deferred to its own slice, not part of §S6.
     NodeReadToEnd,
+    /// `finalize` (api/reading.rs) has written the node's complete content
+    /// layer (prose through the graded move) — the explicit completion
+    /// signal `prepare`'s regen guard reads. Not derivable from a node file
+    /// merely existing on disk: content now persists progressively, per
+    /// move, so existence no longer means "done" (the split this comment
+    /// and `NodeReadToEnd`'s above were both waiting on). Not derivable from
+    /// `MoveGraded` either — that only fires once the learner *answers* the
+    /// exercise, long after generation. `move_id` joins back to the graded
+    /// move's `MoveGenerated` event, same pattern as `PlanDecided`.
+    NodeGenerated { move_id: String },
 }
 
 /// Event-log errors.

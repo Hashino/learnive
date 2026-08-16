@@ -611,6 +611,130 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
 }
 
 #[tokio::test]
+async fn a_partial_node_from_an_interrupted_generation_may_be_retried() {
+    // §S6 follow-up: content now persists progressively, one move at a
+    // time, so a node file existing is no longer proof the node is done —
+    // a dropped connection or a page reload mid-stream leaves exactly this
+    // shape behind (some content, no exercise, no `NodeGenerated` event).
+    // `prepare`'s regen guard must let a fresh `/generate` call overwrite
+    // it rather than refusing forever, or the node would be wedged.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    // Simulate an interrupted attempt: one move's worth of content
+    // persisted (`assemble_content_node`, the same shape a progressive
+    // write produces), no exercise, no completion event.
+    let partial =
+        crate::engine::assemble_content_node(&doc_id, &node0, "<p>an interrupted move</p>")
+            .unwrap();
+    state.store.write_node(&partial).unwrap();
+
+    // Retrying is allowed — not refused as "already generated" — and
+    // completes a real node this time.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("already generated"), "{body}");
+    assert!(body.contains("event: done"));
+
+    // Now that it's genuinely finalized (has an exercise, `NodeGenerated`
+    // fired), a further retry IS refused — the guard still protects a
+    // real, complete node.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("already generated"));
+}
+
+#[tokio::test]
+async fn asking_works_against_a_node_still_mid_generation() {
+    // §S6 follow-up, the actual point of the whole feature: `/ask` must
+    // work against a node's progressively-persisted partial content, not
+    // only after the whole node (through the graded move) has finished.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    // A partial node — one move settled, no exercise, no `NodeGenerated`
+    // event — the exact shape a still-streaming `/generate` request leaves
+    // on disk after its first `move_settled` write, well before `done`.
+    let partial = crate::engine::assemble_content_node(
+        &doc_id,
+        &node0,
+        "<p>fractions split a whole into equal parts</p>",
+    )
+    .unwrap();
+    state.store.write_node(&partial).unwrap();
+    let block_id = partial.content.blocks[0].id.clone();
+
+    // `GET` already reads it — no exercise yet, but real content.
+    let (status, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(view["exercise_block_id"].is_null());
+    assert!(
+        view["content_html"]
+            .as_str()
+            .unwrap()
+            .contains("equal parts")
+    );
+
+    // Asking about that partial content succeeds — the whole node need
+    // not exist yet, only the block being asked about.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
+        &format!(r#"{{"question":"which parts?","anchor":{{"block_id":"{block_id}"}}}}"#),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The interaction landed, and the partial content layer survived the
+    // append untouched (`write_node_content`'s interaction-preservation).
+    let reloaded = state.store.read_node(&doc_id, &node0).unwrap();
+    assert_eq!(reloaded.interaction.len(), 1);
+    assert!(reloaded.content.html.contains("equal parts"));
+}
+
+#[tokio::test]
 async fn csp_default_is_strict_but_exercise_frame_gets_its_own() {
     // §S10: `security::guard` now only inserts the default strict CSP
     // when a handler hasn't already set one, so `exercise_frame`'s own

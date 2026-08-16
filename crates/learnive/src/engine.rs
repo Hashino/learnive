@@ -424,8 +424,39 @@ pub async fn generate_remediation_exercise(
     parse::exercise_rubric(&text)
 }
 
-/// Assembles a dialect node from the generated prose and the exercise (§4.2/§4.3).
-/// The server assigns the IDs (blocks, exercise, rubric).
+/// Wraps an already-processed content section (blocks already carrying
+/// `data-block-id`, math already rendered to MathML, an exercise form
+/// already tagged or absent) into the full node article — no processing of
+/// its own. Shared by [`assemble_node`]/[`assemble_content_node`] (which do
+/// that processing themselves, in one shot, for their raw inputs) and by
+/// progressive per-move persistence (§S6 follow-up — `tag_move_html`),
+/// which has already processed each move's HTML by the time it gets here
+/// and must not run `render_math` a second time: MathML's `<annotation>`
+/// carries the source LaTeX as literal text, and text containing its own
+/// `$`/`\(` sequences (rare, but not impossible — e.g. currency inside a
+/// worked example) would otherwise be mistaken for a second, nested formula
+/// on the re-scan. `ensure_block_ids` is safe to call again (skips anything
+/// already tagged) but there is nothing left for it to do here either.
+fn wrap_article(
+    doc_id: &str,
+    node_id: &str,
+    content_section_inner: &str,
+) -> Result<Node, EngineError> {
+    let article = format!(
+        "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
+         <section data-layer=\"content\">\n{content_section_inner}\n  </section>\n  \
+         <section data-layer=\"interaction\"></section>\n</article>"
+    );
+    Node::parse(&article).map_err(|e| EngineError::Parse(e.to_string()))
+}
+
+/// Assembles a dialect node from the generated prose and the exercise (§4.2/§4.3)
+/// in one shot, from raw untagged inputs. The server assigns the IDs (blocks,
+/// exercise, rubric). No longer called in production: `finalize` (api/reading.rs)
+/// now uses [`finalize_node`] against already-tagged, progressively-persisted
+/// content (§S6 follow-up) — kept `#[cfg(test)]` as the one-shot reference shape
+/// engine.rs's and movement.rs's own tests build fixtures against.
+#[cfg(test)]
 pub fn assemble_node(
     doc_id: &str,
     node_id: &str,
@@ -436,31 +467,73 @@ pub fn assemble_node(
 ) -> Result<Node, EngineError> {
     let blocks = ensure_block_ids(&render_math(prose_inner_html), &format!("{node_id}-b"));
     let form = ensure_form_ids(exercise_html, exercise_id, rubric_id);
-    let article = format!(
-        "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
-         <section data-layer=\"content\">\n{blocks}\n{form}\n  </section>\n  \
-         <section data-layer=\"interaction\"></section>\n</article>"
-    );
-    Node::parse(&article).map_err(|e| EngineError::Parse(e.to_string()))
+    wrap_article(doc_id, node_id, &format!("{blocks}\n{form}"))
 }
 
 /// Assembles a **content-only** node — no exercise/form (§S8 sub-nodes,
-/// scoped to this slice as prose-only elaborations, never gated). `Node`'s
-/// `content.exercise` parses to `None` when there's no `<form
-/// data-exercise-id>` in the content section, so this is a strict subset of
-/// `assemble_node`, not a different dialect.
+/// scoped to this slice as prose-only elaborations, never gated, and §S6
+/// follow-up: also the shape of a node still mid-generation, before its
+/// graded move exists). `Node`'s `content.exercise` parses to `None` when
+/// there's no `<form data-exercise-id>` in the content section, so this is
+/// a strict subset of `assemble_node`, not a different dialect — the same
+/// node id upgrades from this shape to the full one in place when
+/// `finalize` later runs, no migration needed.
 pub fn assemble_content_node(
     doc_id: &str,
     node_id: &str,
     prose_inner_html: &str,
 ) -> Result<Node, EngineError> {
     let blocks = ensure_block_ids(&render_math(prose_inner_html), &format!("{node_id}-b"));
-    let article = format!(
-        "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
-         <section data-layer=\"content\">\n{blocks}\n  </section>\n  \
-         <section data-layer=\"interaction\"></section>\n</article>"
-    );
-    Node::parse(&article).map_err(|e| EngineError::Parse(e.to_string()))
+    wrap_article(doc_id, node_id, &blocks)
+}
+
+/// Tags one move's raw generated HTML with stable, permanent `data-block-id`s
+/// and renders its math — the per-move half of progressive persistence
+/// (§S6 follow-up). Each move gets its own id prefix (`{node_id}-m{index}-b`)
+/// rather than the single running `{node_id}-b` prefix `assemble_node` uses
+/// for a whole node at once: moves are tagged independently, in the order
+/// they complete, with no shared counter between them, so per-move prefixes
+/// are what keep two different moves from ever minting the same id. Once
+/// tagged, a move's HTML is done being processed for good — every later
+/// assembly (the next move's progressive write, `finalize`) only
+/// concatenates it, via [`wrap_article`], never re-tags or re-renders it
+/// (`ensure_block_ids` would just skip it; `render_math` must never see it
+/// again at all, see `wrap_article`'s doc comment).
+pub fn tag_move_html(node_id: &str, move_index: usize, html: &str) -> String {
+    ensure_block_ids(&render_math(html), &format!("{node_id}-m{move_index}-b"))
+}
+
+/// Persists a node's content layer as it streams in, one move at a time
+/// (§S6 follow-up) — every move HTML passed in must already be
+/// [`tag_move_html`]-processed; this only concatenates and wraps them, via
+/// [`wrap_article`], mirroring [`assemble_content_node`]'s shape without
+/// redoing its processing.
+pub fn assemble_partial_node(
+    doc_id: &str,
+    node_id: &str,
+    tagged_content_html: &str,
+) -> Result<Node, EngineError> {
+    wrap_article(doc_id, node_id, tagged_content_html)
+}
+
+/// `finalize`'s assembly (§S6 follow-up, replacing its old direct call to
+/// [`assemble_node`]): `tagged_content_html` is every prior move's HTML,
+/// already [`tag_move_html`]-processed and progressively persisted as it
+/// streamed — only the exercise form, generated fresh at the very end, still
+/// needs tagging here. Splitting this from [`assemble_node`] rather than
+/// having callers pre-render and pass a no-op-shaped input through it keeps
+/// "already tagged, do not reprocess" a type-level distinction (a plain
+/// `&str` vs. one more parameter easy to pass wrong) instead of a runtime one.
+pub fn finalize_node(
+    doc_id: &str,
+    node_id: &str,
+    tagged_content_html: &str,
+    exercise_html: &str,
+    exercise_id: &str,
+    rubric_id: &str,
+) -> Result<Node, EngineError> {
+    let form = ensure_form_ids(exercise_html, exercise_id, rubric_id);
+    wrap_article(doc_id, node_id, &format!("{tagged_content_html}\n{form}"))
 }
 
 /// Collects a full stream into a String (for non-streamed calls). Also reused
@@ -657,6 +730,81 @@ mod tests {
             assemble_content_node("d1", "sub1", "<h3>Deeper look</h3><p>More detail.</p>").unwrap();
         assert!(node.content.blocks.len() >= 2);
         assert!(node.content.exercise.is_none());
+    }
+
+    /// §S6 follow-up: two moves tagged independently (their own
+    /// `{node_id}-m{index}-b` prefix each) must never collide, and
+    /// `finalize_node` — which only tags the exercise, never re-tagging or
+    /// re-rendering the already-processed moves it's handed — must produce
+    /// the exact same block ids `tag_move_html` minted, not fresh ones.
+    #[test]
+    fn progressive_move_tagging_composes_into_the_final_node() {
+        let move0 = tag_move_html("n1", 0, "<p>First move.</p>");
+        let move1 = tag_move_html("n1", 1, "<p>Second move.</p>");
+        assert!(move0.contains("data-block-id=\"n1-m0-b"));
+        assert!(move1.contains("data-block-id=\"n1-m1-b"));
+
+        let partial = assemble_partial_node("d1", "n1", &format!("{move0}\n{move1}")).unwrap();
+        assert_eq!(partial.content.blocks.len(), 2);
+        assert!(partial.content.exercise.is_none());
+        let ids: Vec<&str> = partial
+            .content
+            .blocks
+            .iter()
+            .map(|b| b.id.as_str())
+            .collect();
+
+        let final_node = finalize_node(
+            "d1",
+            "n1",
+            &format!("{move0}\n{move1}"),
+            "<form><input name=\"r\"></form>",
+            "n1-ex",
+            "n1-ru",
+        )
+        .unwrap();
+        // The prose blocks carry forward verbatim — same ids, not
+        // re-minted — plus the exercise, tagged fresh.
+        let final_ids: Vec<&str> = final_node
+            .content
+            .blocks
+            .iter()
+            .map(|b| b.id.as_str())
+            .filter(|id| *id != "n1-ex")
+            .collect();
+        assert_eq!(final_ids, ids);
+        assert_eq!(final_node.content.exercise.unwrap().exercise_id, "n1-ex");
+    }
+
+    /// §S6 follow-up: `finalize_node` must never re-render math in content
+    /// it's handed — that content already went through `tag_move_html`'s
+    /// `render_math` once, and MathML's `<annotation>` carries the raw
+    /// LaTeX as literal text, so a second `render_math` pass over it is not
+    /// guaranteed to be a no-op (a `$`/`\(`-like sequence inside the
+    /// annotation could be mistaken for a second, nested formula). Proven
+    /// structurally, not just for one input: the prose section of
+    /// `finalize_node`'s output must be byte-identical to what
+    /// `tag_move_html` produced, not merely equivalent.
+    #[test]
+    fn finalize_node_does_not_re_render_already_tagged_math() {
+        let tagged = tag_move_html("n1", 0, r"<p>A metade é $\frac{1}{2}$ do todo.</p>");
+        assert!(tagged.contains("<math"), "{tagged}");
+
+        let node = finalize_node(
+            "d1",
+            "n1",
+            &tagged,
+            "<form><input name=\"r\"></form>",
+            "n1-ex",
+            "n1-ru",
+        )
+        .unwrap();
+        assert!(
+            node.content.html.contains(&tagged),
+            "finalize_node must pass already-tagged prose through byte-identical, \
+             not reprocess it: {}",
+            node.content.html
+        );
     }
 
     #[test]

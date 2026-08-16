@@ -985,7 +985,11 @@ mod tests {
         let rubric = mv2.rubric.clone().unwrap();
         assert!(!rubric.objectives.is_empty());
 
-        // Same assembly path as `api.rs::finalize` uses today.
+        // One-shot assembly from raw moves — `api.rs::finalize` now goes
+        // through `engine::finalize_node` against already-tagged,
+        // progressively-persisted content (§S6 follow-up), but this is
+        // still the reference shape both produce: prose blocks + a tagged
+        // exercise form in one node.
         let node =
             engine::assemble_node("d1", "n1", &mv1.html, &mv2.html, "n1-ex", "n1-ru").unwrap();
         assert!(!node.content.blocks.is_empty());

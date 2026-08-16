@@ -33,8 +33,8 @@ use crate::config::{AppConfig, Intent, ProviderKind};
 use crate::engine::{self, AskDecision, Grade, ObjectiveGrade, Outline, OutlineItem, Rubric};
 use crate::events::EventKind;
 use crate::events::aggregate::{
-    NodeState, activity_counts, calibrate_rung, ladder_signals, node_states, revisit_suggestion,
-    tactic_outcomes,
+    NodeState, activity_counts, calibrate_rung, ladder_signals, node_generated, node_states,
+    revisit_suggestion, tactic_outcomes,
 };
 use crate::movement::{
     self, AgentPolicy, GeneratedMove, MoveContext, MoveRecord, MoveRender, MoveType,

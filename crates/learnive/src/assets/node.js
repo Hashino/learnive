@@ -349,16 +349,30 @@ async function generateNode(id, { instant = true } = {}) {
   rec.result.innerHTML = "";
   rec.controls.innerHTML = '<p class="muted">generating…</p>';
   // Deliberately NOT disabling reading tools here (§9 continuous document):
-  // this new section's still-streaming prose has no `data-block-id`s yet
-  // (assigned server-side at finalize, below) so it's already unanchorable
+  // every OTHER mounted section is fully readable right now, and the very
+  // first call ever made (cold start, nothing mounted yet) leaves
+  // `askEligible` at its initial `false` regardless. This new section's own
+  // content has no `data-block-id`s yet, so it briefly reads as unanchorable
   // on its own — `currentReadingBlock`/`anchorFromSelection` (reading.js)
-  // skip block-id-less elements by construction. But every OTHER mounted
-  // section is fully readable right now, and the very first call ever made
-  // (cold start, nothing mounted yet) leaves `askEligible` at its initial
-  // `false` regardless — so there's nothing here that actually needs
-  // turning off, only turning on once this node's own content exists.
+  // skip block-id-less elements by construction — but that window is now
+  // only until this move's `move_settled` event (below), not the whole
+  // node's `done`.
   clearReadingLine();
   scrollToSection(rec, instant);
+
+  // A settled move becomes real, permanent DOM siblings inside `rec.prose`
+  // (below) rather than a string folded into one big re-render: an earlier
+  // move's interactive island, once hydrated (`hydrateIslands`), holds a
+  // live iframe with its own state — rebuilding the whole subtree from a
+  // string on every later move's settle would tear that iframe down and
+  // recreate it. `live` is the one exception: a trailing, always-emptied
+  // element holding only the CURRENT move's raw, still-streaming, untagged
+  // text, replaced wholesale on every `token` (cheap — it's never held
+  // more than one move's worth of text, and it has no `data-block-id` yet
+  // for anything to anchor to or hydrate).
+  const live = document.createElement("div");
+  live.className = "streaming-move";
+  rec.prose.appendChild(live);
 
   let prose = "";
   try {
@@ -374,7 +388,21 @@ async function generateNode(id, { instant = true } = {}) {
         // origin, so it must NOT carry script/handlers (§3.1/§4.4). Only
         // interactive blocks run — and only inside the sandbox iframe.
         prose += data;
-        rec.prose.innerHTML = sanitizeHtml(prose);
+        live.innerHTML = sanitizeHtml(prose);
+      } else if (event === "move_settled") {
+        // This move is now tagged with real, permanent `data-block-id`s
+        // and already persisted (§S6 follow-up) — insert it as real
+        // siblings just before `live`, then clear `live` for whatever
+        // move streams next. The node id is known from the very first
+        // settled move, not just at `done`, so reading tools and "ask
+        // about this" can target this section immediately.
+        prose = "";
+        live.insertAdjacentHTML("beforebegin", sanitizeHtml(data));
+        live.innerHTML = "";
+        rec.prose.dataset.nodeId = id;
+        hydrateIslands(rec.prose, id);
+        setReadingToolsEnabled(true);
+        scheduleReadingLine();
       } else if (event === "research") {
         // §S13: the agent is fetching grounding for this concept before
         // writing it — surfaced as status text over the existing
@@ -397,28 +425,23 @@ async function generateNode(id, { instant = true } = {}) {
           rec.prose.dataset.nodeId = data;
           rec.controls.innerHTML = "";
           renderSkipControl(rec);
-          // The just-streamed prose has no data-block-id attributes —
-          // those are assigned server-side at finalize (§4.3), which
-          // only happens once the whole node, including the graded
-          // move, is done. Reading tools anchor on those ids (§S6),
-          // so swap in the finalized, block-tagged content now that
-          // it exists. Fire-and-forget: nothing here depends on it,
-          // and a failure just leaves the streamed prose in place.
+          // Every move's prose already carries its real `data-block-id`s
+          // and is already persisted (§S6 follow-up, `move_settled` above)
+          // by the time `done` fires — this refetch is no longer what
+          // *creates* the anchors, just confirmation that the server's
+          // record matches, and the one place the exercise's own block id
+          // (only assigned at `finalize`, once the graded move exists)
+          // becomes known. Fire-and-forget: nothing here depends on it,
+          // and a failure just leaves the already-settled prose in place.
           api(`/api/documents/${state.docId}/nodes/${data}`)
             .then((resp) => (resp.ok ? resp.json() : null))
             .then((view) => {
               if (view) {
                 rec.prose.innerHTML = sanitizeHtml(view.content_html);
                 hydrateIslands(rec.prose, data);
-                // The exercise iframe was already built off the streamed
-                // "exercise" SSE event, before its real block id existed —
-                // tag it now so it joins the reading line/anchor set too.
                 if (view.exercise_block_id) {
                   rec.exercise.dataset.blockId = view.exercise_block_id;
                 }
-                // The reading line can only be placed once these
-                // block-tagged elements exist — the streamed prose this
-                // just replaced had no `data-block-id` at all.
                 scheduleReadingLine();
               }
             })
@@ -469,7 +492,9 @@ el("planApproveBtn").addEventListener("click", () => decidePlanProposal(true));
 el("planRejectBtn").addEventListener("click", () => decidePlanProposal(false));
 
 // Either way the proposal is resolved and the interrupted generation
-// attempt (nothing was persisted for it) is retried from scratch.
+// attempt is retried from scratch — any of its moves that had already
+// settled (§S6 follow-up) live in an unfinalized node the retry simply
+// overwrites, never read as real content until a future `finalize` runs.
 async function decidePlanProposal(approve) {
   el("planProposal").hidden = true;
   try {

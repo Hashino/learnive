@@ -514,15 +514,30 @@ pub(super) struct NodePrep {
 /// generated was unlocked at the time and stays unlocked forever; the lock
 /// check alone is sufficient, no separate "already touched" bypass needed.)
 ///
-/// Also refuses regenerating a node whose file already exists, full stop,
+/// Also refuses regenerating a node that has already been **finalized**
+/// (a `NodeGenerated` event exists for it — `events::aggregate::node_generated`),
 /// regardless of gate state: making already-generated outline items
 /// clickable, so the learner can revisit a skipped or demonstrated node,
 /// opened a path where `finalize` would silently overwrite that file with
-/// a freshly assembled — and interaction-layer-empty — node, destroying
-/// §4.3's append-only history. §5: "conhecimento nunca é editado
-/// destrutivamente". The client now always tries `GET .../nodes/{id}`
-/// before ever calling generate on an outline click; this check is the
-/// server-side backstop, not the primary defense.
+/// a freshly assembled node, discarding the content layer the learner has
+/// already read and may have anchored questions/annotations against. §5:
+/// "conhecimento nunca é editado destrutivamente". The client now always
+/// tries `GET .../nodes/{id}` before ever calling generate on an outline
+/// click; this check is the server-side backstop, not the primary defense.
+///
+/// A node file existing is no longer, by itself, reason to refuse: content
+/// now persists progressively, one move at a time (§S6 follow-up — see
+/// `EventKind::NodeGenerated`'s doc comment), so an on-disk file can be a
+/// node that's still mid-generation, or one abandoned mid-stream by a
+/// dropped connection or a page reload. Retrying such a node is allowed to
+/// proceed and simply overwrite the partial file as it re-generates from
+/// move 1 — no attempt at resuming from where the interrupted attempt left
+/// off, which would need move-level state (tactics history, `ctx.prior_moves`)
+/// this function never persisted. `write_node_content` (store.rs) is what
+/// keeps this safe for the interaction layer specifically: any interaction
+/// appended against the partial node (a mid-stream `/ask`, now possible —
+/// the whole point) survives the retry's overwrite, carried forward rather
+/// than clobbered.
 pub(super) async fn prepare(
     state: &AppState,
     doc_id: &str,
@@ -549,7 +564,7 @@ pub(super) async fn prepare(
     if !unlocked {
         return Err("this node is locked: its prerequisites are not yet demonstrated".to_string());
     }
-    if state.store.read_node(doc_id, &item.id).is_ok() {
+    if node_generated(event_log.iter().map_err(|e| e.to_string())?, &item.id) {
         return Err(
             "this node was already generated; fetch it instead of regenerating".to_string(),
         );
@@ -785,10 +800,14 @@ pub(super) async fn grounding_for(state: &AppState, query: &str) -> String {
 }
 
 /// Assembles the node from the accumulated moves and persists it (node +
-/// server-only sidecar). Returns the exercise HTML to the client. Content
-/// generation already happened move by move in `generate_node`'s loop — this
-/// is pure assembly, same shape `assemble_node` has always produced
-/// (§4.3 content layer is unchanged by the move ABI, only how it's filled).
+/// server-only sidecar), then marks it finalized in the event log. Returns
+/// the exercise HTML to the client. Content generation already happened
+/// move by move in `generate_node`'s loop, each move already tagged and
+/// progressively written (§S6 follow-up) — `content_html` here is that
+/// already-tagged accumulation, so assembly uses `finalize_node` (which
+/// only tags the fresh exercise form) rather than `assemble_node` (which
+/// would re-tag/re-render the whole thing, unsafe for already-rendered
+/// math, see `wrap_article`'s doc comment in engine.rs).
 pub(super) async fn finalize(
     state: &AppState,
     doc_id: &str,
@@ -804,7 +823,7 @@ pub(super) async fn finalize(
 
     let exercise_id = format!("{}-ex", prep.node_id);
     let rubric_id = format!("{}-ru", prep.node_id);
-    let node = engine::assemble_node(
+    let node = engine::finalize_node(
         doc_id,
         &prep.node_id,
         content_html,
@@ -814,7 +833,15 @@ pub(super) async fn finalize(
     )
     .map_err(|e| e.to_string())?;
 
-    state.store.write_node(&node).map_err(|e| e.to_string())?;
+    // `write_node_content`, not `write_node`: a concurrent `/ask` may have
+    // appended an interaction against this node's still-partial content
+    // between the last progressive write and this final one (§S6 follow-up
+    // — asking no longer waits for the node to finish), and this write must
+    // not clobber it.
+    state
+        .store
+        .write_node_content(&node)
+        .map_err(|e| e.to_string())?;
 
     let sidecar = RubricSidecar {
         move_id: move_id.to_string(),
@@ -831,6 +858,20 @@ pub(super) async fn finalize(
             &serde_json::to_string(&sidecar).unwrap_or_default(),
         )
         .map_err(|e| e.to_string())?;
+
+    // The explicit completion signal `prepare`'s regen guard reads
+    // (`events::aggregate::node_generated`) — appended last, after both
+    // files land, so a crash between the two writes above never leaves a
+    // node that reads as finalized without also having a rubric.
+    let event_log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
+    if let Err(e) = event_log.append(
+        Some(&prep.node_id),
+        EventKind::NodeGenerated {
+            move_id: move_id.to_string(),
+        },
+    ) {
+        eprintln!("event log append failed: {e}");
+    }
 
     Ok(())
 }

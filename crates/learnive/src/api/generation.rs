@@ -22,8 +22,13 @@ pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 
 /// Streams the SSE format over a POST. Events: `token` (prose — both streamed
 /// moves and, as one full frame, ungraded structured moves, which share the
-/// same prose contract §4.4/`movement.rs`), `exercise` (the graded move's
-/// form, sandboxed), `done` (node_id), `error`.
+/// same prose contract §4.4/`movement.rs`), `move_settled` (§S6 follow-up —
+/// fires once per ungraded move, right after `token`, carrying that move's
+/// HTML re-tagged with real, permanent `data-block-id`s and progressively
+/// persisted; the client swaps it in for the untagged version it just
+/// streamed and can enable reading/asking against it immediately, without
+/// waiting for the whole node), `exercise` (the graded move's form,
+/// sandboxed), `done` (node_id), `error`.
 ///
 /// Block-level interactive islands (§4.4/§S11) — a `<figure data-interactive>`
 /// the model opens mid-move's HTML, not the whole-move `interactive` flag
@@ -232,12 +237,20 @@ pub async fn generate_node(
                 && generated.proposed_outline != prep.outline_titles
             {
                 // Structural proposal (§5 propose→approve, non-destructive):
-                // persist it and end this generation request without a node —
-                // approval is a separate user action (`/plan/decide`), never
-                // assumed. Nothing before this point was persisted (`finalize`
-                // only runs after a graded move), so an unapproved/rejected
-                // proposal leaves no trace beyond the event log already
-                // appended above; `/plan/decide` appends the resolution.
+                // persist it and end this generation request without
+                // finalizing a node — approval is a separate user action
+                // (`/plan/decide`), never assumed. No `NodeGenerated` event
+                // fires here (only `finalize` appends one), so `prepare`'s
+                // regen guard does not treat this node as done. If an
+                // earlier move in this same request already progressively
+                // persisted (§S6 follow-up), that partial content-only node
+                // is left on disk rather than deleted — inert, not a
+                // rollback in the literal §5 sense, but self-healing: the
+                // next real generation attempt for this node id (whether
+                // this proposal is rejected, or approved and this item's id
+                // is reused) overwrites it cleanly from move 1, and nothing
+                // reads a non-finalized node as real content in the
+                // meantime. `/plan/decide` appends the resolution event.
                 let proposal = PlanProposal {
                     move_id,
                     node_id: prep.node_id.clone(),
@@ -266,8 +279,38 @@ pub async fn generate_node(
             if matches!(move_type.render(), MoveRender::Structured) {
                 yield Ok(sse_frame("token", &generated.html));
             }
-            content_html.push_str(&generated.html);
+            // §S6 follow-up: tag and persist this move now rather than
+            // waiting for the whole node (through the graded move) to
+            // finish. `tag_move_html` is the ONLY place this move's HTML is
+            // ever run through `render_math`/`ensure_block_ids` — `finalize`
+            // later only concatenates already-tagged moves, never re-runs
+            // either (`engine::wrap_article`'s doc comment). The client
+            // gets the tagged fragment directly in the event payload (no
+            // refetch needed) so it can splice it in and enable reading/
+            // asking against it immediately.
+            let tagged = engine::tag_move_html(&prep.node_id, i, &generated.html);
+            content_html.push_str(&tagged);
             content_html.push('\n');
+            match engine::assemble_partial_node(&doc_id, &prep.node_id, &content_html) {
+                Ok(partial) => {
+                    if let Err(e) = state.store.write_node_content(&partial) {
+                        eprintln!("progressive node write failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("progressive node assembly failed: {e}"),
+            }
+            // §4.4/§3.1: `tagged` is the frozen copy IslandGate kept for
+            // storage, raw island script and all (never sent live in
+            // `token` frames — the gate already redacted those). This SSE
+            // frame is a second place that same raw script could otherwise
+            // leak to the app origin, so redact it here too; the unredacted
+            // `tagged` still went into `content_html`/the progressive write
+            // above, since the stored content layer needs the real script
+            // for `blocks/{id}/frame` to serve later.
+            yield Ok(sse_frame(
+                "move_settled",
+                &learnive_core::redact_interactive_blocks(&tagged),
+            ));
             ctx.prior_moves.push(MoveRecord {
                 move_type,
                 graded: false,

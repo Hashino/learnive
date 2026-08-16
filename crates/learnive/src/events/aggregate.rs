@@ -45,7 +45,8 @@ pub fn tactic_outcomes(events: impl Iterator<Item = Event>) -> HashMap<String, T
             | EventKind::NodeSkipped
             | EventKind::QuestionAsked { .. }
             | EventKind::AnnotationAdded { .. }
-            | EventKind::NodeReadToEnd => {}
+            | EventKind::NodeReadToEnd
+            | EventKind::NodeGenerated { .. } => {}
         }
     }
     out
@@ -87,7 +88,8 @@ pub fn ladder_signals(events: impl Iterator<Item = Event>) -> LadderSignals {
             | EventKind::NodeSkipped
             | EventKind::QuestionAsked { .. }
             | EventKind::AnnotationAdded { .. }
-            | EventKind::NodeReadToEnd => {}
+            | EventKind::NodeReadToEnd
+            | EventKind::NodeGenerated { .. } => {}
         }
     }
     signals
@@ -263,6 +265,21 @@ pub fn activity_counts(events: impl Iterator<Item = Event>) -> ActivityCounts {
     out
 }
 
+/// Whether `finalize` has ever completed for this node id — `prepare`'s
+/// regen guard (§S6 follow-up), replacing "a node file exists" now that
+/// content persists progressively per move. A node file can exist and still
+/// be mid-generation (or abandoned after a dropped connection); only a
+/// `NodeGenerated` event means the content layer is the real, complete
+/// thing `finalize` produces (prose through the graded move + its rubric
+/// sidecar), so retrying generation for a node that has one is refused, and
+/// retrying one that doesn't is allowed to overwrite the partial file
+/// cleanly — the log is the source of truth, not the file's mere presence.
+pub fn node_generated(mut events: impl Iterator<Item = Event>, node_id: &str) -> bool {
+    events.any(|e| {
+        e.node_id.as_deref() == Some(node_id) && matches!(e.kind, EventKind::NodeGenerated { .. })
+    })
+}
+
 /// §S5's revisit scheduler: which currently-`Skipped` node has been
 /// deferred longest. A pure spacing heuristic (least-recently-touched
 /// wins), not a full spaced-repetition algorithm — PLAN.md's S5 bullet
@@ -346,5 +363,54 @@ mod tests {
             "a document that only ever picks one real move type must still \
              collapse, even though `research` also fired"
         );
+    }
+
+    fn generated_event(node_id: &str, kind: EventKind) -> Event {
+        Event {
+            id: "e".to_string(),
+            ts: 0,
+            node_id: Some(node_id.to_string()),
+            kind,
+        }
+    }
+
+    /// §S6 follow-up: `node_generated` is the explicit completion signal
+    /// `prepare`'s regen guard reads — a node with moves but no
+    /// `NodeGenerated` event is still mid-generation (or abandoned
+    /// mid-stream), not done.
+    #[test]
+    fn node_generated_is_true_only_after_the_completion_event() {
+        let mid_generation = vec![generated_event(
+            "n1",
+            EventKind::MoveGenerated {
+                move_id: "m1".to_string(),
+                move_type: "explain".to_string(),
+                tactics: Vec::new(),
+                rung: "L0".to_string(),
+            },
+        )];
+        assert!(!node_generated(mid_generation.into_iter(), "n1"));
+
+        let finished = vec![generated_event(
+            "n1",
+            EventKind::NodeGenerated {
+                move_id: "m2".to_string(),
+            },
+        )];
+        assert!(node_generated(finished.into_iter(), "n1"));
+    }
+
+    /// A `NodeGenerated` event for a different node must never mark this
+    /// one finalized — the guard is keyed on node id, not "any completion
+    /// event exists in this document's log at all".
+    #[test]
+    fn node_generated_does_not_leak_across_node_ids() {
+        let events = vec![generated_event(
+            "other",
+            EventKind::NodeGenerated {
+                move_id: "m1".to_string(),
+            },
+        )];
+        assert!(!node_generated(events.into_iter(), "n1"));
     }
 }

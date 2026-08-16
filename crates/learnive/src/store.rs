@@ -208,6 +208,32 @@ impl Store {
         Ok(nodes)
     }
 
+    /// Writes a node's content layer while it is still being generated
+    /// (§S6 follow-up: progressive per-move persistence) or at `finalize`'s
+    /// final call — either way, a write that must not clobber an
+    /// interaction appended concurrently. `write_node` alone is a blind
+    /// overwrite of the whole file; the content layer streams in over
+    /// several calls now (one per move, then once more at `finalize`),
+    /// which widens the window for a concurrent `/ask` on the same node
+    /// (§S6's whole point: asking no longer waits for the node to finish)
+    /// to land its `append_interaction` read-modify-write in between two of
+    /// them. Holds `interaction_lock`, same fix `append_interaction`
+    /// already applies the other direction, and carries forward whatever
+    /// interactions are currently on disk rather than the (always empty)
+    /// ones on `node` — content-layer writes never author interactions,
+    /// only content.
+    pub fn write_node_content(&self, node: &Node) -> Result<()> {
+        let _guard = self
+            .interaction_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut node = node.clone();
+        if let Ok(existing) = self.read_node(&node.doc_id, &node.node_id) {
+            node.interaction = existing.interaction;
+        }
+        self.write_node(&node)
+    }
+
     /// Append-only convenience (§4.3): loads the node, appends an interaction
     /// item, and rewrites. Never touches the content layer.
     ///
@@ -396,6 +422,46 @@ mod tests {
         let reloaded = store.read_node("algebra", "n1").unwrap();
         assert_eq!(reloaded.interaction.len(), 1);
         assert_eq!(reloaded.content.html, frozen);
+    }
+
+    /// §S6 follow-up: a progressive content write (`write_node_content`,
+    /// what a still-generating node's move loop calls) must not clobber an
+    /// interaction appended concurrently — the race `write_node` alone is
+    /// vulnerable to, since asking no longer waits for the node to finish.
+    #[test]
+    fn write_node_content_preserves_a_concurrently_appended_interaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        store.write_node(&sample_node("algebra", "n1")).unwrap();
+
+        // Simulates `/ask` landing between two of a still-streaming node's
+        // progressive writes.
+        store
+            .append_interaction(
+                "algebra",
+                "n1",
+                InteractionItem::Annotation {
+                    id: "a1".to_string(),
+                    anchor: Anchor::block("b1"),
+                    body_html: "<p>mid-stream question</p>".to_string(),
+                },
+            )
+            .unwrap();
+
+        // The next move's progressive write: freshly assembled content,
+        // built with no knowledge of the interaction that just landed.
+        let mut next_write = sample_node("algebra", "n1");
+        next_write.content.html =
+            "<p data-block-id=\"b1\">content</p>\n<p data-block-id=\"b2\">more</p>".to_string();
+        store.write_node_content(&next_write).unwrap();
+
+        let reloaded = store.read_node("algebra", "n1").unwrap();
+        assert_eq!(
+            reloaded.interaction.len(),
+            1,
+            "the interaction appended between writes must survive the content write"
+        );
+        assert!(reloaded.content.html.contains("more"));
     }
 
     #[test]
