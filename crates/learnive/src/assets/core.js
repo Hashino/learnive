@@ -20,6 +20,13 @@ function postJson(path, body) {
     body: JSON.stringify(body),
   });
 }
+function putJson(path, body) {
+  return api(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
 const el = (id) => document.getElementById(id);
 

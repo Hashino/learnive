@@ -135,6 +135,11 @@
            (`armEdgeLoading`/`maybeLoadNeighbor` in outline.js). -->
       <main id="doc" hidden class="card">
         <div id="nodeSections"></div>
+        <!-- §9 margin annotations: post-its positioned beside their
+             paragraph, outside the card (reading.js). Sits alongside
+             `#nodeSections` rather than inside it so replacing a section's
+             prose HTML on reload/regen never wipes it out. -->
+        <div id="annotationsLayer"></div>
 
         <!-- A `plan` move's proposed outline revision, awaiting approval
              (§5 propose→approve, §S4). Pauses generation until decided.

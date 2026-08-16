@@ -406,6 +406,7 @@ pub struct AnnotateReq {
 
 #[derive(Serialize)]
 pub struct AnnotateResp {
+    id: String,
     body_html: String,
 }
 
@@ -437,17 +438,18 @@ pub async fn annotate(
     }
 
     let body_html = format!("<p>{}</p>", escape_html(text));
+    let id = engine::new_id();
     state.store.append_interaction(
         &doc_id,
         &node_id,
         InteractionItem::Annotation {
-            id: engine::new_id(),
+            id: id.clone(),
             anchor: body.anchor,
             body_html: body_html.clone(),
         },
     )?;
 
-    Ok(Json(AnnotateResp { body_html }))
+    Ok(Json(AnnotateResp { id, body_html }))
 }
 
 #[derive(Deserialize)]
@@ -474,7 +476,10 @@ pub async fn update_annotation(
     state
         .store
         .update_annotation(&doc_id, &node_id, &annotation_id, body_html.clone())?;
-    Ok(Json(AnnotateResp { body_html }))
+    Ok(Json(AnnotateResp {
+        id: annotation_id,
+        body_html,
+    }))
 }
 
 #[derive(Serialize)]

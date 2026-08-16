@@ -276,6 +276,14 @@ async function spliceSubNodeFromServer(anchorBlockId, subNodeId, questionHtml) {
 // the panel: they are the check's history, not part of the text.
 async function hydrateInteractions(interactions, interactionsEl) {
   for (const item of interactions || []) {
+    // Margin post-it (§9), not a panel entry — rendered/repositioned into
+    // `#annotationsLayer` (reading.js), keyed by id so re-hydrating the
+    // same item (a remount, the `done` handler's refetch) upserts instead
+    // of duplicating.
+    if (item.kind === "annotation") {
+      upsertAnnotationNote(item);
+      continue;
+    }
     if (item.kind === "qa" && item.child_node_id) {
       await spliceSubNodeFromServer(
         item.anchor_block,

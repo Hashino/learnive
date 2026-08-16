@@ -19,6 +19,8 @@ function setReadingToolsEnabled(enabled) {
   if (!enabled) {
     pendingSelection = null;
     hideAskBar(true);
+    cancelDraftAnnotation();
+    updateAnnotationPlus();
   }
 }
 
@@ -95,6 +97,11 @@ function clearReadingLine() {
 function updateReadingLine() {
   readingLineQueued = false;
   if (el("doc").hidden) return clearReadingLine();
+  // Margin notes reposition on every tick regardless of whether the
+  // reading-line block itself changed below (scrolling moves them
+  // continuously; the reading line only jumps between blocks).
+  updateAnnotationPlus();
+  repositionNotes();
   const best = currentReadingBlock();
   if (best === readingLineEl) return;
   if (best) {
@@ -321,3 +328,273 @@ el("askBar").addEventListener("submit", async (e) => {
     el("askSend").disabled = false;
   }
 });
+
+// --- Margin annotations --------------------------------------------------
+// One post-it per paragraph, at most one per paragraph for now: a
+// persistent "+" follows the reading line onto whichever paragraph doesn't
+// have one yet (§9). Click it, type, click away — empty cancels, non-empty
+// saves via `POST .../annotate` (the same anchor contract `/ask` uses, no
+// selection quote: it's always the whole paragraph on the line). An
+// existing note is click-to-edit anywhere, anytime; emptying it on blur
+// reverts to what was last saved rather than deleting it, so editing never
+// needs its own delete endpoint.
+//
+// Notes are kept in `notesById`, keyed by the interaction item's stable id
+// (§4.3) — hydrating the same item twice (a remount, the `done` handler's
+// post-generation refetch) upserts the existing entry instead of building a
+// second one, the same trap the interaction-splice bug earlier in this
+// session already taught this codebase to watch for.
+let notesById = new Map();
+let draftAnnotation = null; // {el, textarea, blockId} — not in notesById until saved
+let annotationPlusEl = null;
+
+function annotationsLayer() {
+  return el("annotationsLayer");
+}
+
+// Resolves which node actually owns a block (§S8: could be a spliced
+// sub-node), the same way `currentReadingBlockId` does — freshly, at the
+// moment of the request, rather than trusted from whenever the note was
+// first rendered.
+function ownerNodeId(blockId) {
+  const target = blockElement(blockId);
+  const owner = target && target.closest("[data-node-id]");
+  return owner ? owner.dataset.nodeId : state.nodeId;
+}
+
+function renderNoteText(entry) {
+  entry.el.innerHTML = sanitizeHtml(entry.bodyHtml);
+}
+
+function attachNoteClickHandler(entry, id) {
+  entry.el.addEventListener("click", (e) => {
+    if (e.target.tagName !== "TEXTAREA") startEditingNote(id);
+  });
+}
+
+// Renders/repositions one already-saved annotation (called from
+// `hydrateInteractions`, node.js) — the client-side counterpart to the
+// server's `InteractionItem::Annotation`.
+function upsertAnnotationNote(item) {
+  if (!item.anchor_block) return;
+  let entry = notesById.get(item.id);
+  if (!entry) {
+    const noteEl = document.createElement("div");
+    noteEl.className = "annotation-note";
+    annotationsLayer().appendChild(noteEl);
+    entry = {
+      el: noteEl,
+      blockId: item.anchor_block,
+      bodyHtml: item.body_html,
+      editing: false,
+    };
+    notesById.set(item.id, entry);
+    attachNoteClickHandler(entry, item.id);
+  } else {
+    entry.blockId = item.anchor_block;
+    entry.bodyHtml = item.body_html;
+  }
+  if (!entry.editing) renderNoteText(entry);
+  const target = blockElement(item.anchor_block);
+  if (target) target.classList.add("annotated");
+  scheduleAnnotations();
+}
+
+function startEditingNote(id) {
+  const entry = notesById.get(id);
+  if (!entry || entry.editing) return;
+  const tmp = document.createElement("div");
+  tmp.innerHTML = entry.bodyHtml;
+  const plain = (tmp.textContent || "").trim();
+  entry.editing = true;
+  entry.el.innerHTML = "";
+  const textarea = document.createElement("textarea");
+  textarea.rows = 3;
+  textarea.value = plain;
+  entry.el.appendChild(textarea);
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  textarea.addEventListener("blur", () => finishEditingNote(id, plain));
+  textarea.addEventListener("keydown", (e) => {
+    // Escape reverts and closes, same as leaving it unchanged would.
+    if (e.key === "Escape") {
+      textarea.value = plain;
+      textarea.blur();
+    }
+  });
+}
+
+async function finishEditingNote(id, previousPlain) {
+  const entry = notesById.get(id);
+  if (!entry) return;
+  const textarea = entry.el.querySelector("textarea");
+  const text = textarea ? textarea.value.trim() : "";
+  entry.editing = false;
+  if (!text || text === previousPlain) {
+    // Empty reverts to the last saved text rather than deleting the note;
+    // unchanged is simply nothing to save.
+    renderNoteText(entry);
+    return;
+  }
+  try {
+    const resp = await putJson(
+      `/api/documents/${state.docId}/nodes/${ownerNodeId(entry.blockId)}/annotations/${id}`,
+      { body: text },
+    );
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    entry.bodyHtml = data.body_html;
+  } catch (err) {
+    // Best-effort: keep showing the last successfully saved text.
+  }
+  renderNoteText(entry);
+}
+
+function getAnnotationPlus() {
+  if (!annotationPlusEl) {
+    annotationPlusEl = document.createElement("button");
+    annotationPlusEl.type = "button";
+    annotationPlusEl.className = "annotation-plus";
+    annotationPlusEl.textContent = "+";
+    annotationPlusEl.title = "Add a note";
+    annotationPlusEl.addEventListener("click", () => {
+      const line = currentReadingBlockId();
+      if (line) startNewAnnotation(line.blockId);
+    });
+    annotationsLayer().appendChild(annotationPlusEl);
+  }
+  return annotationPlusEl;
+}
+
+// Positions the "+" beside the reading-line paragraph, or hides it — no
+// eligible paragraph, a draft or edit already open, or that paragraph
+// already has its one note (§9: one per paragraph for now — the note
+// itself is what you click to change it).
+function updateAnnotationPlus() {
+  if (el("doc").hidden) return;
+  const plus = getAnnotationPlus();
+  if (!askEligible || draftAnnotation) {
+    plus.style.display = "none";
+    return;
+  }
+  const best = currentReadingBlock();
+  if (
+    !best ||
+    [...notesById.values()].some((n) => n.blockId === best.dataset.blockId)
+  ) {
+    plus.style.display = "none";
+    return;
+  }
+  plus.style.top = `${blockMidY(best, el("doc").getBoundingClientRect())}px`;
+  plus.style.display = "flex";
+}
+
+// The paragraph's own vertical centre, relative to `#doc` — the note/button
+// is translated -50% (CSS) around this point, so it stays centred on the
+// paragraph no matter how tall the note's own text makes it.
+function blockMidY(target, docRect) {
+  const rect = target.getBoundingClientRect();
+  return rect.top - docRect.top + rect.height / 2;
+}
+
+function repositionNotes() {
+  if (el("doc").hidden) return;
+  const docRect = el("doc").getBoundingClientRect();
+  for (const note of notesById.values()) {
+    const target = blockElement(note.blockId);
+    if (!target) {
+      note.el.style.display = "none";
+      continue;
+    }
+    note.el.style.top = `${blockMidY(target, docRect)}px`;
+    note.el.style.display = "block";
+  }
+  if (draftAnnotation) {
+    const target = blockElement(draftAnnotation.blockId);
+    if (target) {
+      draftAnnotation.el.style.top = `${blockMidY(target, docRect)}px`;
+    }
+  }
+}
+
+let annotationsQueued = false;
+function scheduleAnnotations() {
+  if (annotationsQueued) return;
+  annotationsQueued = true;
+  requestAnimationFrame(() => {
+    annotationsQueued = false;
+    updateAnnotationPlus();
+    repositionNotes();
+  });
+}
+
+function startNewAnnotation(blockId) {
+  if (draftAnnotation) return;
+  if ([...notesById.values()].some((n) => n.blockId === blockId)) return;
+  const target = blockElement(blockId);
+  if (!target) return;
+  target.classList.add("annotated");
+  const noteEl = document.createElement("div");
+  noteEl.className = "annotation-note";
+  const textarea = document.createElement("textarea");
+  textarea.rows = 3;
+  noteEl.appendChild(textarea);
+  annotationsLayer().appendChild(noteEl);
+  draftAnnotation = { el: noteEl, textarea, blockId };
+  scheduleAnnotations();
+  updateAnnotationPlus();
+  textarea.focus();
+  textarea.addEventListener("blur", finishDraftAnnotation);
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      textarea.value = "";
+      textarea.blur();
+    }
+  });
+}
+
+// Drops an in-progress draft without saving it (e.g. generation starting
+// on another node makes reading tools ineligible mid-draft).
+function cancelDraftAnnotation() {
+  if (!draftAnnotation) return;
+  const target = blockElement(draftAnnotation.blockId);
+  if (target) target.classList.remove("annotated");
+  draftAnnotation.el.remove();
+  draftAnnotation = null;
+}
+
+async function finishDraftAnnotation() {
+  const draft = draftAnnotation;
+  if (!draft) return;
+  draftAnnotation = null;
+  const text = draft.textarea.value.trim();
+  if (!text) {
+    const target = blockElement(draft.blockId);
+    if (target) target.classList.remove("annotated");
+    draft.el.remove();
+    updateAnnotationPlus();
+    return;
+  }
+  try {
+    const resp = await postJson(
+      `/api/documents/${state.docId}/nodes/${ownerNodeId(draft.blockId)}/annotate`,
+      { body: text, anchor: { block_id: draft.blockId } },
+    );
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    const entry = {
+      el: draft.el,
+      blockId: draft.blockId,
+      bodyHtml: data.body_html,
+      editing: false,
+    };
+    notesById.set(data.id, entry);
+    attachNoteClickHandler(entry, data.id);
+    renderNoteText(entry);
+  } catch (err) {
+    const target = blockElement(draft.blockId);
+    if (target) target.classList.remove("annotated");
+    draft.el.remove();
+  }
+  updateAnnotationPlus();
+}
