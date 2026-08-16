@@ -70,6 +70,17 @@ pub enum MoveType {
     Revisit,
     Plan,
     Other,
+    /// Acquires grounding for a concept the current corpus has nothing on
+    /// (§S13, `api::cold_start::acquire`) — chosen exactly like any other
+    /// move (offered in the menu only when `MoveContext::grounding` is
+    /// empty, mirroring how `profile` is withheld with no open hypothesis),
+    /// but produces no learner-facing content of its own. The orchestration
+    /// loop (`api::generation::generate_node`) intercepts it before
+    /// `render()` is ever consulted, runs acquisition, refreshes the
+    /// context's grounding, and loops back to decide the real next move —
+    /// `render()`/`generate_move*` must never actually be called with this
+    /// type (debug-asserted the same way the streamed/structured split is).
+    Research,
 }
 
 /// Which generation path a move type uses — see the module docs.
@@ -93,11 +104,16 @@ impl MoveType {
     }
 
     /// Streamed vs structured (§14) — see the module docs for the rationale.
+    /// Never actually called for `Research` (see its own doc comment) — the
+    /// orchestration loop intercepts it first; `Structured` here is just an
+    /// arbitrary total-match default, not a real routing decision.
     pub fn render(self) -> MoveRender {
         match self {
-            MoveType::Test | MoveType::Profile | MoveType::Plan | MoveType::Other => {
-                MoveRender::Structured
-            }
+            MoveType::Test
+            | MoveType::Profile
+            | MoveType::Plan
+            | MoveType::Other
+            | MoveType::Research => MoveRender::Structured,
             _ => MoveRender::Streamed,
         }
     }
@@ -115,6 +131,7 @@ impl std::fmt::Display for MoveType {
             MoveType::Revisit => "revisit",
             MoveType::Plan => "plan",
             MoveType::Other => "other",
+            MoveType::Research => "research",
         };
         write!(f, "{s}")
     }
@@ -151,8 +168,10 @@ pub struct MoveRecord {
 pub struct MoveContext {
     pub topic: String,
     pub item_title: String,
-    /// Titles of outline items already covered, for narrative continuity —
-    /// the direct analogue of `engine::prompt::prose`'s `context` param.
+    /// Titles of outline items already covered PLUS an excerpt of what they
+    /// actually said (`api::reading::prior_content_context`) — narrative
+    /// continuity AND the guard against a later node re-teaching what an
+    /// earlier one already did.
     pub outline_context: String,
     pub prior_moves: Vec<MoveRecord>,
     pub objective: String,
@@ -162,6 +181,12 @@ pub struct MoveContext {
     /// fed to `decide_move` only — the caller keeps this updated as moves are
     /// generated. Empty for the node's first move.
     pub node_tail: String,
+    /// Set once a `research` move has run for this node-generation call
+    /// (§S13) — withholds `research` from the menu on any further
+    /// `decide_move` call in the same request, the cap on repeated
+    /// acquisition attempts. Not persisted; scoped to one `generate_node`
+    /// call, same lifetime as `prior_moves`.
+    pub research_attempted: bool,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

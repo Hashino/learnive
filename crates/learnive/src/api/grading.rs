@@ -1,4 +1,4 @@
-use super::reading::{grounding_for, spawn_profile_distillation};
+use super::reading::{escape_html, grounding_for, spawn_profile_distillation};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -12,11 +12,117 @@ pub struct AnswerReq {
 
 #[derive(Serialize)]
 pub struct AnswerResp {
-    grades: Vec<ObjectiveGrade>,
     advance: bool,
+    /// The frozen exercise + the learner's answer + per-objective feedback
+    /// (§4.3), already sanitized-HTML-shaped and already appended to the
+    /// interaction layer under `ThreadKind::Attempt` before this response is
+    /// built — what the client renders here and what a reload reconstructs
+    /// are the same string, not two independently-maintained renderings.
+    attempt_html: String,
     /// Remediation EXPLANATION prose (§8.2), sanitized and shown inline.
     #[serde(skip_serializing_if = "Option::is_none")]
     remediation_html: Option<String>,
+}
+
+/// Renders one graded submission (§8) as a self-contained, sanitizable HTML
+/// fragment: the exercise as it was asked (frozen via `freeze_exercise_html`
+/// — the client's `sanitizeHtml` drops any `<form>` subtree wholesale, so the
+/// wrapping tag is unwrapped server-side rather than trusting the client to
+/// preserve the question text inside it), the learner's raw answer, and the
+/// per-objective feedback. This is the ONLY place this markup is built — the
+/// live response and every future reload render this exact string (see
+/// `AnswerResp::attempt_html`).
+fn render_attempt(exercise_html: &str, answer: &str, grades: &[ObjectiveGrade]) -> String {
+    let grades_html: String = grades
+        .iter()
+        .map(|g| {
+            format!(
+                "<div class=\"grade {}\"><strong>{}</strong> — {}</div>",
+                grade_class(g.grade),
+                grade_label(g.grade),
+                escape_html(&g.feedback),
+            )
+        })
+        .collect();
+    format!(
+        "<div class=\"attempt-exercise\">{}</div>\
+         <div class=\"attempt-answer\"><strong>Sua resposta:</strong>{}</div>\
+         <div class=\"grades\">{grades_html}</div>",
+        learnive_core::freeze_exercise_html(exercise_html),
+        render_answer(answer),
+    )
+}
+
+/// Renders the raw `learnive-answer` postMessage artifact (§4.4/§8) for a
+/// human, not a debugger: the exercise's answer schema is whatever the model
+/// (or the auto-collecting form harness, `engine::render_sandbox_frame`)
+/// chose, so this can't assume field names — only that it's JSON. A flat
+/// object (the common case: one `<form>` field per named input) becomes a
+/// label→value list; anything else (a single unlabeled field, a custom
+/// interactive artifact's array/nesting, or unparsable text) falls back to a
+/// value or a pretty-printed block, never the compact single-line dump
+/// `serde_json::to_string` produces.
+fn render_answer(answer: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(answer) {
+        Ok(serde_json::Value::Object(map)) if !map.is_empty() => {
+            let rows: String = map
+                .iter()
+                .map(|(key, val)| {
+                    format!(
+                        "<div class=\"answer-field\">{}{}</div>",
+                        // A single, generically-named field (the harness's
+                        // fallback for a bare textarea/input, or the common
+                        // one-field form) carries no meaningful label — the
+                        // value alone is the answer.
+                        if map.len() > 1 || !matches!(key.as_str(), "answer" | "value") {
+                            format!("<span class=\"answer-label\">{}</span>", escape_html(key))
+                        } else {
+                            String::new()
+                        },
+                        render_answer_value(val),
+                    )
+                })
+                .collect();
+            rows
+        }
+        Ok(other) => render_answer_value(&other),
+        // Not valid JSON at all — the artifact contract requires JSON, but
+        // render whatever arrived rather than hide it.
+        Err(_) => format!("<pre>{}</pre>", escape_html(answer)),
+    }
+}
+
+/// One answer value: a plain string renders as its own text (a code block
+/// gets `<pre>`, a short line stays inline) rather than as a quoted JSON
+/// string; anything else (number, bool, array, nested object) is
+/// pretty-printed JSON, since there's no schema to render it more precisely
+/// against.
+fn render_answer_value(val: &serde_json::Value) -> String {
+    if let serde_json::Value::String(s) = val {
+        return if s.contains('\n') {
+            format!("<pre>{}</pre>", escape_html(s))
+        } else {
+            format!("<code>{}</code>", escape_html(s))
+        };
+    }
+    let pretty = serde_json::to_string_pretty(val).unwrap_or_else(|_| val.to_string());
+    format!("<pre>{}</pre>", escape_html(&pretty))
+}
+
+fn grade_class(g: Grade) -> &'static str {
+    match g {
+        Grade::NotDemonstrated => "not_demonstrated",
+        Grade::Partial => "partial",
+        Grade::Demonstrated => "demonstrated",
+    }
+}
+
+fn grade_label(g: Grade) -> &'static str {
+    match g {
+        Grade::NotDemonstrated => "not demonstrated",
+        Grade::Partial => "partial",
+        Grade::Demonstrated => "demonstrated",
+    }
 }
 
 pub async fn answer(
@@ -32,6 +138,10 @@ pub async fn answer(
     // Grabbed before any sidecar overwrite below (§8.2 replaces it on failure) —
     // this is the id `MoveGraded` must join back onto.
     let move_id = sidecar.move_id.clone();
+    // Read before this submission's own interaction append below, so the
+    // remediation-attempt count a few lines down still reflects only PRIOR
+    // attempts.
+    let node = state.store.read_node(&doc_id, &node_id)?;
 
     let ai = state.ai.load_full();
     let assessment =
@@ -48,19 +158,39 @@ pub async fn answer(
         eprintln!("event log append failed: {e}");
     }
 
+    // Persist THIS attempt — exercise, answer, feedback — for every
+    // submission, passing or failing (§4.3: the document is a full record of
+    // learning, never a client-only rendering with nothing behind it).
+    let exercise_anchor = node
+        .content
+        .exercise
+        .as_ref()
+        .map(|e| e.exercise_id.clone());
+    let attempt_html = render_attempt(&sidecar.exercise_html, &body.answer, &assessment.grades);
+    state.store.append_interaction(
+        &doc_id,
+        &node_id,
+        InteractionItem::Thread {
+            id: engine::new_id(),
+            kind: ThreadKind::Attempt,
+            anchor_block: exercise_anchor.clone(),
+            body_html: attempt_html.clone(),
+            child_node_id: None,
+        },
+    )?;
+
     // Advancing requires every objective demonstrated (§8).
     if assessment.all_demonstrated() {
         spawn_profile_distillation(state.clone(), doc_id.clone(), true);
         return Ok(Json(AnswerResp {
-            grades: assessment.grades,
             advance: true,
+            attempt_html,
             remediation_html: None,
         }));
     }
     spawn_profile_distillation(state.clone(), doc_id.clone(), false);
 
     // Remediation (§8.2): similarity grows with the number of attempts.
-    let node = state.store.read_node(&doc_id, &node_id)?;
     let attempt = node
         .interaction
         .iter()
@@ -77,9 +207,12 @@ pub async fn answer(
         + 1;
     // (a) Explanation: a worked solution of the problem they just missed (§8.2),
     // sanitized prose — it does NOT contain the next problem and must not leak it.
+    // `node.content.html` (the chapter already read) lets it tell "already
+    // explained, don't repeat" apart from "genuinely never covered".
     let explanation = engine::remediate(
         &ai,
         &sidecar.title,
+        &node.content.html,
         &sidecar.exercise_html,
         &body.answer,
         &assessment.unmet(),
@@ -137,26 +270,21 @@ pub async fn answer(
 
     // Append the explanation to the interaction layer (append-only, §4.3),
     // anchored to the original exercise.
-    let anchor = node
-        .content
-        .exercise
-        .as_ref()
-        .map(|e| e.exercise_id.clone());
     state.store.append_interaction(
         &doc_id,
         &node_id,
         InteractionItem::Thread {
             id: engine::new_id(),
             kind: ThreadKind::Remediation,
-            anchor_block: anchor,
+            anchor_block: exercise_anchor,
             body_html: explanation.clone(),
             child_node_id: None,
         },
     )?;
 
     Ok(Json(AnswerResp {
-        grades: assessment.grades,
         advance: false,
+        attempt_html,
         remediation_html: Some(explanation),
     }))
 }

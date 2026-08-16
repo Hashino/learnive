@@ -120,77 +120,67 @@ async function refreshOutline() {
 // Opens an outline item non-destructively: an already-generated node
 // (skipped or demonstrated) is just READ (§S5/§4.3 — regenerating it
 // would clobber the append-only interaction layer); a never-generated
-// one falls through to the normal streaming generation path.
-async function openNode(id) {
+// one falls through to the normal streaming generation path. A section
+// already mounted (visited before, or quietly pulled in by
+// `maybeLoadNeighbor` below) is never re-fetched — clicking it just
+// scrolls the continuous document to where it already lives (§9).
+async function openNode(id, opts = {}) {
   // Navigating from the sidebar means you're done with the sidebar.
   forceCloseSidebar();
+  const instant = opts.instant !== false;
+  const existing = state.sections.get(id);
+  if (existing && existing.el.isConnected) {
+    state.currentId = id;
+    renderOutline();
+    scrollToSection(existing, instant);
+    return;
+  }
   try {
     const resp = await api(`/api/documents/${state.docId}/nodes/${id}`);
     if (resp.status === 404) {
-      return generateNode(id);
+      return generateNode(id, opts);
     }
     if (!resp.ok) throw new Error(await resp.text());
-    await renderExistingNode(id, await resp.json());
+    await renderExistingNode(id, await resp.json(), opts);
   } catch (err) {
-    el("controls").innerHTML =
+    const rec = state.sections.get(state.currentId);
+    (rec ? rec.controls : el("nodeSections")).innerHTML =
       '<p class="error">could not open node: ' +
       escapeHtml(String(err)) +
       "</p>";
   }
 }
 
-// Renders an already-generated node read back from the server: frozen
-// prose, the append-only interaction history, and — if not yet
-// demonstrated — the still-active exercise, answerable exactly like a
-// freshly generated one.
 // The document carries half a screen of slack above it so the first
-// block can reach the reading line (§9, `#doc` in app.css). That slack is
-// scrolled past whenever a node opens: the learner asked for a node, not
-// for half a screen of starfield. Instant, never smooth — this is the
-// view arriving, not moving.
+// block can reach the reading line (§9, `#doc` in app.css) — only
+// relevant when nothing has been mounted into `#nodeSections` yet (a
+// document whose outline exists but whose first node was never
+// generated, §S12). Once a section exists, `scrollToSection` (node.js)
+// is what "opening a node" actually means.
 function parkAtDocumentTop() {
   const doc = el("doc");
   if (doc.hidden) return;
-  const top = doc.getBoundingClientRect().top + window.scrollY;
-  window.scrollTo({ top: Math.max(0, top - 16), behavior: "auto" });
+  window.scrollTo({ top: 0, behavior: "auto" });
 }
 
-async function renderExistingNode(id, data) {
+// Renders an already-generated node read back from the server into its
+// section, then scrolls to it (instant by default — "the view arriving,
+// not moving"; `advanceAfterGrading` asks for smooth instead, §9).
+async function renderExistingNode(id, data, opts = {}) {
   state.currentId = id;
   state.nodeId = id;
   renderOutline();
-  el("prose").innerHTML = sanitizeHtml(data.content_html);
-  el("prose").dataset.nodeId = id;
-  hydrateIslands(el("prose"), id);
-  el("result").innerHTML = "";
-  el("interactions").innerHTML = "";
-  await hydrateInteractions(data.interactions, el("interactions"));
-  if (data.has_exercise) {
-    renderExercise(id);
-    el("controls").innerHTML = "";
-    renderSkipControl();
-  } else {
-    el("exercise").innerHTML = "";
-    exerciseFrame = null;
-    // A demonstrated node still needs a way forward — this is the node
-    // a resumed session lands on most of the time (§S12: resume opens
-    // the last node that exists on disk, which is usually one that was
-    // just completed), so leaving it a dead end would make reopening
-    // the app look like the document had ended.
-    el("controls").innerHTML =
-      '<p class="muted">Already demonstrated.</p>';
-    renderNextControl();
-  }
-  setReadingToolsEnabled(true);
-  armReadToEndWatcher();
-  parkAtDocumentTop();
+  const rec = await mountExistingSection(id, data);
+  scrollToSection(rec, opts.instant !== false);
   scheduleReadingLine();
+  armEdgeLoading();
+  return rec;
 }
 
 // Shows the "skip" control (§S5, "botão pular") only when there's
 // another reachable node to skip to — never for a linear doc's last
 // (or only) available item.
-function renderSkipControl() {
+function renderSkipControl(rec) {
   const other = state.items.find(
     (it) => it.id !== state.currentId && it.state !== "locked",
   );
@@ -199,33 +189,13 @@ function renderSkipControl() {
   btn.type = "button";
   btn.textContent = "Skip for now →";
   btn.addEventListener("click", skipCurrentNode);
-  el("controls").appendChild(btn);
-}
-
-// Appends the "next concept" control (or the end-of-outline note) to
-// `#controls`. Shared by the advance-after-grading path and by opening
-// an already-demonstrated node, so both offer the same way forward.
-function renderNextControl() {
-  const next = state.items.find(
-    (it) => it.id !== state.currentId && it.state === "available",
-  );
-  if (!next) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "You have completed the current outline.";
-    el("controls").appendChild(p);
-    return;
-  }
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.textContent = "Next concept →";
-  btn.addEventListener("click", () => openNode(next.id));
-  el("controls").appendChild(btn);
+  rec.controls.appendChild(btn);
 }
 
 async function skipCurrentNode() {
   if (!state.currentId) return;
   const skippedId = state.currentId;
+  const rec = state.sections.get(skippedId);
   try {
     const resp = await postJson(
       `/api/documents/${state.docId}/nodes/${skippedId}/skip`,
@@ -242,14 +212,76 @@ async function skipCurrentNode() {
     );
     if (next) {
       openNode(next.id);
-    } else {
-      el("controls").innerHTML =
-        '<p class="muted">Nothing else available yet.</p>';
+    } else if (rec) {
+      rec.controls.innerHTML = '<p class="muted">Nothing else available yet.</p>';
     }
   } catch (err) {
-    el("result").innerHTML =
+    (rec ? rec.result : el("nodeSections")).innerHTML =
       '<span class="error">skip failed: ' +
       escapeHtml(String(err)) +
       "</span>";
+  }
+}
+
+// --- Lazy neighbor-loading (§9) -----------------------------------------
+// On a big document, boot only mounts the resume node — not the whole
+// graph. As the reader nears either edge of what's currently mounted, pull
+// in the next already-generated outline neighbor in that direction so the
+// document keeps reading as continuous rather than stopping short. Never
+// generates: an unreached neighbor (404, or gated `locked`) just ends the
+// lazy-load in that direction — triggering generation on its own would
+// spend the learner's money (BYOK) for a node they haven't asked for.
+let edgeObserver = null;
+const neighborLoadInFlight = new Set();
+
+function armEdgeLoading() {
+  if (edgeObserver) edgeObserver.disconnect();
+  const sections = [...el("nodeSections").children].filter((c) =>
+    c.classList.contains("node-section"),
+  );
+  if (sections.length === 0) return;
+  const first = sections[0];
+  const last = sections[sections.length - 1];
+  edgeObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        if (entry.target === first) maybeLoadNeighbor(-1);
+        if (entry.target === last) maybeLoadNeighbor(1);
+      }
+    },
+    { rootMargin: "600px 0px 600px 0px", threshold: 0 },
+  );
+  edgeObserver.observe(first);
+  if (last !== first) edgeObserver.observe(last);
+}
+
+async function maybeLoadNeighbor(dir) {
+  const mountedIndices = [...state.sections.values()]
+    .filter((s) => s.el.isConnected)
+    .map((s) => state.items.findIndex((it) => it.id === s.nodeId))
+    .filter((i) => i >= 0);
+  if (mountedIndices.length === 0) return;
+  const edgeIdx =
+    dir < 0 ? Math.min(...mountedIndices) : Math.max(...mountedIndices);
+  const neighbor = state.items[edgeIdx + dir];
+  if (!neighbor || neighbor.state === "locked") return;
+  if (state.sections.has(neighbor.id)) return;
+  if (neighborLoadInFlight.has(neighbor.id)) return;
+  neighborLoadInFlight.add(neighbor.id);
+  try {
+    const resp = await api(`/api/documents/${state.docId}/nodes/${neighbor.id}`);
+    if (resp.ok) {
+      await mountExistingSection(neighbor.id, await resp.json());
+      scheduleReadingLine();
+      armEdgeLoading();
+    }
+    // A 404 here just means that neighbor hasn't been generated yet —
+    // nothing to load, lazy-loading in this direction stops.
+  } catch (err) {
+    // Best-effort background load; a failure just leaves that neighbor
+    // unmounted for now.
+  } finally {
+    neighborLoadInFlight.delete(neighbor.id);
   }
 }

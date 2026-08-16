@@ -66,7 +66,17 @@ pub fn ladder_signals(events: impl Iterator<Item = Event>) -> LadderSignals {
         match event.kind {
             EventKind::MoveGenerated { move_type, .. } => {
                 signals.moves_generated += 1;
-                signals.move_types_seen.insert(move_type);
+                // `research` (§S13) is a structural interception, never a
+                // real `decide_move` choice among content move types — it
+                // never reaches `render()`. Counting it here would let an
+                // ungrounded document (where `research` re-offers on every
+                // node's first move, per `movement::prompt::menu`) dodge
+                // the diversity-collapse check indefinitely just by being
+                // ungrounded, even while every real move it picks is the
+                // same type.
+                if move_type != "research" {
+                    signals.move_types_seen.insert(move_type);
+                }
             }
             EventKind::SchemaViolation { .. } => {
                 signals.schema_violations += 1;
@@ -285,4 +295,56 @@ pub fn revisit_suggestion(events: impl Iterator<Item = Event>) -> Option<String>
         .into_iter()
         .min_by_key(|(_, ts)| *ts)
         .map(|(id, _)| id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::Event;
+
+    fn move_generated(move_type: &str) -> Event {
+        Event {
+            id: "e".to_string(),
+            ts: 0,
+            node_id: None,
+            kind: EventKind::MoveGenerated {
+                move_id: "m".to_string(),
+                move_type: move_type.to_string(),
+                tactics: Vec::new(),
+                rung: "L2".to_string(),
+            },
+        }
+    }
+
+    /// §S13: a `research` move must never count toward move-type diversity
+    /// — it's a structural interception, not a real `decide_move` choice.
+    /// An ungrounded document re-offers (and can re-pick) `research` on
+    /// every node's first move, so if it counted, a document whose every
+    /// REAL choice is monotonous (`test` every time) would read as diverse
+    /// forever, purely from staying ungrounded — defeating the collapse
+    /// check for exactly the documents most likely to need it.
+    #[test]
+    fn research_never_counts_toward_move_type_diversity() {
+        let mut events = vec![move_generated("research")];
+        events.extend((0..10).map(|_| move_generated("test")));
+
+        let signals = ladder_signals(events.into_iter());
+        assert_eq!(
+            signals.move_types_seen,
+            HashSet::from(["test".to_string()]),
+            "research must not appear in the diversity set"
+        );
+        assert_eq!(
+            signals.moves_generated, 11,
+            "but still counts toward the sample size"
+        );
+
+        // The monotonous-but-"diverse"-looking document still steps down.
+        assert_eq!(
+            calibrate_rung(AgentPolicy::L2, &signals),
+            AgentPolicy::L1,
+            "a document that only ever picks one real move type must still \
+             collapse, even though `research` also fired"
+        );
+    }
 }

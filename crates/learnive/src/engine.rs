@@ -191,6 +191,14 @@ pub async fn propose_objective(ai: &Ai, topic: &str) -> Result<ObjectiveProposal
     parse::objective_proposal(&text)
 }
 
+/// Derives a short catalog-search phrase for source acquisition (§11) from
+/// the raw topic — see `prompt::search_subject` for why this can't just reuse
+/// the objective text. Fast tier: a background, non-blocking, low-stakes call.
+pub async fn propose_search_subject(ai: &Ai, topic: &str) -> Result<String, EngineError> {
+    let text = collect(ai, Tier::Fast, prompt::search_subject(topic)).await?;
+    Ok(text.trim().trim_matches('"').to_string())
+}
+
 /// Generates the initial outline from the topic, anchored on the confirmed
 /// objective (§6, §6.1, §S4). Light tier (planning).
 pub async fn generate_outline(
@@ -250,6 +258,7 @@ pub async fn grade(
 pub async fn remediate(
     ai: &Ai,
     item_title: &str,
+    chapter_html: &str,
     exercise_html: &str,
     answer: &str,
     unmet: &[&ObjectiveGrade],
@@ -263,7 +272,14 @@ pub async fn remediate(
     let html = collect(
         ai,
         Tier::Robust,
-        prompt::remediation(item_title, exercise_html, answer, &unmet_summary, attempt),
+        prompt::remediation(
+            item_title,
+            chapter_html,
+            exercise_html,
+            answer,
+            &unmet_summary,
+            attempt,
+        ),
     )
     .await?;
     // Rendered here, not at assembly: this prose goes straight into the
@@ -463,8 +479,13 @@ pub(crate) async fn collect(
     Ok(out)
 }
 
-/// Injects `data-exercise-id`/`data-rubric-id` into the first `<form>` (wrapping
-/// the exercise in one if there is none).
+/// Injects `data-exercise-id`/`data-rubric-id`/`data-block-id` into the first
+/// `<form>` (wrapping the exercise in one if there is none). The block id
+/// reuses `exercise_id` verbatim — no separate numbering scheme — so the
+/// exercise is a real, addressable §4.3 content-layer block like any other
+/// (anchoring, the reading line), not a special case. `prose_blocks_only`
+/// still keeps it out of the unsandboxed prose HTML, by the `data-exercise-id`
+/// marker rather than by it lacking a block id.
 fn ensure_form_ids(exercise_html: &str, exercise_id: &str, rubric_id: &str) -> String {
     let with_form = if exercise_html.contains("<form") {
         exercise_html.to_string()
@@ -477,7 +498,7 @@ fn ensure_form_ids(exercise_html: &str, exercise_id: &str, rubric_id: &str) -> S
             let mut s = String::with_capacity(with_form.len() + 64);
             s.push_str(&with_form[..insert_at]);
             s.push_str(&format!(
-                r#" data-exercise-id="{exercise_id}" data-rubric-id="{rubric_id}""#
+                r#" data-exercise-id="{exercise_id}" data-rubric-id="{rubric_id}" data-block-id="{exercise_id}""#
             ));
             s.push_str(&with_form[insert_at..]);
             s
@@ -686,7 +707,9 @@ mod tests {
         // onto content_html with a trailing '\n' separator, then the whole blob
         // goes through ensure_block_ids in one shot. Confirms concatenation
         // yields exactly the blocks from real elements — no phantom empty block
-        // from the '\n' separators, and no ids collide across moves.
+        // from the '\n' separators, and no ids collide across moves. 3 prose
+        // blocks (h2, 2×p) plus the exercise form itself, which also carries
+        // its own real data-block-id (`ensure_form_ids`) — 4 total.
         let explain_move = "<h2>Limits</h2><p>Explanation.</p>";
         let ask_move = "<p>What happens as x approaches the boundary?</p>";
         let content_html = format!("{explain_move}\n{ask_move}\n");
@@ -695,16 +718,16 @@ mod tests {
             "d1",
             "n1",
             &content_html,
-            "<form><input name=\"r\"></form>",
+            "<form><p>What is the limit?</p><input name=\"r\"></form>",
             "ex1",
             "ru1",
         )
         .unwrap();
 
-        assert_eq!(node.content.blocks.len(), 3);
+        assert_eq!(node.content.blocks.len(), 4);
         let ids: std::collections::HashSet<_> =
             node.content.blocks.iter().map(|b| b.id.as_str()).collect();
-        assert_eq!(ids.len(), 3, "block ids must not collide across moves");
+        assert_eq!(ids.len(), 4, "block ids must not collide across moves");
         for block in &node.content.blocks {
             assert!(
                 !block.text.trim().is_empty(),
@@ -718,7 +741,9 @@ mod tests {
         // Prose and remediation go to the app origin and are sanitized, so the
         // model must be told the contract (otherwise it generates something that
         // disappears).
-        let rem_sys = &prompt::remediation("c", "<form></form>", "a", "o1: x", 2)[0].content;
+        let rem_sys = &prompt::remediation("c", "<p>chapter</p>", "<form></form>", "a", "o1: x", 2)
+            [0]
+        .content;
         assert!(rem_sys.contains(prompt::PROSE_HTML_CONTRACT));
 
         // The exercise runs in the sandbox: opposite contract (may use JS, must postMessage).

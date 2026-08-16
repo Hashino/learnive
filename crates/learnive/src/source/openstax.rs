@@ -204,7 +204,7 @@ impl OpenStaxSource {
                 async move {
                     let body = self.get_json(&url).await.ok()?;
                     let html = body.get("content").and_then(Value::as_str)?;
-                    let text = normalize_html(html);
+                    let text = super::normalize_html(html, SECTION_TEXT_CAP);
                     if text.is_empty() {
                         return None;
                     }
@@ -313,31 +313,7 @@ fn section_number(title_html: &str) -> Option<String> {
 
 /// Strips HTML from a short string (a page/section title), collapsing whitespace.
 fn strip_tags(s: &str) -> String {
-    html_to_text(s)
-}
-
-/// Normalizes acquired page HTML to extracted text (§11.1) via `html2text`
-/// (which renders visible text and skips `<style>`/`<script>`), collapsed and
-/// capped so the corpus stays lean (retrieval chunks it further, §10).
-fn normalize_html(html: &str) -> String {
-    let mut text = html_to_text(html);
-    if text.len() > SECTION_TEXT_CAP {
-        let mut end = SECTION_TEXT_CAP;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
-    text
-}
-
-/// HTML → plain text via the `html2text` crate, with whitespace collapsed to
-/// single spaces (the rendered line-wrapping is irrelevant for retrieval).
-fn html_to_text(html: &str) -> String {
-    let rendered = html2text::config::plain()
-        .string_from_read(html.as_bytes(), 100)
-        .unwrap_or_default();
-    rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+    super::normalize_html(s, usize::MAX)
 }
 
 #[cfg(test)]
@@ -348,7 +324,7 @@ mod tests {
     fn normalize_drops_css_keeps_prose() {
         let html = "<style>/* STYLING */ :target{background:#ffc}</style>\
                     <section><p>A limit describes the value a function approaches.</p></section>";
-        let text = normalize_html(html);
+        let text = crate::source::normalize_html(html, SECTION_TEXT_CAP);
         assert!(!text.contains("STYLING"));
         assert!(!text.contains("background"));
         assert!(text.contains("A limit describes the value a function approaches."));

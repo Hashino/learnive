@@ -56,6 +56,9 @@ pub struct AppState {
     pub data_dir: Arc<str>,
     /// Source acquisition backend (§11.1) — swappable (OpenStax by default).
     pub source: Arc<Source>,
+    /// §11.1's free/keyless fallback tier (Wikipedia) — tried when `source`
+    /// finds nothing for a query (`api::cold_start::acquire`).
+    pub fallback_source: Arc<Source>,
     /// Immutable source corpus (§4/§11).
     pub corpus: Corpus,
     /// Retrieval index for grounding (§10). `None` when the embedding model could
@@ -111,6 +114,7 @@ impl AppState {
             secret: Arc::new(secret),
             data_dir: Arc::from(data_dir.as_str()),
             source: Arc::new(api::build_source()),
+            fallback_source: Arc::new(api::build_fallback_source()),
             corpus,
             retriever,
         }

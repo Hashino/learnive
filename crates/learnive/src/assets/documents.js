@@ -183,27 +183,25 @@ async function openDocument(summary) {
   await refreshOutline();
   if (summary.resume_node_id) {
     await openNode(summary.resume_node_id);
+  } else if (state.items.length) {
+    // No node generated yet — the document opens by generating the first
+    // one, rather than parking on a placeholder waiting for a click.
+    generateNode(state.items[0].id);
   } else {
-    el("controls").innerHTML =
-      '<p class="muted">Pick a concept from the outline to begin.</p>';
-    // No node to open, but the card still sits below the typewriter slack.
+    // Outline itself came back empty — genuinely nothing to show yet.
+    el("nodeSections").innerHTML = "";
     parkAtDocumentTop();
   }
 }
 
-// Clears everything tied to the previously open node, so switching
-// documents can never leave the last one's prose, exercise or
-// interaction log on screen.
+// Clears everything tied to the previously open document, so switching
+// documents can never leave the last one's sections on screen.
 function resetNodeView() {
   state.currentId = null;
   state.nodeId = null;
-  exerciseFrame = null;
-  el("prose").innerHTML = "";
-  delete el("prose").dataset.nodeId;
-  el("exercise").innerHTML = "";
-  el("interactions").innerHTML = "";
-  el("result").innerHTML = "";
-  el("controls").innerHTML = "";
+  state.sections.clear();
+  el("nodeSections").innerHTML = "";
+  if (edgeObserver) edgeObserver.disconnect();
   el("planProposal").hidden = true;
   clearReadingLine();
 }

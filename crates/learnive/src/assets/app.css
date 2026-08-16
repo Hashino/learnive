@@ -202,6 +202,7 @@ body {
    in outline.js) — otherwise every node would start with half a screen of
    nothing. Only the document has it; the cold start is a form. */
 #doc {
+  position: relative;
   margin-top: 40vh;
   margin-bottom: 40vh;
 }
@@ -596,8 +597,19 @@ button:disabled {
 #outline li.state-demonstrated:hover {
   color: var(--accent);
 }
-#prose {
+.prose {
   min-height: 2rem;
+}
+
+/* One node's whole section (§9 continuous document) — the reading flow's
+   real unit now, not `#doc` as a whole. Sections are plain siblings inside
+   `#nodeSections`, in outline order; only the divider between them marks
+   where one node ends and the next begins, since the whole point is that
+   it reads as one document, not a stack of cards. */
+.node-section + .node-section {
+  margin-top: 3rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--card-border);
 }
 
 /* --- Layout vocabulary of generated prose (§4.4) ---------------------
@@ -609,31 +621,31 @@ button:disabled {
 
    Deliberately small. The point is that the SHAPE of an explanation can
    carry meaning (an aside, a warning, a side-by-side contrast), not that
-   the model gets a design system: everything here is scoped to #prose and
+   the model gets a design system: everything here is scoped to .prose and
    built from the theme tokens, so generated content cannot drift away
    from the page's own look or imitate the app's chrome. */
 
 /* An aside worth pausing on. `key` and `warning` change only the edge
    colour: the callout is the shape, the modifier is the tone. */
-#prose .callout {
+.prose .callout {
   border-left: 3px solid var(--card-border);
   background: var(--callout-bg);
   border-radius: var(--roundness);
   padding: 0.7rem 0.9rem;
   margin: 1rem 0;
 }
-#prose .callout.key {
+.prose .callout.key {
   border-left-color: var(--accent);
 }
-#prose .callout.warning {
+.prose .callout.warning {
   border-left-color: var(--nord11);
 }
 /* Callouts hold prose, whose first/last child brings its own outer
    margin — without this every callout is padded twice at top and bottom. */
-#prose .callout > :first-child {
+.prose .callout > :first-child {
   margin-top: 0;
 }
-#prose .callout > :last-child {
+.prose .callout > :last-child {
   margin-bottom: 0;
 }
 
@@ -641,32 +653,32 @@ button:disabled {
    to its worked example). auto-fit rather than a fixed count so the model
    can put two or three in without the CSS caring, and so it stacks by
    itself when the column gets narrow. */
-#prose .columns {
+.prose .columns {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   gap: 0.9rem;
   margin: 1rem 0;
 }
-#prose .panel {
+.prose .panel {
   background: var(--panel-bg);
   border: 1px solid var(--card-border);
   border-radius: var(--roundness);
   padding: 0.7rem 0.9rem;
 }
-#prose .panel > :first-child {
+.prose .panel > :first-child {
   margin-top: 0;
 }
-#prose .panel > :last-child {
+.prose .panel > :last-child {
   margin-bottom: 0;
 }
 
 /* A term being defined, and a phrase to make stand out. Both inline, both
    weaker than <strong> — they mark a role, they don't shout. */
-#prose .term {
+.prose .term {
   color: var(--term-fg);
   font-weight: 700;
 }
-#prose .hl {
+.prose .hl {
   background: var(--hl-bg);
   border-radius: 2px;
   padding: 0 0.15em;
@@ -676,13 +688,13 @@ button:disabled {
    that set just for this would be the wrong lever. Superscript-shaped so it
    reads as a reference mark, not as more prose; clickable (opens the source
    panel, `node.js`'s citation click-delegation). */
-#prose cite {
+.prose cite {
   font-style: normal;
   color: var(--accent);
   cursor: pointer;
   border-bottom: 1px dotted currentColor;
 }
-#prose cite:hover {
+.prose cite:hover {
   color: var(--link-hover);
 }
 /* A spawned sub-node (§S8), spliced permanently into the reading flow
@@ -745,16 +757,44 @@ iframe.sandbox {
    remediation history, each visually distinct so the source of a
    given entry (asked, noted, or a failed-check walkthrough) reads at
    a glance. */
-#interactions > div {
+.interactions > div {
   border-left: 3px solid var(--card-border);
   padding-left: 0.75rem;
   margin: 0.75rem 0;
 }
-#interactions > .qa {
+.interactions > .qa {
   border-color: var(--accent);
 }
-#interactions > .annotation {
+.interactions > .annotation {
   border-color: var(--nord13);
+}
+/* One graded submission (§8, §4.3): the frozen exercise as it was asked,
+   the answer given, and the per-objective feedback — the persisted record
+   this container renders is identical to what a reload reconstructs. */
+.attempt-exercise {
+  pointer-events: none;
+  opacity: 0.6;
+  margin-bottom: 0.5rem;
+}
+.attempt-answer {
+  margin-bottom: 0.5rem;
+}
+.attempt-answer pre,
+.attempt-answer code {
+  margin-top: 0.35rem;
+}
+/* One submitted form/artifact field (§8.2's `render_answer`, grading.rs):
+   the exercise's answer schema is whatever the model or the auto-collecting
+   form harness chose, so a multi-field submission needs its field name
+   legible, not just the value. */
+.answer-field + .answer-field {
+  margin-top: 0.5rem;
+}
+.answer-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
 }
 /* MathML (§4.2): the server converts the model's LaTeX at freeze time
    (`learnive_core::render_math`), so math arrives as real MathML and the
@@ -785,11 +825,22 @@ math[display="block"] {
 }
 
 /* Reading line (§9): the block nearest the viewport centre, marked as
-   ephemeral client state — never written into the node (§4.3). */
-#prose [data-block-id].reading-line {
+   ephemeral client state — never written into the node (§4.3). A sibling
+   overlay in `#doc` (`reading.js`'s `updateReadingLine`), not a `::before`
+   painted on the block itself: a block-owned pseudo-element can't bleed
+   past a block that clips its own overflow or paints its own opaque
+   background (`pre`, §14 code blocks — `overflow-x: auto` crops anything
+   that tries to escape sideways, and `--pre-bg` is opaque either way), so
+   it silently failed to show on those. The overlay is a plain sibling
+   positioned/sized off `#doc`'s own box, immune to both. */
+.reading-line-overlay {
+  position: absolute;
+  left: 0;
+  width: 100%;
   background: var(--reading-line);
-  box-shadow: -0.7rem 0 0 var(--reading-line), 0.7rem 0 0 var(--reading-line);
   border-radius: 2px;
+  pointer-events: none;
+  display: none;
 }
 
 /* --- Bottom ask bar (§S6/§9) ----------------------------------------
@@ -895,7 +946,7 @@ math[display="block"] {
 .subnode {
   --answer-pad: 0.9rem;
 }
-#interactions {
+.interactions {
   --answer-pad: 0.75rem;
 }
 .inline-answer > .question {

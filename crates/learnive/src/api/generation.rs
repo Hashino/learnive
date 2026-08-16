@@ -1,7 +1,8 @@
-use super::cold_start::{outline_view, suggested_revisit};
+use super::cold_start::{acquire, outline_view, suggested_revisit};
 use super::grading::sse_frame;
 use super::reading::{
-    finalize, prepare, rung_for, spawn_profile_distillation, tail_chars, topic_and_title,
+    finalize, grounding_for, prepare, rung_for, spawn_profile_distillation, tail_chars,
+    topic_and_title,
 };
 use super::*;
 
@@ -109,6 +110,44 @@ pub async fn generate_node(
                     }
                 }
             };
+
+            if move_type == MoveType::Research {
+                // §S13: acquires grounding for this concept, then loops back
+                // to decide the REAL next move — never reaches `render()`
+                // (see `MoveType::Research`'s doc comment). Capped at one
+                // attempt per node-generation call via `ctx.research_attempted`
+                // (withheld from the menu once true, `movement::prompt::menu`),
+                // so a source that genuinely can't be found costs exactly one
+                // of `MAX_MOVES_PER_NODE`'s slots, never a loop.
+                yield Ok(sse_frame(
+                    "research",
+                    &format!("Looking for sources on {}…", ctx.item_title),
+                ));
+                let outcome =
+                    acquire(&state, &format!("{} {}", ctx.topic, ctx.item_title)).await;
+                let status = match &outcome.source_title {
+                    Some(title) => format!("Found a source: {title}"),
+                    None => "No adequate source found — continuing ungrounded".to_string(),
+                };
+                yield Ok(sse_frame("research", &status));
+                if let Err(e) = event_log.append(
+                    Some(&prep.node_id),
+                    EventKind::MoveGenerated {
+                        move_id: engine::new_id(),
+                        move_type: move_type.to_string(),
+                        tactics: Vec::new(),
+                        rung: format!("{policy:?}"),
+                    },
+                ) {
+                    eprintln!("event log append failed: {e}");
+                }
+                ctx.research_attempted = true;
+                if outcome.grounded {
+                    ctx.grounding =
+                        grounding_for(&state, &format!("{} {}", ctx.topic, ctx.item_title)).await;
+                }
+                continue;
+            }
 
             let generated = match move_type.render() {
                 MoveRender::Streamed => {
@@ -497,11 +536,15 @@ pub struct NodeView {
     /// Frozen content-layer prose (§4.3) — the exercise form is stripped out
     /// (it renders separately, sandboxed) and never re-embedded here.
     content_html: String,
-    /// Whether this node still has an active, answerable exercise (§4.4) —
-    /// `false` once `Demonstrated`, so a solved node reads as done rather
-    /// than re-prompting. The exercise HTML itself is never sent here; the
+    /// The exercise's own §4.3 block id, when it's still active/answerable —
+    /// `None` once `Demonstrated`, so a solved node reads as done rather
+    /// than re-prompting. Doubles as "has an exercise" (client checks
+    /// truthiness) and as the id the client tags its exercise slot with, so
+    /// the reading line (§9) and "ask about this" (§S6) both work on it like
+    /// any other block. The exercise HTML itself is never sent here; the
     /// client fetches it, sandboxed, from `GET .../exercise-frame`.
-    has_exercise: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exercise_block_id: Option<String>,
     interactions: Vec<InteractionView>,
     demonstrated: bool,
     /// This node's outline title (§S8): a sub-node isn't shown in the
@@ -550,6 +593,18 @@ pub async fn get_node(
             .and_then(|json| serde_json::from_str::<RubricSidecar>(&json).ok())
             .map(|sidecar| sidecar.exercise_html)
     };
+    // The exercise's own `data-block-id` (§4.3, `ensure_form_ids` reuses its
+    // exercise_id) — same gate as `exercise_html`: no id once demonstrated, so
+    // a solved node's exercise drops off the reading line along with its form.
+    let exercise_block_id = exercise_html
+        .is_some()
+        .then(|| {
+            node.content
+                .exercise
+                .as_ref()
+                .map(|e| e.exercise_id.clone())
+        })
+        .flatten();
 
     let interactions = node
         .interaction
@@ -587,6 +642,18 @@ pub async fn get_node(
                 child_node_id: None,
                 anchor_block: None,
             },
+            InteractionItem::Thread {
+                id,
+                kind: ThreadKind::Attempt,
+                body_html,
+                ..
+            } => InteractionView {
+                id: id.clone(),
+                kind: "attempt",
+                body_html: body_html.clone(),
+                child_node_id: None,
+                anchor_block: None,
+            },
         })
         .collect();
 
@@ -596,7 +663,7 @@ pub async fn get_node(
 
     Ok(Json(NodeView {
         content_html,
-        has_exercise: exercise_html.is_some(),
+        exercise_block_id,
         interactions,
         demonstrated,
         title,

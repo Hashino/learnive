@@ -115,7 +115,7 @@ pub const EXERCISE_HTML_CONTRACT: &str = "\
 The exercise_html runs isolated in a sandbox iframe (allow-scripts, NO same-origin): \
 it cannot see the token or the page. So it may use HTML/CSS/JS/SVG freely — including \
 interactive visualizations, not just text fields.\n\
-How the answer comes back (§8):\n\
+How the answer comes back:\n\
 - Simple case: wrap the answer fields in a <form> and include exactly ONE submit \
 button, labeled in the SAME language as the content (e.g. \"Enviar resposta\"). \
 The page captures the form submission and collects the fields automatically — do \
@@ -126,7 +126,17 @@ where ARTIFACT is a structured JSON the rubric can grade.\n\
 Never write the grading criteria inside the exercise_html (they are server-only).\n\
 CRITICAL: never reveal the answer. Inputs start empty/unselected; do NOT \
 pre-check, pre-fill, highlight, mark, or hint which option is correct, and do NOT \
-include the solution anywhere in the exercise_html. The student must produce it.";
+include the solution anywhere in the exercise_html. The student must produce it.\n\
+CRITICAL: the student sees exercise_html and NOTHING else — never the rubric/criteria. \
+Any concrete parameter your criteria will grade against (a specific number, range, \
+step, name, scenario — anything more specific than the general objective) MUST be \
+stated in plain language inside exercise_html itself. Never grade on a detail the \
+exercise_html did not literally tell the student.\n\
+CRITICAL: every objective you list must be demonstrable from the ONE task in \
+exercise_html — never add an objective that would need a different task than the one \
+you actually wrote (e.g. don't grade a sum-of-a-range objective against an exercise \
+that only asked to print a range). An objective the exercise never asked for can never \
+be satisfied, and the student would be stuck unable to pass no matter what they answer.";
 
 /// Cold-start objective proposal (§6.1/§S4) — precedes the outline call;
 /// its (possibly user-edited) output anchors it.
@@ -134,12 +144,17 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
             "You are a personal tutor doing the cold start of a living \
-             curriculum (§6.1). Read the learner's raw request and propose a \
+             curriculum. Read the learner's raw request and propose a \
              compact, single-sentence curriculum objective — concrete enough to \
              anchor every future decision, not a restatement of the topic. \
              Scope it precisely: anything the objective does not explicitly \
              name is implicitly out of scope, so do not pad it with a vague \
-             general phrase just to be safe. Also give the document a short \
+             general phrase just to be safe. A simple question gets a simple, \
+             single-clause objective — do not expand it into a checklist of \
+             sub-skills or related operations the learner didn't ask about; \
+             this objective drives how many concepts get planned next, and a \
+             stacked list of verbs plans one node per verb. Also give the \
+             document a short \
              title (2-5 words, same language as the request) — a name the \
              learner will recognize in a list of their documents, not a \
              sentence. Respond ONLY with JSON: \
@@ -152,12 +167,49 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
 pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
-            "You plan a learning curriculum. Given a topic and its confirmed \
-             objective, respond ONLY with a JSON array of strings — the concept \
-             titles, from most basic to advanced, atomic (§6), each one a \
-             transitive prerequisite of the objective. No comments, no markdown.",
+            "You plan the OPENING of a living curriculum — not the whole \
+             subject. The learner asked a specific question; the outline you \
+             produce now is only what answers THAT question directly. Default \
+             to a SINGLE node whose title is the concept itself. Split into more \
+             than one only when the objective bundles genuinely separate things \
+             the learner must independently demonstrate (e.g. distinct \
+             operations named side by side) — never to scaffold prerequisite \
+             building blocks the question didn't ask about. Assume the learner \
+             already has whatever background the question's own phrasing \
+             implies; do not re-teach it 'to build up to' the real answer. Two, \
+             maybe three nodes is already a lot — if you're reaching for four or \
+             more, you are almost certainly planning the whole domain instead of \
+             answering the question. The document grows from the learner's own \
+             follow-up questions and the `plan` move after this, one step at a \
+             time (§9) — it does not need to anticipate them now. Respond ONLY \
+             with a JSON array of strings — the concept titles, most basic \
+             first, each a transitive prerequisite of the objective. No \
+             comments, no markdown.",
         ),
         ChatMessage::user(format!("Topic: {topic}\nCurriculum objective: {objective}")),
+    ]
+}
+
+/// Derives a short catalog-search phrase for source acquisition (§11) from
+/// the learner's own topic/objective — NOT a semantic search: the acquisition
+/// backend matches against textbook titles, so a full question or sentence
+/// (e.g. "how does binary search work?") reliably returns zero hits even for
+/// subjects the catalog covers, while a short general subject phrase (e.g.
+/// "python programming", "algebra") reliably matches. Confirmed live against
+/// the OpenStax catalog API across a dozen topics before writing this prompt.
+pub fn search_subject(topic: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "Name the general SUBJECT or textbook this request belongs to, the \
+             way it would appear in a library catalog or a textbook's own \
+             title — 2 to 4 words, no punctuation, no question, no specific \
+             detail from the request itself. Examples: a question about \
+             appending to a list in Python -> \"python programming\"; a \
+             question about derivatives -> \"calculus\"; a question about \
+             supply and demand -> \"economics\". Respond with ONLY the \
+             subject phrase, nothing else.",
+        ),
+        ChatMessage::user(format!("Request: {topic}")),
     ]
 }
 
@@ -174,9 +226,18 @@ pub fn sources_block(sources: &str) -> String {
 /// Remediation EXPLANATION only (§8.2): a worked, step-by-step solution of the
 /// problem the student just got wrong. It deliberately does NOT propose the
 /// next problem (that is a separate, gradeable sandbox exercise) and must not
-/// leak the answer to that upcoming problem.
+/// leak the answer to that upcoming problem. The system message must read as
+/// pure pedagogy — no internal terminology ("remediation", a spec citation,
+/// "attempt N") in text the model might echo back into its own output: seen
+/// live, 2026-08-15, the model opened its explanation with a heading quoting
+/// this prompt's own former "(§8.2)" back at the learner. `chapter_html` (the
+/// node's own already-taught content, §4.3) is what lets the model tell
+/// "already explained, don't repeat" apart from "genuinely missing, explain
+/// it now" — without it this call had no way to know what the learner had
+/// already read, and would routinely re-teach the whole concept from scratch.
 pub fn remediation(
     item_title: &str,
+    chapter_html: &str,
     exercise_html: &str,
     answer: &str,
     unmet_summary: &str,
@@ -184,18 +245,30 @@ pub fn remediation(
 ) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(format!(
-            "Remediation session (§8.2). The student got the check wrong. Explain \
-             the concept IN THE CONTEXT of this exercise: walk through a worked, \
-             step-by-step solution OF THE PROBLEM THEY JUST MISSED, naming the \
-             misconception their answer suggests. This is attempt {attempt}: the \
-             higher it is, the more concrete and closely scaffolded the walkthrough. \
-             Do NOT pose a new problem here and do NOT state the answer to any \
-             future exercise — a separate practice problem follows.\n\n\
+            "You are a personal tutor. The student just got a check wrong. Write \
+             ONLY the tutor's own next words, continuing the conversation \
+             naturally — never a heading, label, or aside naming this moment \
+             as \"remediation\", a \"session\", an \"attempt\", or any other \
+             internal bookkeeping term; the learner sees a tutor talking to \
+             them, never the machinery behind it.\n\n\
+             Walk through a worked, step-by-step solution OF THE EXACT PROBLEM \
+             THEY JUST MISSED, naming the misconception their answer suggests. \
+             \"Chapter content already taught\" below is what the learner \
+             already read — do NOT re-explain anything it already covers; stay \
+             tightly focused on correcting THIS mistake. Only add new \
+             conceptual explanation for the specific point behind the \
+             student's error if the chapter did not cover it, or covered it \
+             too thinly to account for this particular mistake. The higher \
+             the attempt number below, the more concrete and closely \
+             scaffolded the walkthrough should be. Do NOT pose a new problem \
+             here and do NOT state the answer to any future exercise — a \
+             separate practice problem follows.\n\n\
              {PROSE_HTML_CONTRACT}"
         )),
         ChatMessage::user(format!(
-            "Concept: {item_title}\nExercise: {exercise_html}\n\
-             Student's answer: {answer}\nObjectives not demonstrated:\n{unmet_summary}"
+            "Concept: {item_title}\nChapter content already taught: {chapter_html}\n\
+             Exercise: {exercise_html}\nStudent's answer: {answer}\n\
+             Objectives not demonstrated:\n{unmet_summary}\nAttempt number: {attempt}"
         )),
     ]
 }
@@ -330,7 +403,7 @@ pub fn remediation_exercise(
 ) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(format!(
-            "Generate a NEW practice problem AND its grading rubric TOGETHER (§8), \
+            "Generate a NEW practice problem AND its grading rubric TOGETHER, \
              for a student who just failed a check and was given a worked example. \
              It must test the SAME objective but be a DIFFERENT instance (new \
              numbers/scenario), similar to the failed one — attempt {attempt}: the \

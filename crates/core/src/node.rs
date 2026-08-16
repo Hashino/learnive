@@ -98,6 +98,12 @@ impl ContentLayer {
 pub enum ThreadKind {
     Qa,
     Remediation,
+    /// A graded submission (§8): the frozen exercise, the learner's answer,
+    /// and the per-objective feedback — appended for EVERY submission,
+    /// passing or failing, so what's on screen right after grading and what
+    /// reload reconstructs are always the same record (never a client-only
+    /// rendering with nothing behind it).
+    Attempt,
 }
 
 /// An interaction-layer item (append-only). Always *references* content IDs,
@@ -516,6 +522,7 @@ fn parse_objective_type(s: &str) -> ObjectiveType {
 fn parse_thread_kind(s: &str) -> ThreadKind {
     match s {
         "remediation" => ThreadKind::Remediation,
+        "attempt" => ThreadKind::Attempt,
         _ => ThreadKind::Qa,
     }
 }
@@ -524,6 +531,7 @@ fn thread_kind_str(k: ThreadKind) -> &'static str {
     match k {
         ThreadKind::Qa => "qa",
         ThreadKind::Remediation => "remediation",
+        ThreadKind::Attempt => "attempt",
     }
 }
 

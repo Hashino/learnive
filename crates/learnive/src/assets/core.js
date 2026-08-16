@@ -47,9 +47,13 @@ const state = {
   currentId: null,
   nodeId: null,
   suggestedRevisit: null,
+  // One entry per mounted `.node-section` (nodeId -> {el, prose, exercise,
+  // sentinel, interactions, result, controls, exerciseFrame, ...}) — the
+  // continuous document is however many of these are currently in
+  // `#nodeSections`, not a single swapped view (§9 "a document that
+  // emerges as you interact with it").
+  sections: new Map(),
 };
-// The current exercise's sandbox iframe (for height + theme messages).
-let exerciseFrame = null;
 
 // --- Theme toggle -----------------------------------------------------
 // The head script already applied the theme; here we wire the switch and
@@ -145,6 +149,19 @@ const ALLOWED_CLASSES = new Set([
   "question",
   "about",
   "answer",
+  // Server-side (grading.rs `render_attempt`, §8/§4.3): a frozen graded
+  // submission — the CSS these classes drive (dimming the dead exercise,
+  // color-coding each grade) is what makes the live response and a reload
+  // look identical, not just contain the same text.
+  "attempt-exercise",
+  "attempt-answer",
+  "answer-field",
+  "answer-label",
+  "grades",
+  "grade",
+  "demonstrated",
+  "partial",
+  "not_demonstrated",
 ]);
 
 function sanitizeHtml(html) {

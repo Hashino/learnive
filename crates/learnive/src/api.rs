@@ -230,6 +230,7 @@ mod tests {
             secret: Arc::new(SecretStore::open(&dir)),
             data_dir: Arc::from(dir.to_string_lossy().as_ref()),
             source: Arc::new(Source::Mock(crate::source::MockSource::new())),
+            fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
             corpus: Corpus::open(&dir).unwrap(),
             retriever: None,
         };

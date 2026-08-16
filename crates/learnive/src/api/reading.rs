@@ -16,7 +16,7 @@ use super::generation::NODE_TAIL_BUDGET;
 /// client also sanitizes every `body_html` at render (defense in depth,
 /// `sanitizeHtml` in `assets/core.js`), but nothing here should ever depend on
 /// that: user text is escaped before it is stored, not just before it is shown.
-fn escape_html(s: &str) -> String {
+pub(super) fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -482,6 +482,10 @@ pub(super) fn tail_chars(s: &str, max_chars: usize) -> String {
 pub(super) struct NodePrep {
     pub(super) topic: String,
     pub(super) title: String,
+    /// Fed to `MoveContext::outline_context` (§14 budget: `PRIOR_CONTENT_BUDGET`
+    /// chars) — the titles of prior outline items PLUS an excerpt of what they
+    /// actually said, not titles alone (see `prior_content_context`'s doc
+    /// comment for why titles alone let sibling nodes repeat each other).
     pub(super) context: String,
     pub(super) node_id: String,
     /// Retrieved source passages formatted for the prompt (§10). Empty when the
@@ -551,11 +555,7 @@ pub(super) async fn prepare(
         );
     }
 
-    let context = outline.items[..idx]
-        .iter()
-        .map(|i| i.title.as_str())
-        .collect::<Vec<_>>()
-        .join("; ");
+    let context = prior_content_context(state, doc_id, &outline.items[..idx]);
     let grounding = grounding_for(state, &format!("{} {}", outline.topic, item.title)).await;
     let objective = objective_for(state, doc_id);
     let profile = profile_for(state, doc_id);
@@ -570,6 +570,51 @@ pub(super) async fn prepare(
         profile,
         outline_titles,
     })
+}
+
+/// §14 budget for `prior_content_context`'s excerpt of prior nodes' actual
+/// content — separate from `NODE_TAIL_BUDGET` (the current node's own tail)
+/// because this one spans potentially several prior nodes, not one.
+const PRIOR_CONTENT_BUDGET: usize = 3000;
+
+/// Titles of every prior outline item PLUS a trailing excerpt of what they
+/// actually said (§14 budget: `PRIOR_CONTENT_BUDGET` chars, most recent
+/// content wins under `tail_chars`). Titles alone used to be the whole of
+/// this — a node's `explain`/`test` move knew the PREVIOUS concept was
+/// called "C variable declaration" but nothing about what that node's prose
+/// actually covered, so a later node had no way to notice it was about to
+/// re-teach the same ground (seen live, 2026-08-15: "C assignment operator"
+/// repeating material "C variable declaration" already covered — the two
+/// concepts are inseparable in a real for-loop). Skips any prior item never
+/// generated (locked, or the learner skipped it) — nothing to excerpt.
+fn prior_content_context(
+    state: &AppState,
+    doc_id: &str,
+    prior_items: &[engine::OutlineItem],
+) -> String {
+    let titles = prior_items
+        .iter()
+        .map(|i| i.title.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut covered = String::new();
+    for i in prior_items {
+        if let Ok(node) = state.store.read_node(doc_id, &i.id) {
+            covered.push_str("\n## ");
+            covered.push_str(&i.title);
+            covered.push('\n');
+            covered.push_str(node.content.html.trim());
+            covered.push('\n');
+        }
+    }
+    if covered.is_empty() {
+        return titles;
+    }
+    format!(
+        "Outline so far: {titles}\n\nContent already covered — do NOT repeat this, \
+         write only what is genuinely new:{}",
+        tail_chars(&covered, PRIOR_CONTENT_BUDGET)
+    )
 }
 
 /// Compact objective summary for `MoveContext::objective` (§S4) — a document

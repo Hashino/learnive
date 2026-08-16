@@ -34,10 +34,11 @@ function currentReadingBlock() {
   // with its own paragraphs for the reading line and win by being taller —
   // putting the highlight on the entire answer instead of the line you are
   // on. An answer written before per-paragraph ids has no inner block and
-  // stays its own leaf.
-  const blocks = [...el("prose").querySelectorAll("[data-block-id]")].filter(
-    (b) => !b.querySelector("[data-block-id]"),
-  );
+  // stays its own leaf. Scanned across every mounted section (§9), not
+  // just one — the continuous document can have several on screen at once.
+  const blocks = [
+    ...el("nodeSections").querySelectorAll("[data-block-id]"),
+  ].filter((b) => !b.querySelector("[data-block-id]"));
   if (blocks.length === 0) return null;
   const center = window.innerHeight / 2;
   let best = blocks[0];
@@ -70,8 +71,20 @@ function currentReadingBlockId() {
 // exists so "ask about this" with no selection has a visible referent.
 let readingLineEl = null;
 let readingLineQueued = false;
+let readingLineOverlay = null;
+// A sibling overlay in `#doc`, not a class on the block itself — a block
+// can clip its own overflow or paint its own opaque background (`pre`
+// code blocks), which silently hides a highlight painted on the block.
+function getReadingLineOverlay() {
+  if (!readingLineOverlay) {
+    readingLineOverlay = document.createElement("div");
+    readingLineOverlay.className = "reading-line-overlay";
+    el("doc").prepend(readingLineOverlay);
+  }
+  return readingLineOverlay;
+}
 function clearReadingLine() {
-  if (readingLineEl) readingLineEl.classList.remove("reading-line");
+  if (readingLineOverlay) readingLineOverlay.style.display = "none";
   readingLineEl = null;
 }
 function updateReadingLine() {
@@ -79,10 +92,16 @@ function updateReadingLine() {
   if (el("doc").hidden) return clearReadingLine();
   const best = currentReadingBlock();
   if (best === readingLineEl) return;
-  clearReadingLine();
   if (best) {
-    best.classList.add("reading-line");
+    const overlay = getReadingLineOverlay();
+    const blockRect = best.getBoundingClientRect();
+    const docRect = el("doc").getBoundingClientRect();
+    overlay.style.top = `${blockRect.top - docRect.top}px`;
+    overlay.style.height = `${blockRect.height}px`;
+    overlay.style.display = "block";
     readingLineEl = best;
+  } else {
+    clearReadingLine();
   }
   // The bar's "asking about" label follows the line whenever it isn't
   // pinned to an explicit selection.
@@ -108,7 +127,7 @@ function anchorFromSelection() {
   const node = sel.getRangeAt(0).commonAncestorContainer;
   const el0 = node.nodeType === 1 ? node : node.parentElement;
   const block = el0 && el0.closest("[data-block-id]");
-  if (!block || !el("prose").contains(block)) return null;
+  if (!block || !el("nodeSections").contains(block)) return null;
   const exact = sel.toString();
   if (!exact.trim()) return null;
   const text = block.textContent || "";

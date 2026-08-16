@@ -19,6 +19,30 @@ fn non_empty(s: &str) -> &str {
     if s.trim().is_empty() { "(none yet)" } else { s }
 }
 
+/// Continuity instruction + the node's own verbatim tail (§14 budget),
+/// shared by `generate_move_streamed`/`generate_move` — `decide_move`
+/// already got `node_tail` (line ~90); the content-writing calls didn't,
+/// which is exactly why a node's second move used to open with its own
+/// fresh `<h2>` repeating the concept title, reintroducing it from
+/// scratch as if the first move had never run (seen live, 2026-08-15: a
+/// node's `explain` and `integrate` moves each titled themselves
+/// "Noção de iteração em programação").
+fn continuity_note() -> &'static str {
+    "If \"Node content so far\" below is non-empty, this move is NOT the \
+     first in this node — it continues content the learner already read. \
+     Do NOT reopen with a heading that repeats the node's own concept \
+     title, and do NOT reintroduce the concept as if from scratch: write \
+     the next distinct section, assuming the reader just finished what's \
+     shown."
+}
+
+fn node_so_far_line(ctx: &MoveContext) -> String {
+    format!(
+        "\nNode content so far: {}",
+        non_empty(tail_chars(&ctx.node_tail, 1500))
+    )
+}
+
 fn describe_prior(prior: &[MoveRecord]) -> String {
     if prior.is_empty() {
         return "(none — this is the first move)".to_string();
@@ -48,11 +72,18 @@ fn describe_prior(prior: &[MoveRecord]) -> String {
 /// as the learner's opening prose. So the option is withheld instead of
 /// restraint being requested.
 fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
-    let types = if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
-        "explain, ask, test, profile, confront, integrate, revisit, plan"
+    let mut types = if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
+        "explain, ask, test, profile, confront, integrate, revisit, plan".to_string()
     } else {
-        "explain, ask, test, confront, integrate, revisit, plan"
+        "explain, ask, test, confront, integrate, revisit, plan".to_string()
     };
+    // Offered only when there is genuinely nothing to ground on — same
+    // withhold-don't-ask-restraint pattern as `profile` above (a model told
+    // "research is available" when grounding already exists has no reason
+    // not to pick it "just in case", spending a whole move on nothing).
+    if !ctx.research_attempted && ctx.grounding.trim().is_empty() {
+        types.push_str(", research");
+    }
     match policy {
         AgentPolicy::L1 => format!(
             "Choose the NEXT move from EXACTLY this closed menu: {types}. \
@@ -71,7 +102,7 @@ pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor deciding what to do next in a living \
-             document (§6) — the app is the learner's tutor, not a fixed \
+             document — the app is the learner's tutor, not a fixed \
              exercise machine. {}\n\
              Respond ONLY with JSON choosing the next move: \
              {{\"move_type\":\"...\",\"rationale\":\"one short sentence\"}}.",
@@ -104,25 +135,27 @@ fn tail_chars(s: &str, max_chars: usize) -> &str {
 fn purpose(move_type: MoveType) -> &'static str {
     match move_type {
         MoveType::Explain => {
-            "Write short, atomic explanatory prose for this concept (§6). Do \
+            "Write short, atomic explanatory prose for this concept. Do \
              not include an exercise or ask a question — those are separate \
              moves."
         }
         MoveType::Confront => {
             "Build the STRONGEST counter-argument to the learner's stated \
-             position (§7): be adversarial, not flattering. Distinguish \
+             position: be adversarial, not flattering. Distinguish \
              legitimate disagreement from a misconception — if it looks like \
              the latter, say so and explain why, gently but plainly."
         }
         MoveType::Test => {
             "This move MUST be graded: produce a comprehension check AND its \
-             rubric, locked together (§8). Every 'application' objective needs \
+             rubric, locked together. Every 'application' objective needs \
              at least one transfer=true item for a scenario not covered in the \
-             text."
+             text. If \"Context of what has been taught so far\" shows a prior \
+             node's exercise, this check must probe something genuinely new — \
+             not the same operation on cosmetically different numbers/names."
         }
         MoveType::Profile => {
             "Investigate ONE of the open hypotheses about the learner listed in \
-             the profile context (§7) — a short probing question or a targeted \
+             the profile context — a short probing question or a targeted \
              mini-check whose answer would confirm or refute it. If none is \
              listed (L2 may still pick this move off-menu), probe how the \
              learner approaches THIS concept instead — one short question. \
@@ -130,7 +163,7 @@ fn purpose(move_type: MoveType) -> &'static str {
              produce is what the learner reads."
         }
         MoveType::Plan => {
-            "Revise the outline (§5, non-destructive) ONLY if you have a concrete \
+            "Revise the outline non-destructively ONLY if you have a concrete \
              structural change to propose (reordering, adding, splitting, or \
              removing concepts) — write your rationale as short prose in \"html\" \
              and put the COMPLETE revised ordered list of outline item titles \
@@ -151,8 +184,8 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
     let cite = cite_addendum(&ctx.grounding);
     vec![
         ChatMessage::system(format!(
-            "You are a personal tutor generating a \"{move_type}\" move (§6 \
-             ABI) for a living document. {}\n\n{PROSE_HTML_CONTRACT}\n\n\
+            "You are a personal tutor generating a \"{move_type}\" move \
+             for a living document. {}\n\n{}\n\n{PROSE_HTML_CONTRACT}\n\n\
              {ISLAND_CONTRACT}\n\n{cite}\n\n\
              After your HTML, on its own line, append an HTML comment \
              listing the tactic self-labels you used (e.g. \"analogy\", \
@@ -160,18 +193,20 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
              <!--tactics: label-one, label-two-->. This comment is invisible \
              when rendered and is stripped before storage — it is bookkeeping, \
              not content.",
-            purpose(move_type)
+            purpose(move_type),
+            continuity_note()
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
              Context of what has been taught so far: {}\n\
-             Curriculum objective: {}\nLearner profile: {}{}",
+             Curriculum objective: {}\nLearner profile: {}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
+            node_so_far_line(ctx),
         )),
     ]
 }
@@ -208,8 +243,8 @@ pub fn generate_move(
     };
     vec![
         ChatMessage::system(format!(
-            "You are a personal tutor generating a \"{move_type}\" move (§6 \
-             ABI) for a living document. {rung_note} {}\n\n{contract}\n\n{cite}\n\n\
+            "You are a personal tutor generating a \"{move_type}\" move \
+             for a living document. {rung_note} {}\n\n{}\n\n{contract}\n\n{cite}\n\n\
              Also emit the tactic self-labels you used (e.g. \"analogy\", \
              \"worked-example\", \"interactive-visual\", \"formal-first\") — \
              short kebab-case tags, in the SAME call (§7).\n\n\
@@ -221,16 +256,57 @@ pub fn generate_move(
              \"outline\":[\"...\"]}}. Omit \"objectives\" (or leave it empty) \
              when graded=false. Omit \"outline\" (or leave it empty) for every \
              move type except \"plan\" with a concrete structural change.",
-            purpose(move_type)
+            purpose(move_type),
+            continuity_note()
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
-             Curriculum objective: {}\nLearner profile: {}{}",
+             Context of what has been taught so far: {}\n\
+             Curriculum objective: {}\nLearner profile: {}{}{}",
             ctx.topic,
             ctx.item_title,
+            non_empty(&ctx.outline_context),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
+            node_so_far_line(ctx),
         )),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn menu_text(ctx: &MoveContext) -> String {
+        decide_move(AgentPolicy::L1, ctx)
+            .into_iter()
+            .map(|m| m.content)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// §S13 withhold-don't-ask-restraint: `research` only belongs on the
+    /// menu when there is genuinely nothing to ground on yet, and must
+    /// disappear the moment either grounding exists or one attempt already
+    /// ran this node — otherwise a model "offered" the option with nothing
+    /// to gain picks it anyway (the same failure mode `profile` had before
+    /// it was withheld the same way).
+    #[test]
+    fn research_offered_only_when_ungrounded_and_unattempted() {
+        let bare = MoveContext::default();
+        assert!(menu_text(&bare).contains(", research"));
+
+        let grounded = MoveContext {
+            grounding: "[id: x | loc: sec:1 | Title — Sec]\nSome passage.".into(),
+            ..Default::default()
+        };
+        assert!(!menu_text(&grounded).contains(", research"));
+
+        let attempted = MoveContext {
+            research_attempted: true,
+            ..Default::default()
+        };
+        assert!(!menu_text(&attempted).contains(", research"));
+    }
 }

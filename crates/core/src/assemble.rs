@@ -30,14 +30,23 @@ pub fn ensure_block_ids(inner_html: &str, prefix: &str) -> String {
 }
 
 /// Reconstructs just the frozen prose blocks from a node's stored
-/// `content.html` — every top-level element that carries `data-block-id`,
-/// in document order, re-serialized. Used to split the exercise back out on
-/// read (`api::get_node`, §S5/§4.3): the exercise wrapper `ensure_form_ids`
-/// (`engine.rs`) produces is not always a bare `<form>` (the model may wrap
-/// it, e.g. `<div><p>question</p><form>…`), so finding it by searching for
-/// the `<form` substring leaves that wrapper's non-block prefix dangling in
-/// the split-off prose. Selecting on the id attribute instead of a tag-name
-/// substring is exact regardless of what the model wrapped the form in.
+/// `content.html` — every top-level element that carries `data-block-id`
+/// but not `data-exercise-id`, in document order, re-serialized. Used to
+/// split the exercise back out on read (`api::get_node`, §S5/§4.3): the
+/// exercise wrapper `ensure_form_ids` (`engine.rs`) produces is not always a
+/// bare `<form>` (the model may wrap it, e.g. `<div><p>question</p><form>…`),
+/// so finding it by searching for the `<form` substring leaves that
+/// wrapper's non-block prefix dangling in the split-off prose. Selecting on
+/// the id attribute instead of a tag-name substring is exact regardless of
+/// what the model wrapped the form in.
+///
+/// The exercise form *does* carry its own `data-block-id` (§4.3, reused from
+/// its `exercise_id` — `ensure_form_ids`) so it is addressable for anchoring
+/// and the reading line like any other block. It must still never end up in
+/// `content_html`, which is inserted straight into the app origin unsandboxed
+/// (§4.4) — the exercise only ever renders sandboxed, via its own
+/// `exercise-frame` endpoint — so the `data-exercise-id` marker excludes it
+/// here explicitly, rather than relying on the absence of a block id.
 pub fn prose_blocks_only(content_html: &str) -> String {
     let wrapped = format!(r#"<div id="__lv_root">{content_html}</div>"#);
     let frag = Html::parse_fragment(&wrapped);
@@ -45,7 +54,9 @@ pub fn prose_blocks_only(content_html: &str) -> String {
 
     let mut out = String::new();
     for el in frag.select(&sel) {
-        if el.value().attr("data-block-id").is_some() {
+        let is_block = el.value().attr("data-block-id").is_some();
+        let is_exercise = el.value().attr("data-exercise-id").is_some();
+        if is_block && !is_exercise {
             out.push_str(&el.html());
             out.push('\n');
         }
@@ -103,6 +114,34 @@ pub fn redact_interactive_blocks(content_html: &str) -> String {
             out.push_str("</");
             out.push_str(el.value().name());
             out.push('>');
+        } else {
+            out.push_str(&el.html());
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+/// Freezes a generated exercise (§8) for read-only display in the
+/// interaction layer (§4.3): unwraps a top-level `<form>` so the client's
+/// blanket `sanitizeHtml` FORM removal (it strips the WHOLE subtree, §3.1)
+/// doesn't take the exercise's own question text down with it — an
+/// `EXERCISE_HTML_CONTRACT`-shaped exercise wraps its prose and fields
+/// together in one `<form>`. The fields inside stay (inert once frozen,
+/// already answered) but the tag that would let the block behave like a
+/// live, resubmittable form is gone. A `<form>`-less exercise (the
+/// interactive/bespoke-JS case) passes through untouched — its own
+/// `<script>` still gets stripped downstream, same ceiling as any other
+/// frozen interactive content (§4.4).
+pub fn freeze_exercise_html(exercise_html: &str) -> String {
+    let wrapped = format!(r#"<div id="__lv_root">{exercise_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let sel = Selector::parse("#__lv_root > *").expect("static selector");
+
+    let mut out = String::new();
+    for el in frag.select(&sel) {
+        if el.value().name() == "form" {
+            out.push_str(&el.inner_html());
         } else {
             out.push_str(&el.html());
         }
@@ -181,11 +220,28 @@ mod tests {
         // The model doesn't always wrap the exercise in a bare <form> — a
         // surrounding <div>/<p> is common. A substring split on "<form"
         // would leave that wrapper's opening tags dangling in the prose.
+        // The wrapper itself carries no data-block-id (only the exercise
+        // deep inside it does, in real assembly), so it's excluded on that
+        // basis alone here — the `data-exercise-id` exclusion is covered by
+        // `prose_blocks_only_drops_an_id_tagged_exercise` below.
         let content = r#"<p data-block-id="b1">Hello</p>
 <div><p>Question text</p><form data-exercise-id="ex1"><input></form></div>"#;
         let prose = prose_blocks_only(content);
         assert_eq!(prose, r#"<p data-block-id="b1">Hello</p>"#);
         assert!(!prose.contains("Question text"));
+        assert!(!prose.contains("<form"));
+    }
+
+    #[test]
+    fn prose_blocks_only_drops_an_id_tagged_exercise() {
+        // The exercise form carries its own real data-block-id (§4.3,
+        // `ensure_form_ids` reuses its exercise_id) so it's addressable for
+        // anchoring/the reading line — but it must still never reach
+        // content_html, which renders unsandboxed in the app origin (§4.4).
+        let content = r#"<p data-block-id="b1">Hello</p>
+<form data-block-id="ex1" data-exercise-id="ex1"><input></form>"#;
+        let prose = prose_blocks_only(content);
+        assert_eq!(prose, r#"<p data-block-id="b1">Hello</p>"#);
         assert!(!prose.contains("<form"));
     }
 

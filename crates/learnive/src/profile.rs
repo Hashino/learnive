@@ -212,7 +212,7 @@ mod prompt {
     ) -> Vec<ChatMessage> {
         vec![
             ChatMessage::system(
-                "You distill a learner's evidence profile (§7) from raw \
+                "You distill a learner's evidence profile from raw \
                  intervention-outcome data. Be adversarial against empty \
                  flattery: record ONLY what actually changed behavior (an \
                  outcome difference between tactics), never generic praise \

@@ -29,6 +29,7 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         secret: Arc::new(SecretStore::open(&dir)),
         data_dir: Arc::from(dir.to_string_lossy().as_ref()),
         source: Arc::new(Source::Mock(crate::source::MockSource::new())),
+        fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
         corpus: Corpus::open(&dir).unwrap(),
         retriever: None,
     }
@@ -545,7 +546,7 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     let view: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(view["demonstrated"], serde_json::json!(false));
     assert!(!view["content_html"].as_str().unwrap().is_empty());
-    assert_eq!(view["has_exercise"], serde_json::json!(true));
+    assert!(view["exercise_block_id"].is_string());
     assert!(
         !view["content_html"].as_str().unwrap().contains("<form"),
         "the exercise form must be split out of the prose"
@@ -595,7 +596,7 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     .await;
     let view: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(view["demonstrated"], serde_json::json!(true));
-    assert_eq!(view["has_exercise"], serde_json::json!(false));
+    assert!(view["exercise_block_id"].is_null());
 
     // Still refused after demonstration — demonstrated is not an
     // exemption from the no-regenerate rule.
@@ -1259,7 +1260,7 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
     assert_eq!(sub_view["title"], "Fractions in depth");
     assert!(!sub_view["content_html"].as_str().unwrap().is_empty());
     // Prose-only in this slice: no exercise/gate on a spawned sub-node.
-    assert_eq!(sub_view["has_exercise"], serde_json::json!(false));
+    assert!(sub_view["exercise_block_id"].is_null());
 
     // Present in outline.json (parented, no prerequisites of its own),
     // but never shown in the main-line sidebar.
@@ -1304,6 +1305,120 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
         .find(|i| i["kind"] == "qa" && i["child_node_id"] == sub_id)
         .expect("parent must carry a qa thread pointing at the spawned sub-node");
     assert_eq!(qa["anchor_block"], block_id);
+}
+
+// §S13: `decide_move` at L1 offers `research` only on the menu built from
+// `MoveContext`'s own text — check for it the same way the real prompt
+// does (`, research`), so this test breaks if the menu wording ever
+// changes, rather than silently drifting from what it claims to force.
+fn research_once_responder(req: &crate::ai::ChatRequest) -> String {
+    let text = req
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.contains("choosing the next move") && text.contains(", research") {
+        return r#"{"move_type":"research","rationale":"test: force the research branch"}"#
+            .to_string();
+    }
+    crate::api::demo_responder(req)
+}
+
+/// §S13: the `research` move was, until this test, verified only by code
+/// review — both live trials in the session that built it had cold-start
+/// grounding arrive before generation started, so `decide_move` correctly
+/// never offered it and the branch in `generate_node` (acquire → emit two
+/// status frames → loop back, never `render()`) never actually ran. L0
+/// (this suite's default policy) never offers `research` either — its
+/// fixed rule doesn't know the move exists — so this forces L1 and scripts
+/// `decide_move`'s very first call to pick it, then lets the real
+/// `demo_responder` drive the rest of the node once `research_attempted`
+/// withdraws the option from the menu (`movement::prompt::menu`, covered
+/// unit-level by `research_offered_only_when_ungrounded_and_unattempted`).
+#[tokio::test]
+async fn research_move_acquires_then_resumes_the_real_move_loop() {
+    use crate::ai::{Ai, MockProvider, Models, Provider};
+    use crate::movement::AgentPolicy;
+
+    let ai = Ai::new(
+        Provider::Mock(MockProvider::scripted(research_once_responder)),
+        Models::single("demo"),
+    );
+    let state = test_state_with_ai(ai);
+    // Tests never construct a real retriever (it'd need a model download),
+    // so `acquire` takes its `retriever: None` no-op path — meaning this
+    // also pins the "no adequate source found" branch of the research move,
+    // not just its happy path.
+    state.policy.store(Arc::new(AgentPolicy::L1));
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Both research status frames reached the client...
+    assert_eq!(
+        body.matches("event: research").count(),
+        2,
+        "expected exactly two research status frames:\n{body}"
+    );
+    assert!(body.contains("Looking for sources"));
+    assert!(
+        body.contains("No adequate source found"),
+        "retriever is None in tests, so acquisition must report failure, \
+         not silently claim a source: {body}"
+    );
+    // ...and the loop still closed in a graded check afterward, despite
+    // research eating one of MAX_MOVES_PER_NODE's four slots.
+    assert!(body.contains("event: exercise"));
+    assert!(body.contains("event: done"));
+    assert!(!body.contains("event: error"), "unexpected error:\n{body}");
+
+    // Exactly one research move was logged — never a second, off-menu pick:
+    // `research_attempted` withheld it from every later `decide_move` call
+    // in this same node.
+    let event_log = state.store.event_log(&doc_id).unwrap();
+    let research_moves = event_log
+        .iter()
+        .unwrap()
+        .filter(|e| {
+            matches!(&e.kind, crate::events::EventKind::MoveGenerated { move_type, .. }
+                if move_type == "research")
+        })
+        .count();
+    assert_eq!(research_moves, 1);
+
+    // The node still closed with real content and an active exercise —
+    // research burning a slot didn't leave the node half-built.
+    let (status, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(view["demonstrated"], serde_json::json!(false));
+    assert!(view["exercise_block_id"].is_string());
+    assert!(!view["content_html"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -20,10 +20,32 @@
 pub mod corpus;
 pub mod mock;
 pub mod openstax;
+pub mod wikipedia;
 
 pub use corpus::{Corpus, CorpusError};
 pub use mock::MockSource;
 pub use openstax::OpenStaxSource;
+pub use wikipedia::WikipediaSource;
+
+/// HTML → plain text via the `html2text` crate, whitespace collapsed to
+/// single spaces (rendered line-wrapping is irrelevant for retrieval) and
+/// truncated to `cap` chars so the corpus stays lean (retrieval chunks it
+/// further, §10) — shared by every backend that normalizes HTML sections
+/// (`openstax`, `wikipedia`).
+pub(crate) fn normalize_html(html: &str, cap: usize) -> String {
+    let rendered = html2text::config::plain()
+        .string_from_read(html.as_bytes(), 100)
+        .unwrap_or_default();
+    let mut text = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.len() > cap {
+        let mut end = cap;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
 
 /// What kind of thing a source is — steers how a locator is read (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -43,6 +65,10 @@ pub enum SourceKind {
 #[serde(rename_all = "snake_case", tag = "backend")]
 pub enum Origin {
     OpenStax,
+    /// Wikipedia (§11.1's "internet search" fallback tier) — free, keyless,
+    /// CC BY-SA. See `wikipedia` module docs for why this backend and not a
+    /// general search API.
+    Wikipedia,
     LibreTexts,
     /// Open-access book registries (DOAB/OAPEN) — future backend.
     OpenAccessBook,
@@ -153,10 +179,11 @@ pub enum Source {
     Mock(MockSource),
     /// OpenStax OER textbooks (network) — the default legal source.
     OpenStax(OpenStaxSource),
+    /// Wikipedia (network) — free/keyless fallback, §11.1's "internet search" tier.
+    Wikipedia(WikipediaSource),
     // Future, behind the same facade (kept as doc so the seam is explicit):
     //   LibreTexts(LibreTextsSource),
     //   OpenAccess(OpenAccessSource),// DOAB/OAPEN, arXiv/PMC
-    //   Web(WebSource),              // search fallback
 }
 
 impl Source {
@@ -166,11 +193,17 @@ impl Source {
         Source::OpenStax(OpenStaxSource::new())
     }
 
+    /// The free/keyless fallback backend (§11.1) — see `wikipedia` module docs.
+    pub fn wikipedia() -> Self {
+        Source::Wikipedia(WikipediaSource::new())
+    }
+
     /// Searches the backend for sources relevant to `query`, cheaply (no fetch).
     pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SourceError> {
         match self {
             Source::Mock(m) => m.search(query).await,
             Source::OpenStax(o) => o.search(query).await,
+            Source::Wikipedia(w) => w.search(query).await,
         }
     }
 
@@ -180,6 +213,7 @@ impl Source {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
             Source::OpenStax(o) => o.fetch(hit).await,
+            Source::Wikipedia(w) => w.fetch(hit).await,
         }
     }
 }

@@ -3,11 +3,137 @@
 // islands (§4.4), and the answer → grading → remediation/advance loop
 // (§8, §8.2). Last script on the page, so it is the one that boots the app.
 
-// Finds a content block by id, anywhere in the reading flow — the
-// top-level node's prose or a spliced sub-node's (§S8).
+// Builds one node's `.node-section` shell (§9): its own prose, exercise,
+// read-to-end sentinel, interaction layer and controls — the continuous
+// document's real unit. Registered in `state.sections` but NOT inserted
+// into `#nodeSections` here; callers place it (`insertSectionInOrder`).
+function buildSection(nodeId) {
+  const section = document.createElement("section");
+  section.className = "node-section";
+  section.dataset.nodeId = nodeId;
+  const prose = document.createElement("article");
+  prose.className = "prose";
+  const exercise = document.createElement("div");
+  exercise.className = "exercise";
+  // Scroll-to-end sentinel (§S6 "Ritmo"): crossing this logs the signal
+  // event. Placed after the exercise so it marks the end of the node's
+  // actual content, not the interaction history below.
+  const sentinel = document.createElement("div");
+  sentinel.className = "read-end-sentinel";
+  // Append-only interaction layer (§4.3): attempts + remediation
+  // accumulate here and are never overwritten within a node.
+  const interactions = document.createElement("div");
+  interactions.className = "interactions";
+  // Transient status only (evaluating…, errors).
+  const result = document.createElement("div");
+  result.className = "result";
+  const controls = document.createElement("div");
+  controls.className = "controls";
+  section.append(prose, exercise, sentinel, interactions, result, controls);
+  const rec = {
+    nodeId,
+    el: section,
+    prose,
+    exercise,
+    sentinel,
+    interactions,
+    result,
+    controls,
+    exerciseFrame: null,
+    readEndFired: false,
+    readEndObserver: null,
+  };
+  state.sections.set(nodeId, rec);
+  return rec;
+}
+
+// Places a section's element among the other mounted sections in OUTLINE
+// order, not load order (§S5's graph, plus §S8 lazy neighbor-loading in
+// outline.js, mean a later node can be mounted before an earlier one).
+function insertSectionInOrder(rec) {
+  const idx = state.items.findIndex((it) => it.id === rec.nodeId);
+  let before = null;
+  let bestIdx = Infinity;
+  for (const s of state.sections.values()) {
+    if (s === rec || !s.el.isConnected) continue;
+    const i = state.items.findIndex((it) => it.id === s.nodeId);
+    if (i > idx && i < bestIdx) {
+      bestIdx = i;
+      before = s.el;
+    }
+  }
+  if (before) el("nodeSections").insertBefore(rec.el, before);
+  else el("nodeSections").appendChild(rec.el);
+}
+
+// Scrolls a section's top to just under the reading position — instant
+// for the view "arriving" (an outline click, a freshly generated node),
+// smooth for content flowing in while the learner is already reading
+// (auto-advance appending the next node below the one just graded).
+function scrollToSection(rec, instant) {
+  if (!rec || !rec.el.isConnected) return;
+  const top = rec.el.getBoundingClientRect().top + window.scrollY;
+  window.scrollTo({
+    top: Math.max(0, top - 16),
+    behavior: instant ? "auto" : "smooth",
+  });
+}
+
+// Renders an already-generated node's content into its section — used
+// both for direct navigation (`openNode`/`renderExistingNode`) and for
+// background neighbor-loading (`maybeLoadNeighbor` in outline.js), which
+// must NOT touch `state.currentId`/`state.nodeId`: those track what the
+// learner actually navigated to, not what quietly mounted nearby.
+async function mountExistingSection(id, data) {
+  let rec = state.sections.get(id);
+  if (!rec) {
+    rec = buildSection(id);
+    insertSectionInOrder(rec);
+  }
+  rec.prose.innerHTML = sanitizeHtml(data.content_html);
+  rec.prose.dataset.nodeId = id;
+  hydrateIslands(rec.prose, id);
+  rec.result.innerHTML = "";
+  rec.interactions.innerHTML = "";
+  await hydrateInteractions(data.interactions, rec.interactions);
+  if (data.exercise_block_id) {
+    renderExerciseInto(rec, id);
+    // A real §4.3 content-layer block id (reused from exercise_id) — the
+    // exercise reads on the reading line (§9) and is a valid "ask about
+    // this" anchor (§S6) like any other block, not a client-only stand-in.
+    rec.exercise.dataset.blockId = data.exercise_block_id;
+    rec.controls.innerHTML = "";
+    renderSkipControl(rec);
+    // Only one node has a live gradeable exercise at a time (the graph
+    // gate keeps it that way in practice, §S5) — whichever section that
+    // is becomes the answer-routing target, main nav or background load.
+    state.nodeId = id;
+  } else {
+    rec.exercise.innerHTML = "";
+    rec.exerciseFrame = null;
+    delete rec.exercise.dataset.blockId;
+    // Deliberately NOT auto-advancing here: this is the node a resumed
+    // session lands on most of the time (§S12: resume opens the last node
+    // that exists on disk, which is usually one just completed), and the
+    // sidebar lets a demonstrated node be reopened at any time to reread
+    // it. Either case firing a generation request on its own would spend
+    // the learner's money (BYOK) without them having asked for anything —
+    // auto-advance only happens right after a live grading (§8, below).
+    // No "already demonstrated" label either: the frozen attempt record
+    // (exercise + answer + grade, §4.3) is right there in the interaction
+    // layer above — the document itself says so, nothing left to add.
+    rec.controls.innerHTML = "";
+  }
+  setReadingToolsEnabled(true);
+  armReadToEndWatcher(rec);
+  return rec;
+}
+
+// Finds a content block by id, anywhere in the reading flow — any
+// mounted section's prose or a spliced sub-node's (§S8).
 function blockElement(blockId) {
   return blockId
-    ? el("prose").querySelector('[data-block-id="' + blockId + '"]')
+    ? el("nodeSections").querySelector('[data-block-id="' + blockId + '"]')
     : null;
 }
 
@@ -33,14 +159,17 @@ function answerDepth(elm) {
 // session and after a reload (its paragraphs carry their own ids, from
 // the server). Falls back to the interaction panel only if the anchor is
 // not on the page (a node the answer doesn't belong to).
-function spliceInlineAnswer(blockId, bodyHtml, scroll, id) {
+function spliceInlineAnswer(blockId, bodyHtml, scroll, id, fallbackEl) {
   const div = document.createElement("div");
   div.className = "qa inline-answer";
   div.innerHTML = sanitizeHtml(bodyHtml);
   if (id) div.dataset.blockId = id;
   const anchorEl = blockElement(blockId);
   if (!anchorEl) {
-    el("interactions").appendChild(div);
+    // The anchor's section isn't mounted (shouldn't normally happen —
+    // sections are never unmounted once loaded, §9) — degrade to the end
+    // of the whole document rather than lose the answer.
+    (fallbackEl || el("nodeSections")).appendChild(div);
     return;
   }
   // Depth comes from the answer the anchor belongs to, not from the anchor
@@ -147,7 +276,13 @@ async function hydrateInteractions(interactions, interactionsEl) {
       continue;
     }
     if (item.kind === "qa" && item.anchor_block) {
-      spliceInlineAnswer(item.anchor_block, item.body_html, false, item.id);
+      spliceInlineAnswer(
+        item.anchor_block,
+        item.body_html,
+        false,
+        item.id,
+        interactionsEl,
+      );
       continue;
     }
     const div = document.createElement("div");
@@ -161,11 +296,13 @@ async function hydrateInteractions(interactions, interactionsEl) {
 // scroll-to-end signal once per node. A pure signal today — nothing
 // reacts to it yet (see the server's `EventKind::NodeReadToEnd` doc
 // comment for why gating the next move on it is a separate slice).
-let readEndFired = false;
-let readEndObserver = null;
-function armReadToEndWatcher() {
-  readEndFired = false;
-  if (readEndObserver) readEndObserver.disconnect();
+// Per-section (§9): every mounted node arms its own observer against its
+// own sentinel, independent of whichever node the learner is currently
+// answering — sections are never torn down, so there is no single
+// "current" watcher to swap.
+function armReadToEndWatcher(rec) {
+  rec.readEndFired = false;
+  if (rec.readEndObserver) rec.readEndObserver.disconnect();
   // IntersectionObserver fires once immediately with whatever the
   // current state already is — for a node short enough to fit the
   // viewport, that's an "intersecting" callback before the learner has
@@ -173,38 +310,55 @@ function armReadToEndWatcher() {
   // anything. Ignore that first callback; only a later transition
   // (an actual scroll bringing the sentinel into view) counts.
   let firstCallback = true;
-  readEndObserver = new IntersectionObserver(
+  rec.readEndObserver = new IntersectionObserver(
     (entries) => {
       const wasFirst = firstCallback;
       firstCallback = false;
-      if (readEndFired || !state.nodeId || wasFirst) return;
+      if (rec.readEndFired || wasFirst) return;
       if (entries.some((e) => e.isIntersecting)) {
-        readEndFired = true;
+        rec.readEndFired = true;
         postJson(
-          `/api/documents/${state.docId}/nodes/${state.nodeId}/read-to-end`,
+          `/api/documents/${state.docId}/nodes/${rec.nodeId}/read-to-end`,
           {},
         ).catch(() => {});
       }
     },
     { threshold: 0.1 },
   );
-  readEndObserver.observe(el("readEndSentinel"));
+  rec.readEndObserver.observe(rec.sentinel);
 }
 
-// --- Node generation with streaming (§6, §14) -------------------------
-async function generateNode(id) {
+// --- Node generation with streaming (§6, §14) --------------------------
+// `instant` controls the initial scroll to the new section: instant for
+// the view "arriving" (an outline click on a never-generated node), smooth
+// when it's auto-advance appending the next node right after a live grade
+// (§9 — content flowing in while the learner is already reading, not a
+// jump cut).
+async function generateNode(id, { instant = true } = {}) {
   state.currentId = id;
-  state.nodeId = null;
+  let rec = state.sections.get(id);
+  if (!rec) {
+    rec = buildSection(id);
+    insertSectionInOrder(rec);
+  }
   renderOutline();
-  el("prose").innerHTML = "";
-  el("exercise").innerHTML = "";
-  exerciseFrame = null;
-  el("interactions").innerHTML = "";
-  el("result").innerHTML = "";
-  el("controls").innerHTML = '<p class="muted">generating…</p>';
-  setReadingToolsEnabled(false);
+  rec.prose.innerHTML = "";
+  rec.exercise.innerHTML = "";
+  rec.exerciseFrame = null;
+  rec.interactions.innerHTML = "";
+  rec.result.innerHTML = "";
+  rec.controls.innerHTML = '<p class="muted">generating…</p>';
+  // Deliberately NOT disabling reading tools here (§9 continuous document):
+  // this new section's still-streaming prose has no `data-block-id`s yet
+  // (assigned server-side at finalize, below) so it's already unanchorable
+  // on its own — `currentReadingBlock`/`anchorFromSelection` (reading.js)
+  // skip block-id-less elements by construction. But every OTHER mounted
+  // section is fully readable right now, and the very first call ever made
+  // (cold start, nothing mounted yet) leaves `askEligible` at its initial
+  // `false` regardless — so there's nothing here that actually needs
+  // turning off, only turning on once this node's own content exists.
   clearReadingLine();
-  parkAtDocumentTop();
+  scrollToSection(rec, instant);
 
   let prose = "";
   try {
@@ -220,23 +374,29 @@ async function generateNode(id) {
         // origin, so it must NOT carry script/handlers (§3.1/§4.4). Only
         // interactive blocks run — and only inside the sandbox iframe.
         prose += data;
-        el("prose").innerHTML = sanitizeHtml(prose);
+        rec.prose.innerHTML = sanitizeHtml(prose);
+      } else if (event === "research") {
+        // §S13: the agent is fetching grounding for this concept before
+        // writing it — surfaced as status text over the existing
+        // "generating…" placeholder, not as document content.
+        rec.controls.innerHTML =
+          '<p class="muted">' + escapeHtml(data) + "</p>";
       } else if (event === "exercise") {
-        renderExercise(data);
+        renderExerciseInto(rec, data);
       } else if (event === "plan_proposal") {
         // A `plan` move proposed a structural outline change (§5) —
         // this generation request ends here, unfinished, awaiting the
         // learner's decision (nothing was persisted for this attempt).
-        renderPlanProposal(JSON.parse(data));
+        renderPlanProposal(rec, JSON.parse(data));
       } else if (event === "done") {
         // Empty data means a plan_proposal paused this request instead
         // of finishing a node — renderPlanProposal already set up the
         // approve/reject controls, so leave them alone.
         if (data) {
           state.nodeId = data;
-          el("prose").dataset.nodeId = data;
-          el("controls").innerHTML = "";
-          renderSkipControl();
+          rec.prose.dataset.nodeId = data;
+          rec.controls.innerHTML = "";
+          renderSkipControl(rec);
           // The just-streamed prose has no data-block-id attributes —
           // those are assigned server-side at finalize (§4.3), which
           // only happens once the whole node, including the graded
@@ -248,8 +408,14 @@ async function generateNode(id) {
             .then((resp) => (resp.ok ? resp.json() : null))
             .then((view) => {
               if (view) {
-                el("prose").innerHTML = sanitizeHtml(view.content_html);
-                hydrateIslands(el("prose"), data);
+                rec.prose.innerHTML = sanitizeHtml(view.content_html);
+                hydrateIslands(rec.prose, data);
+                // The exercise iframe was already built off the streamed
+                // "exercise" SSE event, before its real block id existed —
+                // tag it now so it joins the reading line/anchor set too.
+                if (view.exercise_block_id) {
+                  rec.exercise.dataset.blockId = view.exercise_block_id;
+                }
                 // The reading line can only be placed once these
                 // block-tagged elements exist — the streamed prose this
                 // just replaced had no `data-block-id` at all.
@@ -258,15 +424,16 @@ async function generateNode(id) {
             })
             .catch(() => {});
           setReadingToolsEnabled(true);
-          armReadToEndWatcher();
+          armReadToEndWatcher(rec);
           scheduleReadingLine();
+          armEdgeLoading();
         }
       } else if (event === "error") {
         throw new Error(data);
       }
     });
   } catch (err) {
-    el("controls").innerHTML =
+    rec.controls.innerHTML =
       '<p class="error">generation error: ' +
       escapeHtml(String(err)) +
       "</p>";
@@ -276,17 +443,21 @@ async function generateNode(id) {
 // Renders the generated exercise in a SANDBOX iframe (§3.1/§4.4): no
 // allow-same-origin, so the generated HTML never sees the token or the
 // parent DOM; it returns the answer only via postMessage.
-function renderExercise(nodeId) {
+function renderExerciseInto(rec, nodeId) {
   const iframe = buildExerciseIframe(nodeId);
-  el("exercise").replaceChildren(iframe);
-  exerciseFrame = iframe;
+  rec.exercise.replaceChildren(iframe);
+  rec.exerciseFrame = iframe;
 }
 
 // Shows a `plan` move's proposed outline revision (§5 propose→approve,
 // §S4). The rationale is sanitized prose (app origin, same contract as
-// the node's own prose); the proposed titles are plain text.
-function renderPlanProposal(proposal) {
-  el("controls").innerHTML = "";
+// the node's own prose); the proposed titles are plain text. `#planProposal`
+// stays a single shared element (index.html) rather than one per section —
+// a `plan` move can only fire on the frontier node currently generating,
+// which is always the last section, so its fixed position after
+// `#nodeSections` already lines up right where it needs to be.
+function renderPlanProposal(rec, proposal) {
+  rec.controls.innerHTML = "";
   el("planRationale").innerHTML = sanitizeHtml(proposal.html);
   el("planProposedOutline").innerHTML = proposal.proposed
     .map((t) => "<li>" + escapeHtml(t) + "</li>")
@@ -311,7 +482,8 @@ async function decidePlanProposal(approve) {
     state.items = data.items;
     renderOutline();
   } catch (err) {
-    el("result").innerHTML =
+    const rec = state.sections.get(state.currentId);
+    (rec ? rec.result : el("nodeSections")).innerHTML =
       '<span class="error">plan decision failed: ' +
       escapeHtml(String(err)) +
       "</span>";
@@ -395,8 +567,10 @@ window.addEventListener("message", (e) => {
 // --- Answer → grading → remediation/advance (§8, §8.2) ----------------
 async function submitAnswer(answer) {
   if (!state.nodeId) return;
+  const rec = state.sections.get(state.nodeId);
+  if (!rec) return;
   // Transient status only — never wipes the interaction log below.
-  el("result").innerHTML = '<p class="muted">evaluating…</p>';
+  rec.result.innerHTML = '<p class="muted">evaluating…</p>';
   try {
     const resp = await postJson(
       `/api/documents/${state.docId}/nodes/${state.nodeId}/answer`,
@@ -404,39 +578,59 @@ async function submitAnswer(answer) {
     );
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    el("result").innerHTML = "";
-    appendGrades(data.grades);
+    rec.result.innerHTML = "";
+    // The just-answered exercise is retired in favor of its own frozen
+    // record (`attempt_html`) — same string the server just appended to the
+    // interaction layer, so there is no separate live iframe left around to
+    // go stale (the original bug class this replaces) and nothing rendered
+    // here that a reload wouldn't reconstruct identically (§4.3).
+    rec.exercise.innerHTML = "";
+    rec.exerciseFrame = null;
+    appendAttempt(rec, data.attempt_html);
     if (data.advance) {
-      await refreshOutline();
-      el("controls").innerHTML = "";
-      renderNextControl();
+      rec.controls.innerHTML = "";
+      await advanceAfterGrading();
     } else if (data.remediation_html) {
-      appendRemediation(data.remediation_html);
+      appendRemediation(rec, data.remediation_html);
     }
   } catch (err) {
-    el("result").innerHTML =
+    rec.result.innerHTML =
       '<p class="error">error: ' + escapeHtml(String(err)) + "</p>";
   }
 }
 
-// Append-only interaction layer (§4.3): each attempt's grades and each
-// remediation stay in the document, never overwritten within a node.
-function appendGrades(grades) {
+// Append-only interaction layer (§4.3): renders EXACTLY the HTML the server
+// already persisted for this attempt (frozen exercise + answer + feedback) —
+// never a client-only reconstruction that reload couldn't reproduce.
+function appendAttempt(rec, html) {
   const div = document.createElement("div");
-  div.className = "grades";
-  div.innerHTML = (grades || [])
-    .map(
-      (g) =>
-        '<div class="grade ' +
-        g.grade +
-        '"><strong>' +
-        g.grade.replace("_", " ") +
-        "</strong> — " +
-        escapeHtml(g.feedback || "") +
-        "</div>",
-    )
-    .join("");
-  el("interactions").appendChild(div);
+  div.className = "attempt";
+  div.innerHTML = sanitizeHtml(html);
+  rec.interactions.appendChild(div);
+}
+
+// §6/§9: the document keeps writing itself forward as each concept is
+// demonstrated — no manual "next concept" click, and no artificial pause
+// either: the grade feedback just appended stays on the page for good
+// (§4.3, nothing here gets wiped), so scrolling straight on to the next
+// section reads as the document continuing, not as losing what just
+// happened. `openNode`'s smooth scroll (an existing, already-rendered
+// section) or `generateNode`'s (a fresh one streaming in) both carry the
+// grade box past the viewport at reading pace rather than cutting to it.
+async function advanceAfterGrading() {
+  await refreshOutline();
+  const next = state.items.find(
+    (it) => it.id !== state.currentId && it.state === "available",
+  );
+  if (next) {
+    await openNode(next.id, { instant: false });
+  } else {
+    const rec = state.sections.get(state.currentId);
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = "You have completed the current outline.";
+    (rec ? rec.controls : el("nodeSections")).appendChild(p);
+  }
 }
 
 // Remediation (§8.2): a worked EXPLANATION of the missed problem (sanitized
@@ -521,21 +715,12 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-function appendRemediation(explanationHtml) {
-  // Freeze every previously-active exercise iframe — the node's ORIGINAL
-  // check (`exerciseFrame`, still live in #exercise) as well as any earlier
-  // remediation problems — so only the latest is answerable. The server just
-  // overwrote the rubric sidecar in place (§8.2): a stale submission from an
-  // old iframe would silently grade against the NEW problem, producing
-  // remediation that talks about a different exercise than the one the
-  // learner actually answered. The log still reads as the full history
-  // (§4.3) — this only disables the stale iframes, it doesn't remove them.
-  [exerciseFrame, ...document.querySelectorAll("#interactions .remediation .sandbox")]
-    .filter(Boolean)
-    .forEach((f) => {
-      f.style.pointerEvents = "none";
-      f.style.opacity = "0.55";
-    });
+function appendRemediation(rec, explanationHtml) {
+  // Every previously-active exercise iframe is already gone by the time this
+  // runs — `submitAnswer` clears the section's exercise div and appends that
+  // attempt's own frozen record before ever calling here (§4.3), so there is
+  // no stale iframe left to disable: a submission can only ever reach the
+  // ONE iframe this function is about to build.
   const wrap = document.createElement("div");
   wrap.className = "remediation";
   const head = document.createElement("div");
@@ -547,8 +732,10 @@ function appendRemediation(explanationHtml) {
   label.className = "muted";
   label.textContent = "Now try this one:";
   wrap.appendChild(label);
-  wrap.appendChild(buildExerciseIframe(state.nodeId));
-  el("interactions").appendChild(wrap);
+  const iframe = buildExerciseIframe(state.nodeId);
+  rec.exerciseFrame = iframe;
+  wrap.appendChild(iframe);
+  rec.interactions.appendChild(wrap);
 }
 
 boot();

@@ -1,6 +1,12 @@
 use super::reading::read_profile;
 use super::*;
 
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+use crate::retrieval::Retriever;
+use crate::source::Corpus;
+
 // ---------------------------------------------------------------------------
 // Cold start (§6.1, §S4): topic → proposed objective → confirmed objective +
 // outline. Two calls: `propose_objective` is stateless (nothing persisted,
@@ -482,50 +488,128 @@ pub async fn revise_profile(
     }))
 }
 
-/// Background source acquisition + reindex (§11.1/§10). No-op when grounding is
-/// disabled (no retriever). Failures are logged, never surfaced to the user — an
-/// ungrounded document is still fully usable.
-fn spawn_acquisition(state: AppState, topic: String) {
-    let Some(retriever) = state.retriever.clone() else {
-        return;
+/// Outcome of `acquire` — enough for a caller to tell the learner what
+/// happened (the `research` move, §S13) or just log it (cold-start's
+/// background call, `spawn_acquisition`).
+pub(super) struct AcquisitionOutcome {
+    pub grounded: bool,
+    pub source_title: Option<String>,
+}
+
+/// Runs source acquisition + reindex for `query_hint` (§11.1/§10): derives a
+/// short catalog-search subject phrase (`engine::propose_search_subject` —
+/// the backend matches TITLES, not semantic intent, so a full sentence
+/// reliably misses even when the catalog covers the subject, confirmed live
+/// against OpenStax), then tries each configured `Source` in the §11.1
+/// fallback order (OER first, Wikipedia last) with that phrase and, failing
+/// that, the raw hint verbatim. Returns as soon as one attempt lands.
+///
+/// No-op (returns not-grounded) when grounding is disabled (no retriever).
+/// Awaited directly by the `research` move (generation must not proceed
+/// without knowing whether it landed); wrapped in `tokio::spawn` by
+/// `spawn_acquisition` for the fire-and-forget cold-start case, where an
+/// ungrounded document is still fully usable and nothing is waiting on it.
+pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOutcome {
+    let Some(retriever) = &state.retriever else {
+        return AcquisitionOutcome {
+            grounded: false,
+            source_title: None,
+        };
     };
-    let source = state.source.clone();
-    let corpus = state.corpus.clone();
-    tokio::spawn(async move {
-        let hit = match source.search(&topic).await {
-            Ok(hits) => match hits.into_iter().next() {
-                Some(h) => h,
-                None => return,
-            },
-            Err(e) => {
-                eprintln!("acquisition search failed: {e}");
-                return;
+    let ai = state.ai.load_full();
+    let subject = engine::propose_search_subject(&ai, query_hint)
+        .await
+        .unwrap_or_default();
+
+    let mut queries = Vec::with_capacity(2);
+    if !subject.trim().is_empty() {
+        queries.push(subject.as_str());
+    }
+    if !query_hint.trim().is_empty() && query_hint != subject {
+        queries.push(query_hint);
+    }
+
+    for source in [state.source.as_ref(), state.fallback_source.as_ref()] {
+        for query in &queries {
+            if let Some(title) = try_acquire_from(source, &state.corpus, retriever, query).await {
+                return AcquisitionOutcome {
+                    grounded: true,
+                    source_title: Some(title),
+                };
             }
-        };
-        let doc = match source.fetch(&hit).await {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("acquisition fetch failed: {e}");
-                return;
-            }
-        };
-        match corpus.store(&doc) {
-            Ok(true) => {
-                // Reindex so the new source is retrievable for grounding.
-                let mut r = retriever.write().await;
-                if let Err(e) = r.reindex(&corpus) {
-                    eprintln!("reindex after acquisition failed: {e}");
-                } else {
-                    eprintln!("grounded on \"{}\" ({} chunks)", doc.meta.title, r.len());
-                }
-            }
-            Ok(false) => {} // already in the corpus and indexed
-            Err(e) => eprintln!("corpus store failed: {e}"),
         }
+    }
+    AcquisitionOutcome {
+        grounded: false,
+        source_title: None,
+    }
+}
+
+/// One search→fetch→store→reindex attempt against a single backend. `None`
+/// on any failure or empty result — every failure mode here is recoverable
+/// by trying the next query/backend in `acquire`'s chain, so this only logs,
+/// never surfaces an error to the caller.
+async fn try_acquire_from(
+    source: &Source,
+    corpus: &Corpus,
+    retriever: &Arc<RwLock<Retriever>>,
+    query: &str,
+) -> Option<String> {
+    let hit = match source.search(query).await {
+        Ok(hits) => hits.into_iter().next()?,
+        Err(e) => {
+            eprintln!("acquisition search failed: {e}");
+            return None;
+        }
+    };
+    let doc = match source.fetch(&hit).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("acquisition fetch failed: {e}");
+            return None;
+        }
+    };
+    let title = doc.meta.title.clone();
+    match corpus.store(&doc) {
+        Ok(true) => {
+            let mut r = retriever.write().await;
+            if let Err(e) = r.reindex(corpus) {
+                eprintln!("reindex after acquisition failed: {e}");
+                return None;
+            }
+            eprintln!("grounded on \"{title}\" ({} chunks)", r.len());
+            Some(title)
+        }
+        // Already in the corpus and indexed — still a successful ground.
+        Ok(false) => Some(title),
+        Err(e) => {
+            eprintln!("corpus store failed: {e}");
+            None
+        }
+    }
+}
+
+/// Background source acquisition (§11.1/§10), fire-and-forget: cold start
+/// returns the outline immediately and content starts streaming ungrounded;
+/// citations appear once `acquire` lands. Failures are logged only (see
+/// `acquire`'s doc comment) — an ungrounded document is still fully usable.
+fn spawn_acquisition(state: AppState, topic: String) {
+    if state.retriever.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        acquire(&state, &topic).await;
     });
 }
 
-/// The runtime acquisition backend (§11.1): OpenStax OER by default.
+/// The runtime acquisition backends (§11.1): OpenStax OER by default,
+/// Wikipedia as the free/keyless fallback (`AppState::fallback_source`).
 pub fn build_source() -> Source {
     Source::openstax()
+}
+
+/// The §11.1 fallback tier — see `source::wikipedia` module docs for why
+/// this backend and not a general web-search API.
+pub fn build_fallback_source() -> Source {
+    Source::wikipedia()
 }

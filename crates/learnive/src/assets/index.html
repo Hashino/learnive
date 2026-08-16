@@ -123,23 +123,25 @@
         <p id="startStatus" class="muted"></p>
       </section>
 
-      <!-- Living document (§9). -->
+      <!-- Living document (§9): a continuous scroll across every node
+           visited or generated so far, not a single node swapped in and
+           out. Each node owns one `.node-section` (built by
+           `buildSection` in node.js) holding its own prose/exercise/
+           interaction-layer/controls; sections are kept in outline order
+           regardless of the order they were loaded in
+           (`insertSectionInOrder`), and — on a large document — only the
+           current node's neighborhood is fetched up front, with more
+           loaded lazily as the reader nears either edge
+           (`armEdgeLoading`/`maybeLoadNeighbor` in outline.js). -->
       <main id="doc" hidden class="card">
-        <article id="prose"></article>
-        <div id="exercise"></div>
-        <!-- Scroll-to-end sentinel (§S6 "Ritmo"): crossing this logs the
-             signal event. Placed after the exercise so it marks the end of
-             the node's actual content, not the interaction history below. -->
-        <div id="readEndSentinel"></div>
-        <!-- Append-only interaction layer (§4.3): attempts + remediation
-             accumulate here and are never overwritten within a node. -->
-        <div id="interactions"></div>
-        <!-- Transient status only (evaluating…, errors). -->
-        <div id="result"></div>
-        <div id="controls"></div>
+        <div id="nodeSections"></div>
 
         <!-- A `plan` move's proposed outline revision, awaiting approval
-             (§5 propose→approve, §S4). Pauses generation until decided. -->
+             (§5 propose→approve, §S4). Pauses generation until decided.
+             Lives outside `#nodeSections` (never cleared by a section
+             remount) — it only ever appears right after the last section,
+             since a `plan` move can only fire on the frontier node
+             currently being generated, which is always the last one. -->
         <div id="planProposal" hidden class="card">
           <h2>Proposed outline change</h2>
           <div id="planRationale"></div>

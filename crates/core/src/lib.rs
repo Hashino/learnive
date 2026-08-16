@@ -19,8 +19,8 @@ pub mod node;
 
 pub use anchor::{Anchor, QuoteSelector, ResolvedAnchor, resolve_quote};
 pub use assemble::{
-    ensure_block_ids, extract_block_by_id, find_block_html, prose_blocks_only,
-    redact_interactive_blocks,
+    ensure_block_ids, extract_block_by_id, find_block_html, freeze_exercise_html,
+    prose_blocks_only, redact_interactive_blocks,
 };
 pub use math::render_math;
 pub use node::{
