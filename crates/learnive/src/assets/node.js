@@ -433,15 +433,28 @@ async function generateNode(id, { instant = true } = {}) {
           // (only assigned at `finalize`, once the graded move exists)
           // becomes known. Fire-and-forget: nothing here depends on it,
           // and a failure just leaves the already-settled prose in place.
+          //
+          // `view.content_html` is the content layer only (§4.3) — it
+          // carries no trace of any question asked mid-generation (§S6
+          // follow-up made that possible for the first time), since an
+          // answer lives in the *interaction* layer, spliced into the DOM
+          // separately by `/ask`'s own response handler. Replacing
+          // `rec.prose.innerHTML` wholesale would silently erase that
+          // splice, so this re-runs `hydrateInteractions` afterwards —
+          // the same re-splice `mountExistingSection` already does for a
+          // node loaded fresh from disk.
           api(`/api/documents/${state.docId}/nodes/${data}`)
             .then((resp) => (resp.ok ? resp.json() : null))
-            .then((view) => {
+            .then(async (view) => {
               if (view) {
                 rec.prose.innerHTML = sanitizeHtml(view.content_html);
+                rec.prose.dataset.nodeId = data;
                 hydrateIslands(rec.prose, data);
                 if (view.exercise_block_id) {
                   rec.exercise.dataset.blockId = view.exercise_block_id;
                 }
+                rec.interactions.innerHTML = "";
+                await hydrateInteractions(view.interactions, rec.interactions);
                 scheduleReadingLine();
               }
             })
