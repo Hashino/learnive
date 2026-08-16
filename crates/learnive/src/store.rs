@@ -255,6 +255,40 @@ impl Store {
         self.write_node(&node)
     }
 
+    /// In-place edit of one annotation's text (the user's own margin note,
+    /// not a §7/§8 evidence thread) — a deliberate, narrowly-typed exception
+    /// to §4.3 append-only: matches only `InteractionItem::Annotation` with
+    /// `annotation_id`, so a `Thread` (qa/attempt/remediation) id can never
+    /// be rewritten through this path. `StoreError::NotFound` (the node's
+    /// own path) if no annotation with that id exists on the node.
+    pub fn update_annotation(
+        &self,
+        doc_id: &str,
+        node_id: &str,
+        annotation_id: &str,
+        new_body_html: String,
+    ) -> Result<()> {
+        let _guard = self
+            .interaction_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut node = self.read_node(doc_id, node_id)?;
+        let found = node.interaction.iter_mut().any(|item| {
+            if let learnive_core::InteractionItem::Annotation { id, body_html, .. } = item
+                && id == annotation_id
+            {
+                *body_html = new_body_html.clone();
+                true
+            } else {
+                false
+            }
+        });
+        if !found {
+            return Err(StoreError::NotFound(self.node_path(doc_id, node_id)));
+        }
+        self.write_node(&node)
+    }
+
     /// Opens the document's event log (§7.1, `events` module) — `<doc>/events.jsonl`.
     /// Routes through `ensure_safe_id`, the codebase's one path-traversal gate;
     /// `EventLog` has no other way to be constructed with an arbitrary path.

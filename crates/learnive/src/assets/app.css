@@ -756,13 +756,17 @@ iframe.sandbox {
 /* §S6 reading interactions (§9): the append-only Q&A/annotation/
    remediation history, each visually distinct so the source of a
    given entry (asked, noted, or a failed-check walkthrough) reads at
-   a glance. */
-.interactions > div {
+   a glance. `.inline-answer` is excluded: it draws its own two-edge rule
+   bands (below) — stacking this border-left on top of that gradient is
+   what made the left edge read thicker than the right one when a thread's
+   anchor couldn't be found and it fell back in here (§S6's own doc comment
+   on this container). */
+.interactions > div:not(.inline-answer) {
   border-left: 3px solid var(--card-border);
   padding-left: 0.75rem;
   margin: 0.75rem 0;
 }
-.interactions > .qa {
+.interactions > .qa:not(.inline-answer) {
   border-color: var(--accent);
 }
 .interactions > .annotation {

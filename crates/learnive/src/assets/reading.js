@@ -36,9 +36,14 @@ function currentReadingBlock() {
   // on. An answer written before per-paragraph ids has no inner block and
   // stays its own leaf. Scanned across every mounted section (§9), not
   // just one — the continuous document can have several on screen at once.
+  // Also excludes degenerate zero-height blocks (e.g. a demonstrated node's
+  // now-empty exercise slot, kept in the DOM only so an old Q&A thread can
+  // still find its anchor, §S6) — nothing to read, so nothing to land on.
   const blocks = [
     ...el("nodeSections").querySelectorAll("[data-block-id]"),
-  ].filter((b) => !b.querySelector("[data-block-id]"));
+  ].filter(
+    (b) => !b.querySelector("[data-block-id]") && b.getBoundingClientRect().height > 0,
+  );
   if (blocks.length === 0) return null;
   const center = window.innerHeight / 2;
   let best = blocks[0];

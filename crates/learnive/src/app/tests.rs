@@ -596,7 +596,10 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     .await;
     let view: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(view["demonstrated"], serde_json::json!(true));
-    assert!(view["exercise_block_id"].is_null());
+    // The id itself outlives demonstration now (an old Q&A thread anchored
+    // to the exercise must still resolve on reload) — "no live exercise" is
+    // read from `demonstrated`, not from this field going null.
+    assert!(view["exercise_block_id"].is_string());
 
     // Still refused after demonstration — demonstrated is not an
     // exemption from the no-regenerate rule.

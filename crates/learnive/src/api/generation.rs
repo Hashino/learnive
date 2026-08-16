@@ -579,13 +579,13 @@ pub struct NodeView {
     /// Frozen content-layer prose (§4.3) — the exercise form is stripped out
     /// (it renders separately, sandboxed) and never re-embedded here.
     content_html: String,
-    /// The exercise's own §4.3 block id, when it's still active/answerable —
-    /// `None` once `Demonstrated`, so a solved node reads as done rather
-    /// than re-prompting. Doubles as "has an exercise" (client checks
-    /// truthiness) and as the id the client tags its exercise slot with, so
-    /// the reading line (§9) and "ask about this" (§S6) both work on it like
-    /// any other block. The exercise HTML itself is never sent here; the
-    /// client fetches it, sandboxed, from `GET .../exercise-frame`.
+    /// The exercise's own §4.3 block id, whenever the node has an exercise
+    /// at all — present before AND after `demonstrated`, so an old Q&A
+    /// thread anchored to it (§S6) can always re-resolve on reload. It is
+    /// NOT "is the exercise still live": the client derives that from
+    /// `demonstrated` and only renders the sandboxed form (fetched from
+    /// `GET .../exercise-frame`) or grants it the reading line (§9) while
+    /// unsolved. The exercise HTML itself is never sent here.
     #[serde(skip_serializing_if = "Option::is_none")]
     exercise_block_id: Option<String>,
     interactions: Vec<InteractionView>,
@@ -626,39 +626,35 @@ pub async fn get_node(
     let content_html = learnive_core::redact_interactive_blocks(&learnive_core::prose_blocks_only(
         &node.content.html,
     ));
-    let exercise_html = if demonstrated {
-        None
-    } else {
-        state
-            .store
-            .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))
-            .ok()
-            .and_then(|json| serde_json::from_str::<RubricSidecar>(&json).ok())
-            .map(|sidecar| sidecar.exercise_html)
-    };
     // The exercise's own `data-block-id` (§4.3, `ensure_form_ids` reuses its
-    // exercise_id) — same gate as `exercise_html`: no id once demonstrated, so
-    // a solved node's exercise drops off the reading line along with its form.
-    let exercise_block_id = exercise_html
-        .is_some()
-        .then(|| {
-            node.content
-                .exercise
-                .as_ref()
-                .map(|e| e.exercise_id.clone())
-        })
-        .flatten();
+    // exercise_id). NOT gated on `demonstrated` (unlike `exercise_html`): a
+    // Q&A thread asked about the exercise while it was still live (§S6)
+    // stays anchored to this id forever, and re-splicing it on reload needs
+    // the id to keep existing even once the form itself is gone — losing it
+    // used to strand that thread in the bottom interaction panel with the
+    // wrong styling. The client tells "live exercise" from "solved, id kept
+    // only for old anchors" via `demonstrated`, not via this field's
+    // presence.
+    let exercise_block_id = node
+        .content
+        .exercise
+        .as_ref()
+        .map(|e| e.exercise_id.clone());
 
     let interactions = node
         .interaction
         .iter()
         .map(|item| match item {
-            InteractionItem::Annotation { id, body_html, .. } => InteractionView {
+            InteractionItem::Annotation {
+                id,
+                anchor,
+                body_html,
+            } => InteractionView {
                 id: id.clone(),
                 kind: "annotation",
                 body_html: body_html.clone(),
                 child_node_id: None,
-                anchor_block: None,
+                anchor_block: Some(anchor.block_id.clone()),
             },
             InteractionItem::Thread {
                 id,

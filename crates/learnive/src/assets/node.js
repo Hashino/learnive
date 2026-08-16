@@ -94,14 +94,24 @@ async function mountExistingSection(id, data) {
   rec.prose.dataset.nodeId = id;
   hydrateIslands(rec.prose, id);
   rec.result.innerHTML = "";
+  // The exercise slot's own §4.3 block id (reused from exercise_id) has to
+  // be in place *before* hydrating interactions below: an old Q&A thread
+  // anchored to the exercise (§S6) needs `blockElement` to find it to
+  // re-splice inline, even once the node is demonstrated and the form
+  // itself is gone — `exercise_block_id` now outlives demonstration for
+  // exactly this reason (see its doc comment server-side).
+  if (data.exercise_block_id) {
+    rec.exercise.dataset.blockId = data.exercise_block_id;
+  } else {
+    delete rec.exercise.dataset.blockId;
+  }
   rec.interactions.innerHTML = "";
   await hydrateInteractions(data.interactions, rec.interactions);
-  if (data.exercise_block_id) {
+  if (data.exercise_block_id && !data.demonstrated) {
     renderExerciseInto(rec, id);
-    // A real §4.3 content-layer block id (reused from exercise_id) — the
-    // exercise reads on the reading line (§9) and is a valid "ask about
-    // this" anchor (§S6) like any other block, not a client-only stand-in.
-    rec.exercise.dataset.blockId = data.exercise_block_id;
+    // The exercise reads on the reading line (§9) and is a valid "ask
+    // about this" anchor (§S6) like any other block, not a client-only
+    // stand-in — but only while it's still live (above).
     rec.controls.innerHTML = "";
     renderSkipControl(rec);
     // Only one node has a live gradeable exercise at a time (the graph
@@ -111,7 +121,6 @@ async function mountExistingSection(id, data) {
   } else {
     rec.exercise.innerHTML = "";
     rec.exerciseFrame = null;
-    delete rec.exercise.dataset.blockId;
     // Deliberately NOT auto-advancing here: this is the node a resumed
     // session lands on most of the time (§S12: resume opens the last node
     // that exists on disk, which is usually one just completed), and the

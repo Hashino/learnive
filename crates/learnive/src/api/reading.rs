@@ -450,6 +450,33 @@ pub async fn annotate(
     Ok(Json(AnnotateResp { body_html }))
 }
 
+#[derive(Deserialize)]
+pub struct UpdateAnnotationReq {
+    body: String,
+}
+
+/// Edits an existing annotation's text in place (`Store::update_annotation`)
+/// — the one deliberate exception to §4.3 append-only, scoped to the user's
+/// own margin notes. No event log entry: `AnnotationAdded` already tallies
+/// the note's existence for the profile (§7), and an edit isn't a new one.
+pub async fn update_annotation(
+    State(state): State<AppState>,
+    Path((doc_id, node_id, annotation_id)): Path<(String, String, String)>,
+    Json(body): Json<UpdateAnnotationReq>,
+) -> Result<Json<AnnotateResp>, ApiError> {
+    let text = body.body.trim();
+    if text.is_empty() {
+        return Err(ApiError::BadRequest(
+            "annotation must not be empty".to_string(),
+        ));
+    }
+    let body_html = format!("<p>{}</p>", escape_html(text));
+    state
+        .store
+        .update_annotation(&doc_id, &node_id, &annotation_id, body_html.clone())?;
+    Ok(Json(AnnotateResp { body_html }))
+}
+
 #[derive(Serialize)]
 pub struct AckResp {
     ok: bool,

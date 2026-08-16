@@ -14,7 +14,7 @@ use axum::{
         Html, IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tokio_stream::Stream;
 
@@ -177,6 +177,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/documents/{doc}/nodes/{id}/annotate",
             post(api::annotate),
+        )
+        .route(
+            "/api/documents/{doc}/nodes/{id}/annotations/{annotation}",
+            put(api::update_annotation),
         )
         .route(
             "/api/documents/{doc}/nodes/{id}/read-to-end",
