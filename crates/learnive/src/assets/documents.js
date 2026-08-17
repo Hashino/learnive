@@ -2,70 +2,51 @@
 // start (§6.1/§S4) and the document list (resume, switch, rename — §S12).
 
 // --- Cold start (§6.1/§S4) ---------------------------------------------
-// Two steps: propose a compact, editable objective from the raw topic,
-// then confirm (possibly edited) before the outline is generated and
-// the document is created — the objective anchors every later move.
+// One topic submission chains two internal calls — propose_objective (the
+// objective anchors every later move, §5) then propose_prerequisites — with
+// no up-front editing screen in between: the objective stays revisable
+// later, from within the document (§5), not gated at cold start. The
+// learner sees at most one confirmation before generation starts: the
+// prerequisite tree (§S15), and only when it's non-empty.
 let pendingTopic = null;
 // Document name proposed alongside the objective (§S12), carried to
 // `POST /api/documents`; the learner renames it from the sidebar.
 let pendingName = "";
+let pendingObjectiveText = "";
+let pendingPrereqTree = [];
 
 el("startForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const topic = el("topic").value.trim();
   if (!topic) return;
   pendingTopic = topic;
+  el("startForm").hidden = true;
   el("startStatus").textContent = t("status.objective");
   try {
-    const resp = await postJson("/api/objective/propose", { topic });
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    pendingName = data.title || "";
-    el("objectiveText").value = data.text;
-    el("startStatus").textContent = "";
-    el("startForm").hidden = true;
-    el("objectiveConfirm").hidden = false;
-  } catch (err) {
-    el("startStatus").innerHTML =
-      '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
-  }
-});
+    const objResp = await postJson("/api/objective/propose", { topic });
+    if (!objResp.ok) throw new Error(await objResp.text());
+    const objData = await objResp.json();
+    pendingName = objData.title || "";
+    pendingObjectiveText = objData.text;
 
-el("objectiveBackBtn").addEventListener("click", () => {
-  el("objectiveConfirm").hidden = true;
-  el("startForm").hidden = false;
-});
-
-// §S15: the objective's own outline still comes from the "eager
-// generation" guard unchanged — this is a SEPARATE, more generous call
-// proposing what the objective presupposes, shown as a podable tree
-// before anything generates. Skipped entirely (straight to
-// `createLivingDocument`) when the proposal comes back empty, which is
-// the common case for a simple, self-contained request.
-let pendingObjectiveText = "";
-let pendingPrereqTree = [];
-
-el("objectiveConfirmBtn").addEventListener("click", async () => {
-  pendingObjectiveText = el("objectiveText").value.trim();
-  el("startStatus").textContent = t("status.curriculum");
-  try {
-    const resp = await postJson("/api/prerequisites/propose", {
+    el("startStatus").textContent = t("status.curriculum");
+    const prereqResp = await postJson("/api/prerequisites/propose", {
       topic: pendingTopic,
       objective_text: pendingObjectiveText,
     });
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
+    if (!prereqResp.ok) throw new Error(await prereqResp.text());
+    const prereqData = await prereqResp.json();
     el("startStatus").textContent = "";
-    if (!data.tree || data.tree.length === 0) {
+    if (!prereqData.tree || prereqData.tree.length === 0) {
       await createLivingDocument(pendingObjectiveText, []);
       return;
     }
-    pendingPrereqTree = data.tree;
+    pendingPrereqTree = prereqData.tree;
     initPrereqActions(pendingPrereqTree);
     renderPrereqTree();
-    el("objectiveConfirm").hidden = true;
     el("prereqConfirm").hidden = false;
   } catch (err) {
+    el("startForm").hidden = false;
     el("startStatus").innerHTML =
       '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
@@ -73,7 +54,7 @@ el("objectiveConfirmBtn").addEventListener("click", async () => {
 
 el("prereqBackBtn").addEventListener("click", () => {
   el("prereqConfirm").hidden = true;
-  el("objectiveConfirm").hidden = false;
+  el("startForm").hidden = false;
 });
 
 el("prereqConfirmBtn").addEventListener("click", async () => {
@@ -372,7 +353,6 @@ el("newDocBtn").addEventListener("click", () => {
   el("doc").hidden = true;
   el("coldstart").hidden = false;
   el("startForm").hidden = false;
-  el("objectiveConfirm").hidden = true;
   el("prereqConfirm").hidden = true;
   el("startStatus").textContent = "";
   el("topic").value = "";

@@ -109,8 +109,11 @@
     </aside>
 
     <div class="main-container">
-      <!-- Cold start (§6.1): a single generic question, then a confirmable
-           objective (§S4) before the outline is generated. -->
+      <!-- Cold start (§6.1): a single generic question. The objective
+           `propose_objective` derives is used internally (it anchors every
+           future generation decision, §5) but is no longer shown for
+           up-front editing — it stays revisable later, from within the
+           document (§5 versioned revision), not gated here. -->
       <section id="coldstart" class="card">
         <h1 data-i18n="coldstart.title">What are we learning?</h1>
         <form id="startForm">
@@ -118,27 +121,13 @@
           <p><button type="submit" data-i18n="start.button">Start</button></p>
         </form>
 
-        <!-- Objective confirm (§6.1/§S4): the app almost never skips this —
-              it anchors every future generation decision, so it's always
-              shown editable, even for an unambiguous request. -->
-        <div id="objectiveConfirm" hidden>
-          <h2 data-i18n="objective.title">Curriculum objective</h2>
-          <p class="muted" data-i18n="objective.hint">
-            Here's the objective we'll build the curriculum toward — edit it
-            if this isn't quite right.
-          </p>
-          <textarea id="objectiveText" rows="2"></textarea>
-          <p>
-            <button type="button" id="objectiveConfirmBtn" data-i18n="objective.confirm">Confirm</button>
-            <button type="button" id="objectiveBackBtn" data-i18n="objective.back">Back</button>
-          </p>
-        </div>
-
         <!-- §S15: prerequisite tree confirmation — only shown when
-             `propose_prerequisites` returned a non-empty tree. Every
-             branch is podable in one click (skip/review cascade), which is
-             the real backstop against a runaway curriculum, not the
-             proposal prompt alone. -->
+             `propose_prerequisites` returned a non-empty tree. When it
+             comes back empty (the common case for a simple, self-contained
+             request) this is skipped entirely and generation starts
+             directly. Every branch is podable in one click (skip/review
+             cascade), which is the real backstop against a runaway
+             curriculum, not the proposal prompt alone. -->
         <div id="prereqConfirm" hidden>
           <h2 data-i18n="prereq.title">Before we start</h2>
           <p class="muted" data-i18n="prereq.hint">
@@ -149,7 +138,7 @@
           <ul id="prereqTree" class="prereq-tree"></ul>
           <p>
             <button type="button" id="prereqConfirmBtn" data-i18n="prereq.confirm">Confirm</button>
-            <button type="button" id="prereqBackBtn" data-i18n="objective.back">Back</button>
+            <button type="button" id="prereqBackBtn" data-i18n="coldstart.back">Back</button>
           </p>
         </div>
 

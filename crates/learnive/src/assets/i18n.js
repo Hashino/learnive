@@ -24,11 +24,7 @@ const I18N = {
     // Cold start / objective
     "coldstart.title": "What are we learning?",
     "start.button": "Start",
-    "objective.title": "Curriculum objective",
-    "objective.hint":
-      "Here's the objective we'll build the curriculum toward — edit it if this isn't quite right.",
-    "objective.confirm": "Confirm",
-    "objective.back": "Back",
+    "coldstart.back": "Back",
     // Prerequisite tree confirmation (§S15)
     "prereq.title": "Before we start",
     "prereq.hint":
@@ -118,11 +114,7 @@ const I18N = {
     "docs.backOutline": "Voltar ao sumário",
     "coldstart.title": "O que vamos aprender?",
     "start.button": "Começar",
-    "objective.title": "Objetivo do currículo",
-    "objective.hint":
-      "Este é o objetivo para o qual vamos construir o currículo — edite se não estiver certo.",
-    "objective.confirm": "Confirmar",
-    "objective.back": "Voltar",
+    "coldstart.back": "Voltar",
     "prereq.title": "Antes de começar",
     "prereq.hint":
       "Estes parecem ser pré-requisitos para o que você pediu. Marque o que já sabe como revisar ou pular — o resto é ensinado por completo.",
