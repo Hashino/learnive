@@ -181,29 +181,78 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
     ]
 }
 
+/// Runs on `Tier::Fast` (`engine::generate_outline`) — a less capable model
+/// than the tutoring calls, and one this session's live probe
+/// (`engine::tests::outline_quality_probe`, 2026-08-17) caught badly
+/// under-planning broad, textbook-chapter-scale objectives: "termodinâmica
+/// para engenharia" (understand the laws AND apply them to engineering
+/// cycles/systems) collapsed to a single node, "Leis da Termodinâmica" — the
+/// old prompt's "two, maybe three nodes is already a lot" cap actively
+/// forbade the decomposition that objective needed. The few-shot examples
+/// below are the fix a smaller model responds to better than more prose
+/// (confirmed by the same probe): one demonstrating the narrow-question
+/// floor stays low (don't pad, don't scaffold), one a genuine small bundle,
+/// one a broad subject decomposed the way a textbook's own table of
+/// contents would, moderately compressed.
+///
+/// The first example is deliberately in English while the request will
+/// often be Portuguese (this session's live testing so far skews pt-BR) —
+/// the explicit "regardless of the language" instruction below exists
+/// because the first probe run WITHOUT it leaked English into a Portuguese
+/// request's output ("como funciona busca binária" answered "Binary search
+/// over a sorted array"), the model matching the nearest example's language
+/// instead of the live request's.
 pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
+    let request = |t: &str, o: &str| format!("Topic: {t}\nCurriculum objective: {o}");
     vec![
         ChatMessage::system(
-            "You plan the OPENING of a living curriculum — not the whole \
-             subject. The learner asked a specific question; the outline you \
-             produce now is only what answers THAT question directly. Default \
-             to a SINGLE node whose title is the concept itself. Split into more \
-             than one only when the objective bundles genuinely separate things \
-             the learner must independently demonstrate (e.g. distinct \
-             operations named side by side) — never to scaffold prerequisite \
-             building blocks the question didn't ask about. Assume the learner \
-             already has whatever background the question's own phrasing \
-             implies; do not re-teach it 'to build up to' the real answer. Two, \
-             maybe three nodes is already a lot — if you're reaching for four or \
-             more, you are almost certainly planning the whole domain instead of \
-             answering the question. The document grows from the learner's own \
-             follow-up questions and the `plan` move after this, one step at a \
-             time (§9) — it does not need to anticipate them now. Respond ONLY \
-             with a JSON array of strings — the concept titles, most basic \
-             first, each a transitive prerequisite of the objective. No \
-             comments, no markdown.",
+            "You plan the opening outline of a living curriculum, at the \
+             granularity a good textbook's own table of contents would use \
+             for this topic — not the whole field, just the chapter or \
+             section this specific topic and objective cover. Judge the \
+             SCOPE from the objective, not a fixed node count: a narrow, \
+             self-contained question is the size of a single textbook \
+             section and gets ONE node — do not pad it with background \
+             sections its own phrasing doesn't ask for, and do not scaffold \
+             prerequisites the question already assumes the learner has. A \
+             broader subject — the kind that fills a whole textbook chapter \
+             or course unit — gets multiple nodes, one per genuinely \
+             distinct sub-topic a table of contents would list as its own \
+             section, most basic first, each a transitive step toward the \
+             objective; under-planning a broad objective down to one or two \
+             nodes is as much a mistake as over-planning a narrow one. \
+             Compress a little more than a real textbook would, though: \
+             this app's real depth grows from the learner's own follow-up \
+             questions and the `plan` move that revises the outline as they \
+             read (§9), so this initial plan does not need to enumerate \
+             every sub-case, formula variant, or worked-example category — \
+             those emerge later, from questions, not from you now. Write the \
+             titles in the SAME language as the request below, regardless of \
+             what language the examples in this conversation happen to use. \
+             Respond ONLY with a JSON array of strings — the concept titles, \
+             most basic first, each a transitive prerequisite of the \
+             objective. No comments, no markdown.",
         ),
-        ChatMessage::user(format!("Topic: {topic}\nCurriculum objective: {objective}")),
+        ChatMessage::user(request(
+            "how does binary search work",
+            "Understand how binary search finds a target in a sorted array and implement it correctly",
+        )),
+        ChatMessage::assistant(r#"["Binary search over a sorted array"]"#),
+        ChatMessage::user(request(
+            "adicionar e remover itens de uma lista em python",
+            "Aprender a adicionar e remover elementos de uma lista em Python usando seus métodos principais",
+        )),
+        ChatMessage::assistant(
+            r#"["Adicionando elementos a uma lista em Python", "Removendo elementos de uma lista em Python"]"#,
+        ),
+        ChatMessage::user(request(
+            "cálculo integral",
+            "Aprender os fundamentos de cálculo integral: integrais indefinidas, definidas e o teorema fundamental do cálculo",
+        )),
+        ChatMessage::assistant(
+            r#"["Antiderivadas e a integral indefinida", "Técnicas de integração: substituição", "Técnicas de integração: integração por partes", "Somas de Riemann e a integral definida", "O teorema fundamental do cálculo", "Aplicações da integral: área entre curvas e volume de sólidos de revolução"]"#,
+        ),
+        ChatMessage::user(request(topic, objective)),
     ]
 }
 

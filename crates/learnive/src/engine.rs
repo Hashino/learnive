@@ -996,6 +996,76 @@ mod tests {
         assert!(ex_sys.contains("sandbox"));
     }
 
+    /// Live quality-iteration harness for `prompt::outline` — not a
+    /// correctness test (nothing to assert against), a print-and-eyeball
+    /// loop for tuning the prompt against the REAL configured Fast-tier
+    /// provider (the model outline generation actually runs on). Ignored by
+    /// default: needs `.env`'s real key sourced into the shell env (`set -a;
+    /// source .env; set +a`) and spends real tokens. Run with
+    /// `cargo test -p learnive --lib engine::tests::outline_quality_probe \
+    /// -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
+    async fn outline_quality_probe() {
+        let base_url = std::env::var("LEARNIVE_API_BASE_URL").expect("set LEARNIVE_API_BASE_URL");
+        let key = std::env::var("LEARNIVE_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        let fast =
+            std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
+        let robust =
+            std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "openai/gpt-4o".into());
+        let ai = Ai::new(
+            Provider::OpenAiCompat(crate::ai::OpenAiCompat::new(base_url, key)),
+            Models::new(fast, robust),
+        );
+
+        let cases: &[(&str, &str)] = &[
+            (
+                "como funciona busca binária",
+                "Entender como a busca binária encontra um valor em um vetor ordenado e implementá-la corretamente",
+            ),
+            (
+                "adicionar e remover itens de uma lista em python",
+                "Aprender a adicionar e remover elementos de uma lista em Python usando seus métodos principais",
+            ),
+            (
+                // Deliberately NOT the same wording as `prompt::outline`'s
+                // own calculus few-shot example — a near-duplicate here
+                // would just show memorization, not generalization.
+                "integrais",
+                "Entender o que é uma integral e calcular integrais de funções polinomiais simples",
+            ),
+            (
+                "termodinâmica para engenharia",
+                "Compreender as leis da termodinâmica e aplicá-las a ciclos e sistemas de engenharia",
+            ),
+            (
+                "derivada de x ao quadrado",
+                "Calcular a derivada de uma função de potência usando a regra do poder",
+            ),
+            (
+                // A different broad, textbook-chapter-scale domain, to check
+                // the fix generalizes beyond physics/engineering topics.
+                "genética básica",
+                "Entender os princípios da herança genética: genes, alelos, dominância, e as leis de Mendel",
+            ),
+        ];
+
+        for (topic, objective) in cases {
+            let outline = generate_outline(&ai, topic, objective).await;
+            eprintln!("\n=== topic: {topic}\n    objective: {objective}");
+            match outline {
+                Ok(o) => {
+                    for item in &o.items {
+                        eprintln!("  - {}", item.title);
+                    }
+                }
+                Err(e) => eprintln!("  ERROR: {e:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn generate_outline_via_mock() {
         let ai = mock_ai(r#"["Introduction", "Sets", "Functions"]"#);
