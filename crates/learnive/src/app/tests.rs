@@ -935,6 +935,53 @@ async fn interactive_island_never_leaks_raw_script_but_is_served_sandboxed() {
 }
 
 #[tokio::test]
+async fn prerequisite_proposal_degrades_to_empty_tree_on_unparseable_model_output() {
+    // §S15: confirmed live against a real reasoning-heavy fast-tier model
+    // (OpenCode Zen's nemotron-3.5-lightning-free) that the tree-proposal
+    // call can intermittently end its stream with no `content` at all —
+    // every token routed through `delta.reasoning` instead — which
+    // `parse::prereq_tree` can't read. `propose_prerequisites`'s own
+    // contract already treats a well-formed `[]` as a normal, common
+    // answer; a parse failure must degrade to the same empty tree rather
+    // than surface a 502, since the two are indistinguishable in effect
+    // and the caller (the cold-start toggle screen) already has a defined,
+    // safe behavior for "no prerequisites" — skip straight to
+    // `createLivingDocument`.
+    use crate::ai::{Ai, MockProvider, Models, Provider};
+
+    let scripted = Provider::Mock(MockProvider::scripted(|req| {
+        let text = req
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.contains("TREE of prerequisite concepts") {
+            // No JSON at all — the same shape as a stream whose only
+            // content was reasoning prose, never a final `[]`/tree.
+            "I don't think this objective needs any prerequisites.".to_string()
+        } else {
+            crate::api::demo_responder(req)
+        }
+    }));
+    let ai = Ai::new(scripted, Models::single("prereq-parse-failure-demo"));
+    let state = test_state_with_ai(ai);
+
+    let resp = build_router(state)
+        .oneshot(authed(
+            "POST",
+            "/api/prerequisites/propose",
+            r#"{"topic":"o que é epistemologia?","objective_text":"Clarify the conditions that differentiate knowledge from belief."}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["tree"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn reading_interactions_ask_annotate_and_read_to_end() {
     // §S6: selection→question / question-on-the-line (both go through
     // `/ask`, the only difference is whether the client's anchor carries

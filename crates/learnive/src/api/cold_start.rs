@@ -162,7 +162,32 @@ pub async fn propose_prerequisites(
         body.objective_text.clone()
     };
     let ai = state.ai.load_full();
-    let forest = engine::propose_prerequisites(&ai, &body.topic, &objective).await?;
+    // A parse failure degrades to an empty tree rather than a 502: this is
+    // NOT theoretical — a reasoning-heavy fast-tier model (confirmed live,
+    // OpenCode Zen's nemotron-3.5-lightning-free) routes its entire output
+    // through `delta.reasoning` and only emits the final `delta.content` in
+    // one chunk at the very end, sometimes after 1500+ reasoning tokens;
+    // observed live to intermittently end the stream with no content chunk
+    // at all (~1 in 3 calls in a small sample), which `collect()` sees as an
+    // empty string. `engine::propose_prerequisites`'s own doc comment
+    // already treats an empty tree as a normal, common answer — a failure to
+    // read one is indistinguishable in effect from a model that genuinely
+    // found no prerequisites, so this is the same safe default the parser
+    // already applies to a well-formed `[]`, not new fallback behavior. A
+    // real provider/network failure (`EngineError::Provider`) still
+    // surfaces: it means the `Ai` this call shares with `generate_outline`
+    // is unusable, and that failure will resurface moments later regardless.
+    let forest = match engine::propose_prerequisites(&ai, &body.topic, &objective).await {
+        Ok(forest) => forest,
+        Err(crate::engine::EngineError::Parse(msg)) => {
+            eprintln!(
+                "propose_prerequisites: model response could not be read ({msg}) — \
+                 degrading to an empty prerequisite tree"
+            );
+            Vec::new()
+        }
+        Err(e) => return Err(e.into()),
+    };
     let known = known_concepts(&state)?;
     let tree = resolve_prereq_forest(&state, &forest, &known).await;
     Ok(Json(ProposePrereqResp { tree }))
