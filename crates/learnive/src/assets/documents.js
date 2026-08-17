@@ -96,33 +96,37 @@ function renderPrereqNode(node) {
   const childrenHtml = (node.children || []).length
     ? "<ul>" + node.children.map(renderPrereqNode).join("") + "</ul>"
     : "";
-  const actions = ["learn", "review", "skip"]
+  // Order matches the legend ("Skip / Review / Learn") — a single
+  // 3-stage segmented toggle, not three separate radio boxes.
+  const segments = ["skip", "review", "learn"]
     .map(
       (a) =>
-        '<label><input type="radio" name="prereq-' +
-        node.id +
-        '" value="' +
+        '<button type="button" class="prereq-toggle-seg' +
+        (node.action === a ? " active" : "") +
+        '" data-action="' +
         a +
-        '"' +
-        (node.action === a ? " checked" : "") +
-        "> " +
+        '" aria-pressed="' +
+        (node.action === a) +
+        '">' +
         t("prereq.action." + a) +
-        "</label>",
+        "</button>",
     )
     .join("");
   return (
     '<li data-id="' +
     node.id +
     '">' +
+    '<div class="prereq-row">' +
     '<span class="prereq-title">' +
     escapeHtml(node.title) +
     knownNote +
-    "</span> " +
-    '<span class="prereq-actions" data-id="' +
-    node.id +
-    '">' +
-    actions +
     "</span>" +
+    '<div class="prereq-toggle" data-id="' +
+    node.id +
+    '" role="group">' +
+    segments +
+    "</div>" +
+    "</div>" +
     childrenHtml +
     "</li>"
   );
@@ -131,12 +135,12 @@ function renderPrereqNode(node) {
 function renderPrereqTree() {
   el("prereqTree").innerHTML = pendingPrereqTree.map(renderPrereqNode).join("");
   el("prereqTree")
-    .querySelectorAll("input[type=radio]")
-    .forEach((input) => {
-      input.addEventListener("change", () => {
-        const id = input.closest(".prereq-actions").dataset.id;
+    .querySelectorAll(".prereq-toggle-seg")
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.closest(".prereq-toggle").dataset.id;
         const node = findPrereqNode(pendingPrereqTree, id);
-        if (node) cascadePrereqAction(node, input.value);
+        if (node) cascadePrereqAction(node, btn.dataset.action);
         renderPrereqTree();
       });
     });

@@ -611,7 +611,22 @@ button:disabled {
   font-style: italic;
 }
 
-/* §S15 prerequisite tree confirmation (cold start) */
+/* §S15 prerequisite tree confirmation (cold start). Row layout is a flex
+   space-between: the toggle is flex-shrink:0 so its right edge lands on
+   the row's right edge regardless of nesting (only the left side insets,
+   via the nested-`ul` padding below), which is what keeps every toggle in
+   the tree — at any depth — anchored to the same right-hand column. */
+.prereq-legend {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--card-border);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
 .prereq-tree,
 .prereq-tree ul {
   list-style: none;
@@ -626,22 +641,47 @@ button:disabled {
 .prereq-tree li {
   margin: 0.5rem 0;
 }
+.prereq-tree .prereq-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
 .prereq-tree .prereq-title {
   font-weight: 600;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.prereq-tree .prereq-actions {
+.prereq-tree .prereq-toggle {
+  flex: 0 0 auto;
   display: inline-flex;
-  gap: 0.75rem;
-  margin-left: 0.75rem;
-  font-size: 0.85rem;
-  font-weight: 400;
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  overflow: hidden;
+}
+.prereq-tree .prereq-toggle-seg {
+  font: inherit;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
   color: var(--muted);
-}
-.prereq-tree .prereq-actions label {
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--card-border);
+  border-radius: 0;
   cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.prereq-tree .prereq-toggle-seg:last-child {
+  border-right: none;
+}
+.prereq-tree .prereq-toggle-seg:hover:not(.active) {
+  background: var(--card-bg);
+}
+.prereq-tree .prereq-toggle-seg.active {
+  background: var(--btn-bg);
+  color: var(--btn-fg);
 }
 .prose {
   min-height: 2rem;

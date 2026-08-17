@@ -33,6 +33,8 @@ const I18N = {
     "prereq.action.learn": "Learn",
     "prereq.action.review": "Review",
     "prereq.action.skip": "Skip",
+    "prereq.legend.content": "Content",
+    "prereq.legend.actions": "Skip / Review / Learn",
     "prereq.knownIn": "known in {0}",
     "prereq.reviewBadge": "(review)",
     // Plan proposal
@@ -122,6 +124,8 @@ const I18N = {
     "prereq.action.learn": "Aprender",
     "prereq.action.review": "Revisar",
     "prereq.action.skip": "Pular",
+    "prereq.legend.content": "Conteúdo",
+    "prereq.legend.actions": "Pular / Revisar / Aprender",
     "prereq.knownIn": "já aprendido em {0}",
     "prereq.reviewBadge": "(revisão)",
     "plan.title": "Mudança de estrutura proposta",
