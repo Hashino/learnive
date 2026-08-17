@@ -36,6 +36,21 @@ fn continuity_note() -> &'static str {
      shown."
 }
 
+/// §S15 generalization: `topic` (the whole document's subject) and
+/// `item_title` (this node's own, narrower concept) are both handed to
+/// every move with nothing distinguishing their roles — the model can
+/// (and did, live, 2026-08-17) treat the overall topic as content to teach
+/// in THIS node rather than as background. `scope_addendum` below already
+/// names a concrete parent when this node is a prerequisite sub-node; this
+/// note is the general form, present on every move regardless of tree
+/// shape, so the same drift can't happen on a node with no parent at all.
+fn topic_scope_note() -> &'static str {
+    "\"Overall topic\" below is background context ONLY — it tells you \
+     which aspects of THIS node's own concept (\"Concept of this node\") \
+     to emphasize or frame. It is NOT itself something to teach here: \
+     teach the node's own concept, not the document's overall subject."
+}
+
 fn node_so_far_line(ctx: &MoveContext) -> String {
     format!(
         "\nNode content so far: {}",
@@ -255,10 +270,18 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
 /// (stripped server-side, never shown — see the module docs).
 pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
     let cite = cite_addendum(&ctx.grounding);
+    // A `plan` move's whole job is reasoning about the outline/topic as a
+    // structural whole — the "don't teach the overall topic" framing below
+    // would be irrelevant noise there, not a helpful constraint.
+    let scope_note = if move_type == MoveType::Plan {
+        ""
+    } else {
+        topic_scope_note()
+    };
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {}\n\n{}\n\n{PROSE_HTML_CONTRACT}\n\n\
+             for a living document. {}\n\n{}\n\n{scope_note}\n\n{PROSE_HTML_CONTRACT}\n\n\
              {ISLAND_CONTRACT}\n\n{cite}\n\n\
              After your HTML, on its own line, append an HTML comment \
              listing the tactic self-labels you used (e.g. \"analogy\", \
@@ -317,7 +340,7 @@ pub fn generate_move(
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {rung_note} {}\n\n{}\n\n{contract}\n\n{cite}\n\n\
+             for a living document. {rung_note} {}\n\n{}\n\n{}\n\n{contract}\n\n{cite}\n\n\
              Also emit the tactic self-labels you used (e.g. \"analogy\", \
              \"worked-example\", \"interactive-visual\", \"formal-first\") — \
              short kebab-case tags, in the SAME call (§7).\n\n\
@@ -330,7 +353,8 @@ pub fn generate_move(
              when graded=false. Omit \"outline\" (or leave it empty) for every \
              move type except \"plan\" with a concrete structural change.",
             purpose(move_type, ctx),
-            continuity_note()
+            continuity_note(),
+            topic_scope_note()
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
@@ -446,5 +470,23 @@ mod tests {
         let bare = MoveContext::default();
         let bare_explain = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
         assert!(!bare_explain.contains("PREREQUISITE STEP"));
+    }
+
+    /// General form of the same fix, on EVERY node regardless of tree shape
+    /// (not just prerequisite sub-nodes): `topic` must read as background/
+    /// emphasis guidance, never as content to teach in this node. `plan` is
+    /// exempt — its whole job is reasoning about the outline/topic as a
+    /// structural whole, so the note would be noise there.
+    #[test]
+    fn topic_is_framed_as_emphasis_guidance_not_content_to_teach() {
+        let ctx = MoveContext::default();
+        let explain_sys = &generate_move_streamed(MoveType::Explain, &ctx)[0].content;
+        assert!(explain_sys.contains("background context ONLY"));
+
+        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &ctx)[0].content;
+        assert!(test_sys.contains("background context ONLY"));
+
+        let plan_sys = &generate_move_streamed(MoveType::Plan, &ctx)[0].content;
+        assert!(!plan_sys.contains("background context ONLY"));
     }
 }
