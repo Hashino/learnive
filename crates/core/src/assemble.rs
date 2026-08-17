@@ -5,28 +5,61 @@
 //! uniqueness of the IDs (the §4.3 anchoring depends on them). It is dialect
 //! logic, I/O-free, so it lives in the wasm-safe core.
 
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Node, Selector};
 
 /// Assigns a sequential `data-block-id` (`{prefix}{n}`) to each top-level element
 /// of the HTML that does not already have one. Reserializes via `scraper`.
+///
+/// Walks every direct child of the wrapper, not just `> *` elements: a model
+/// can emit a top-level run of bare text with no wrapping tag at all (no
+/// stray `<p>`, nothing), and html5ever's fragment parser does not imply one
+/// under a `<div>` context — that text stays a bare text node, invisible to
+/// an element selector, and silently vanished from the output. Wrap it in a
+/// synthetic `<p>` of its own so it gets an id and survives.
 pub fn ensure_block_ids(inner_html: &str, prefix: &str) -> String {
     let wrapped = format!(r#"<div id="__lv_root">{inner_html}</div>"#);
     let frag = Html::parse_fragment(&wrapped);
-    let sel = Selector::parse("#__lv_root > *").expect("static selector");
+    let root_sel = Selector::parse("#__lv_root").expect("static selector");
+    let root = frag
+        .select(&root_sel)
+        .next()
+        .expect("wrapper div always present");
 
     let mut out = String::new();
     let mut n = 1;
-    for el in frag.select(&sel) {
-        let html = el.html();
-        if el.value().attr("data-block-id").is_some() {
-            out.push_str(&html);
-        } else {
-            out.push_str(&inject_attr(&html, &format!("{prefix}{n}")));
-            n += 1;
+    for child in root.children() {
+        match child.value() {
+            Node::Element(_) => {
+                let el = ElementRef::wrap(child).expect("element node wraps");
+                let html = el.html();
+                if el.value().attr("data-block-id").is_some() {
+                    out.push_str(&html);
+                } else {
+                    out.push_str(&inject_attr(&html, &format!("{prefix}{n}")));
+                    n += 1;
+                }
+                out.push('\n');
+            }
+            Node::Text(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    r#"<p data-block-id="{prefix}{n}">{}</p>"#,
+                    escape_text(trimmed)
+                ));
+                out.push('\n');
+                n += 1;
+            }
+            _ => {}
         }
-        out.push('\n');
     }
     out.trim_end().to_string()
+}
+
+fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;")
 }
 
 /// Reconstructs just the frozen prose blocks from a node's stored
@@ -205,6 +238,31 @@ mod tests {
         assert_eq!(node.content.blocks.len(), 2);
         assert_eq!(node.content.blocks[0].id, "b1");
         assert_eq!(node.content.blocks[1].id, "b2");
+    }
+
+    #[test]
+    fn bare_text_with_no_wrapping_element_is_not_silently_dropped() {
+        // A model can emit a top-level run of prose with no block-level
+        // wrapper at all — not even a stray <p>. html5ever's fragment
+        // parser does not imply one under a <div> context, so an
+        // element-only selector (`> *`) would leave it a bare text node
+        // and drop it on the floor with no error. Confirmed by this test
+        // failing against the old element-only-selector implementation.
+        let inner = "Just some bare text, no tags at all.";
+        let out = ensure_block_ids(inner, "b");
+        assert!(
+            out.contains("Just some bare text"),
+            "bare text was dropped: {out:?}"
+        );
+        assert!(out.contains(r#"data-block-id="b1""#));
+    }
+
+    #[test]
+    fn bare_text_mixed_with_element_blocks_keeps_both_and_orders_ids() {
+        let inner = "Lead-in text.<p>Then a real paragraph.</p>";
+        let out = ensure_block_ids(inner, "b");
+        assert!(out.contains(r#"<p data-block-id="b1">Lead-in text.</p>"#));
+        assert!(out.contains(r#"<p data-block-id="b2">Then a real paragraph.</p>"#));
     }
 
     #[test]

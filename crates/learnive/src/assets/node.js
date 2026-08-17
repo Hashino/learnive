@@ -677,7 +677,11 @@ function appendAttempt(rec, html) {
 // grade box past the viewport at reading pace rather than cutting to it.
 async function advanceAfterGrading() {
   await refreshOutline();
-  const next = state.items.find(
+  // §S15: search the full tree, not just the main line — a demonstrated
+  // node can unlock a sibling prerequisite sub-node next, not just the
+  // next main-line item, and `state.items` excludes every sub-node by
+  // construction (`setOutlineItems`, outline.js).
+  const next = state.allItems.find(
     (it) => it.id !== state.currentId && it.state === "available",
   );
   if (next) {

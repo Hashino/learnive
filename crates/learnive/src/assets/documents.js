@@ -298,10 +298,17 @@ function confirmDeleteDocument(li, d) {
 }
 
 // Opens a document from its summary: restores the outline and resumes
-// reading at the last node that actually exists on disk. Never
-// generates — `resume_node_id` is server-side "last node with a file",
-// so reopening the app costs zero model tokens (§12.2); a document
-// whose first node was never generated just shows its outline.
+// reading at the last node that actually exists on disk.
+// `resume_node_id` is server-side "last MAIN-LINE node with a file"
+// (§S15: it deliberately walks main-line items only), so on a
+// prerequisite-gated document it can come back null even after a
+// sub-node was already generated — the main-line item stays locked
+// until its prerequisites clear. So the fallback below can't assume
+// "no resume_node_id" means "nothing generated": it goes through
+// `openNode`, which reads-if-it-exists and only generates on a 404,
+// rather than calling `generateNode` directly and risking a re-generate
+// of an already-generated node (the regen guard then errors, and the
+// node the user already has disappears from view).
 async function openDocument(summary) {
   if (!summary) return;
   setCurrentDocument(summary.doc_id, summary.name);
@@ -313,12 +320,12 @@ async function openDocument(summary) {
   if (summary.resume_node_id) {
     await openNode(summary.resume_node_id);
   } else if (state.allItems.length) {
-    // No node generated yet — the document opens by generating the first
-    // AVAILABLE one, rather than parking on a placeholder waiting for a
-    // click. §S15: a confirmed prerequisite tree can gate the main line's
-    // own first item, so that isn't necessarily it — walk the full tree.
+    // Nothing resumable on the main line — open the first non-locked
+    // item across the FULL tree (§S15: a prerequisite tree can gate the
+    // main line's own first item). `openNode` itself decides whether
+    // that means reading an existing node or generating a new one.
     const first = state.allItems.find((it) => it.state === "available");
-    if (first) generateNode(first.id);
+    if (first) await openNode(first.id);
   } else {
     // Outline itself came back empty — genuinely nothing to show yet.
     el("nodeSections").innerHTML = "";

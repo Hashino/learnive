@@ -182,12 +182,17 @@ async function openNode(id, opts = {}) {
     if (!resp.ok) throw new Error(await resp.text());
     await renderExistingNode(id, await resp.json(), opts);
   } catch (err) {
+    // Append, never overwrite via innerHTML — this container can already
+    // hold other mounted sections (§S15: a prerequisite tree can have
+    // several generated nodes on screen at once), and replacing its
+    // innerHTML would wipe them all out from under the user for one
+    // node's failure.
     const rec = state.sections.get(state.currentId);
-    (rec ? rec.controls : el("nodeSections")).innerHTML =
-      '<p class="error">' +
-      t("open.failed") +
-      escapeHtml(String(err)) +
-      "</p>";
+    const target = rec ? rec.controls : el("nodeSections");
+    const p = document.createElement("p");
+    p.className = "error";
+    p.textContent = t("open.failed") + String(err);
+    target.appendChild(p);
   }
 }
 
