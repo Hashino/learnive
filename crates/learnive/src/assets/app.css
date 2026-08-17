@@ -1017,7 +1017,7 @@ math[display="block"] {
 .annotation-plus {
   position: absolute;
   left: 100%;
-  margin-left: calc(var(--card-pad-x) + 0.5rem);
+  margin-left: calc(var(--card-pad-x) + 0.25rem);
   pointer-events: auto;
   /* `top` (set from JS) is the target paragraph's vertical *centre* — the
      translate centres the note/button on it regardless of the note's own
@@ -1058,7 +1058,7 @@ math[display="block"] {
 .annotation-plus {
   /* Hugs the card's real border — just clear of it, not out at the note's
      distance: it's an affordance on the text, not a note of its own. */
-  margin-left: calc(var(--card-pad-x) + 0.25rem);
+  margin-left: calc(var(--card-pad-x) + 0.125rem);
   width: 1.7rem;
   height: 1.7rem;
   border-radius: var(--roundness);
