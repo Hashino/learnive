@@ -1006,4 +1006,300 @@ mod tests {
             .unwrap_err();
         assert!(matches!(done, EngineError::NoNextMove));
     }
+
+    /// Manual validation for the `EXERCISE_HTML_CONTRACT` self-consistency
+    /// clause (engine/prompt.rs): generates a `Test` move for 10 distinct
+    /// topics against the REAL configured provider (`.env`) and prints
+    /// exercise_html + rubric for each so a human (or another LLM pass) can
+    /// judge whether the rubric's criteria actually match what the exercise
+    /// asks. Not part of the normal suite — no oracle to assert against, and
+    /// it spends real API budget. Run with:
+    /// `cargo test -p learnive --lib movement::tests::live_exercise_rubric_consistency_check -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "hits the real configured AI provider; run manually, see doc comment"]
+    async fn live_exercise_rubric_consistency_check() {
+        // `cargo test` sets cwd to this crate's manifest dir, not the
+        // workspace root where `.env` actually lives (unlike `cargo run`,
+        // invoked from the root) — resolve it explicitly.
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-live-check-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, policy) = crate::api::build_ai(&config, &secret);
+
+        let topics: [(&str, &str); 10] = [
+            ("Photosynthesis", "the light-dependent reactions"),
+            ("French Revolution", "the causes of the 1789 uprising"),
+            ("Python recursion", "writing a recursive factorial function"),
+            ("Thermodynamics", "the first law of thermodynamics"),
+            ("Linear algebra", "computing a matrix determinant"),
+            ("Cellular respiration", "the stages of glycolysis"),
+            ("Probability", "expected value of a discrete random variable"),
+            ("Roman history", "the causes of the fall of the Republic"),
+            ("SQL", "writing an INNER JOIN across two tables"),
+            ("Macroeconomics", "the effect of a tariff on consumer surplus"),
+        ];
+
+        for (topic, item_title) in topics {
+            let ctx = MoveContext {
+                topic: topic.to_string(),
+                item_title: item_title.to_string(),
+                objective: format!("Demonstrate understanding of {item_title}."),
+                ..Default::default()
+            };
+            println!("\n=== TOPIC: {topic} ===");
+            match generate_move(&ai, policy, MoveType::Test, &ctx).await {
+                Ok(mv) => {
+                    println!("--- exercise_html ---\n{}", mv.html);
+                    println!(
+                        "--- rubric ---\n{}",
+                        serde_json::to_string_pretty(&mv.rubric).unwrap()
+                    );
+                }
+                Err(e) => println!("--- ERROR: {e} ---"),
+            }
+        }
+    }
+
+    /// Latency investigation: for a real `Explain` move under L1/L2, times
+    /// `decide_move` (a full, non-streamed round trip to pick the move type)
+    /// separately from time-to-first-token of the subsequent
+    /// `generate_move_stream` call, against the REAL configured provider.
+    /// Answers "where does the >1min wall time actually go" instead of
+    /// guessing. Not part of the normal suite. Run with:
+    /// `cargo test -p learnive movement::tests::live_time_to_first_token -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "hits the real configured AI provider; run manually, see doc comment"]
+    async fn live_time_to_first_token() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-live-timing-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, policy) = crate::api::build_ai(&config, &secret);
+        println!("policy rung = {policy:?}");
+
+        for round in 1..=3 {
+            let ctx = MoveContext {
+                topic: "Photosynthesis".into(),
+                item_title: "the light-dependent reactions".into(),
+                objective: "Demonstrate understanding of the light-dependent reactions.".into(),
+                ..Default::default()
+            };
+
+            let t0 = std::time::Instant::now();
+            let move_type = match decide_move(&ai, policy, &ctx).await {
+                Ok(mt) => mt,
+                Err(e) => {
+                    println!("round {round}: decide_move ERROR after {:?}: {e}", t0.elapsed());
+                    continue;
+                }
+            };
+            let t1 = std::time::Instant::now();
+            println!(
+                "round {round}: decide_move -> {move_type:?} in {:?}",
+                t1 - t0
+            );
+
+            if move_type.render() != MoveRender::Streamed {
+                println!("round {round}: decided move is structured, not streamed — skipping TTFT");
+                continue;
+            }
+
+            let mut tokens = match generate_move_stream(&ai, move_type, &ctx).await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("round {round}: generate_move_stream ERROR after {:?}: {e}", t1.elapsed());
+                    continue;
+                }
+            };
+            let t2 = std::time::Instant::now();
+            println!("round {round}: stream() call itself returned in {:?}", t2 - t1);
+            match tokens.next().await {
+                Some(Ok(first)) => {
+                    let t3 = std::time::Instant::now();
+                    println!(
+                        "round {round}: first token after {:?} (total since decide_move start: {:?}) — {:?}",
+                        t3 - t2,
+                        t3 - t0,
+                        first.chars().take(40).collect::<String>()
+                    );
+                }
+                Some(Err(e)) => println!("round {round}: stream ERROR: {e}"),
+                None => println!("round {round}: stream ended with no tokens"),
+            }
+        }
+    }
+
+    /// Dumps the REAL request bodies `decide_move` and an `Ask` move's
+    /// streamed generation would send — no network — so they can be curled
+    /// directly against the provider to isolate raw provider TTFB from
+    /// app-side overhead, with realistic (not toy) prompt sizes.
+    #[test]
+    #[ignore = "writes to /tmp for a manual curl comparison, see doc comment"]
+    fn dump_real_request_bodies() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let fast = std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_default();
+        let robust = std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_default();
+
+        let ctx = MoveContext {
+            topic: "Photosynthesis".into(),
+            item_title: "the light-dependent reactions".into(),
+            objective: "Demonstrate understanding of the light-dependent reactions.".into(),
+            ..Default::default()
+        };
+
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            model: &'a str,
+            messages: &'a [crate::ai::ChatMessage],
+            stream: bool,
+        }
+
+        let decide = prompt::decide_move(AgentPolicy::L1, &ctx);
+        println!(
+            "decide_move chars: {}",
+            decide.iter().map(|m| m.content.len()).sum::<usize>()
+        );
+        std::fs::write(
+            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_decide_move.json",
+            serde_json::to_string(&Body {
+                model: &fast,
+                messages: &decide,
+                stream: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ask = prompt::generate_move_streamed(MoveType::Ask, &ctx);
+        println!(
+            "ask chars: {}",
+            ask.iter().map(|m| m.content.len()).sum::<usize>()
+        );
+        std::fs::write(
+            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_ask.json",
+            serde_json::to_string(&Body {
+                model: &fast,
+                messages: &ask,
+                stream: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let explain = prompt::generate_move_streamed(MoveType::Explain, &ctx);
+        std::fs::write(
+            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_explain.json",
+            serde_json::to_string(&Body {
+                model: &robust,
+                messages: &explain,
+                stream: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Dumps REAL `Test` move request bodies (exercise+rubric contract) for
+    /// 5 distinct topics, one JSON file each — no network, no `reasoning`
+    /// field (added externally per condition for the reasoning-effort A/B
+    /// comparison). See doc comment on `dump_real_request_bodies`.
+    #[test]
+    #[ignore = "writes to /tmp for a manual reasoning-effort comparison"]
+    fn dump_test_move_requests() {
+        crate::load_dotenv(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env"));
+        let fast = std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_default();
+
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            model: &'a str,
+            messages: &'a [crate::ai::ChatMessage],
+            stream: bool,
+        }
+
+        let topics: [(&str, &str); 5] = [
+            ("Photosynthesis", "the light-dependent reactions"),
+            ("Linear algebra", "computing a matrix determinant"),
+            ("Cellular respiration", "the stages of glycolysis"),
+            ("Thermodynamics", "the first law of thermodynamics"),
+            ("Probability", "expected value of a discrete random variable"),
+        ];
+
+        for (i, (topic, item_title)) in topics.iter().enumerate() {
+            let ctx = MoveContext {
+                topic: topic.to_string(),
+                item_title: item_title.to_string(),
+                objective: format!("Demonstrate understanding of {item_title}."),
+                ..Default::default()
+            };
+            let messages = prompt::generate_move(AgentPolicy::L1, MoveType::Test, &ctx);
+            std::fs::write(
+                format!(
+                    "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_test_{i}.json"
+                ),
+                serde_json::to_string(&Body {
+                    model: &fast,
+                    messages: &messages,
+                    stream: true,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        println!("wrote 5 req_test_N.json files");
+    }
+
+    /// Same as `dump_test_move_requests` but for the `Explain` move (prose
+    /// contract, robust tier) — for the reasoning-effort A/B on streamed
+    /// content, which is the actually-blocking wait (unlike `Test`, which
+    /// generates while the learner is still reading the settled prose).
+    #[test]
+    #[ignore = "writes to /tmp for a manual reasoning-effort comparison"]
+    fn dump_explain_move_requests() {
+        crate::load_dotenv(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env"));
+        let robust = std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_default();
+
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            model: &'a str,
+            messages: &'a [crate::ai::ChatMessage],
+            stream: bool,
+        }
+
+        let topics: [(&str, &str); 5] = [
+            ("Photosynthesis", "the light-dependent reactions"),
+            ("Linear algebra", "computing a matrix determinant"),
+            ("Cellular respiration", "the stages of glycolysis"),
+            ("Thermodynamics", "the first law of thermodynamics"),
+            ("Probability", "expected value of a discrete random variable"),
+        ];
+
+        for (i, (topic, item_title)) in topics.iter().enumerate() {
+            let ctx = MoveContext {
+                topic: topic.to_string(),
+                item_title: item_title.to_string(),
+                objective: format!("Demonstrate understanding of {item_title}."),
+                ..Default::default()
+            };
+            let messages = prompt::generate_move_streamed(MoveType::Explain, &ctx);
+            std::fs::write(
+                format!(
+                    "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_explain_{i}.json"
+                ),
+                serde_json::to_string(&Body {
+                    model: &robust,
+                    messages: &messages,
+                    stream: true,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        println!("wrote 5 req_explain_N.json files");
+    }
 }

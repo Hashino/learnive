@@ -136,7 +136,24 @@ CRITICAL: every objective you list must be demonstrable from the ONE task in \
 exercise_html — never add an objective that would need a different task than the one \
 you actually wrote (e.g. don't grade a sum-of-a-range objective against an exercise \
 that only asked to print a range). An objective the exercise never asked for can never \
-be satisfied, and the student would be stuck unable to pass no matter what they answer.";
+be satisfied, and the student would be stuck unable to pass no matter what they answer. \
+Before writing criteria, work out the correct answer to the EXACT task you wrote — the \
+real result for the specific numbers/options/scenario you chose, not a generic \
+description of the objective — and write criteria consistent with THAT solution (the \
+solution itself still never appears in exercise_html, per the reveal rule above). \
+Criteria invented in parallel with the question, rather than derived from actually \
+solving it, is how a rubric ends up grading a different answer than the one the \
+exercise itself calls for.\n\
+CRITICAL: ground the exercise in what the student was actually taught, in a scenario \
+the student hasn't already seen. Every objective must test a concept, fact, or \
+procedure that appears in the content/context given to you above (what the node has \
+taught so far, the concept/topic named for it, and/or any SOURCES provided) — never a \
+different topic the student was never given. But do not just restate an example \
+already used in that text with the same numbers/framing — put the concept in a scenario, \
+numbers, or framing the student has NOT already seen, so answering takes applying the \
+concept, not recalling or copying an example. The concept must be familiar; the \
+specific instance should not be. (Objectives marked transfer=true push this further \
+still — genuinely novel application, not just reworded numbers.)";
 
 /// Cold-start objective proposal (§6.1/§S4) — precedes the outline call;
 /// its (possibly user-edited) output anchors it.
