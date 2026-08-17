@@ -1,3 +1,10 @@
-annotations
+single instance app. if another instance of the app is already running, only reopen the broswer with the correct token and exit
+cargo install: user should be able to install the app with `cargo install`
+error: questions which the correct answer are not the rubric. is the agent having access to the rubric when generating the question? it should. to generate correct questions
+exercise questions should *always* be about something in the text. some sort of grounding logic for that
+updating the document while there's an active question breaks the document
+curriculum generation overhaul: prerequisites; learn/review/skip toggle; (TODO: link already known nodes)
+at the end of the curriculum: "what are we learning next?"
+agent answers can contain exercises/interactive blocks
 citations+sources
-split view for sources
+improve split view for sources
