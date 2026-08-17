@@ -7,6 +7,9 @@
          header on every request (§3.1), never a cookie. -->
     <meta name="learnive-token" content="{{TOKEN}}" />
     <title>learnive — setup</title>
+    <!-- Localization layer (§3/§15): en/pt-BR dictionary + `t()`/`applyI18n()`
+         and the locale switcher. Must load before this page's inline script. -->
+    <script src="/assets/i18n.js?token={{TOKEN}}"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -116,11 +119,12 @@
   <body>
     <nav>
       <a href="/">← learnive</a>
-      <span class="muted">setup</span>
+      <span class="muted" data-i18n="setup.nav">setup</span>
+      <button id="langToggle" type="button" title="Language">EN</button>
     </nav>
     <main>
-      <h1>Provider setup</h1>
-      <p class="muted">
+      <h1 data-i18n="setup.title">Provider setup</h1>
+      <p class="muted" data-i18n-html="setup.intro">
         Bring your own key (§12). Your key is stored locally in a
         <code>0600</code> file (never a database, never committed) and never
         leaves this machine except to the provider you choose. Pick free or paid
@@ -129,18 +133,18 @@
 
       <form id="form">
         <fieldset>
-          <legend>Provider</legend>
-          <label for="provider">Which provider?</label>
+          <legend data-i18n="provider.legend">Provider</legend>
+          <label for="provider" data-i18n="provider.label">Which provider?</label>
           <select id="provider">
-            <option value="demo">Demo (no key — canned content)</option>
-            <option value="openrouter">OpenRouter (recommended)</option>
-            <option value="openai_compatible">
+            <option value="demo" data-i18n="provider.demo">Demo (no key — canned content)</option>
+            <option value="openrouter" data-i18n="provider.openrouter">OpenRouter (recommended)</option>
+            <option value="openai_compatible" data-i18n="provider.compat">
               OpenAI-compatible endpoint (Mercury, local, …)
             </option>
           </select>
 
           <div id="baseUrlRow" class="hidden">
-            <label for="baseUrl">Base URL</label>
+            <label for="baseUrl" data-i18n="baseurl.label">Base URL</label>
             <input
               type="text"
               id="baseUrl"
@@ -149,21 +153,21 @@
           </div>
 
           <div id="keyRow" class="hidden">
-            <label for="apiKey">API key <span id="keyHint" class="muted"></span></label>
+            <label for="apiKey" data-i18n="apikey.label">API key <span id="keyHint" class="muted"></span></label>
             <input type="password" id="apiKey" placeholder="sk-…" autocomplete="off" />
           </div>
         </fieldset>
 
         <fieldset id="intentBox">
-          <legend>Budget</legend>
+          <legend data-i18n="budget.legend">Budget</legend>
           <div class="radios">
-            <label><input type="radio" name="intent" value="free" checked /> Free models</label>
-            <label><input type="radio" name="intent" value="paid" /> Paid models (better quality)</label>
+            <label><input type="radio" name="intent" value="free" checked /> <span data-i18n="budget.free">Free models</span></label>
+            <label><input type="radio" name="intent" value="paid" /> <span data-i18n="budget.paid">Paid models (better quality)</span></label>
           </div>
           <p class="muted" id="derived"></p>
         </fieldset>
 
-        <button type="submit">Save</button>
+        <button type="submit" data-i18n="save.button">Save</button>
       </form>
       <div id="msg"></div>
     </main>
@@ -172,9 +176,23 @@
       const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
       const el = (id) => document.getElementById(id);
 
+      // Fill the static chrome from the dictionary for the current locale.
+      applyI18n(document);
+      if (el("langToggle")) {
+        const refreshLabel = () =>
+          (el("langToggle").textContent = currentLocale() === "pt-BR" ? "PT" : "EN");
+        refreshLabel();
+        el("langToggle").addEventListener("click", () => {
+          const next = currentLocale() === "pt-BR" ? "en" : "pt-BR";
+          i18nSetLang(next);
+          refreshLabel();
+          applyI18n(document);
+        });
+      }
+
       function authFetch(path, options = {}) {
         const headers = Object.assign(
-          { "X-Learnive-Token": TOKEN },
+          { "X-Learnive-Token": TOKEN, "X-Learnive-Lang": I18N_LANG },
           options.headers || {},
         );
         return fetch(path, Object.assign({}, options, { headers }));
@@ -194,12 +212,10 @@
         if (s.base_url) el("baseUrl").value = s.base_url;
         for (const r of document.getElementsByName("intent"))
           r.checked = r.value === s.intent;
-        el("keyHint").textContent = s.has_key
-          ? "(a key is already saved — leave blank to keep it)"
-          : "";
+        el("keyHint").textContent = s.has_key ? t("apikey.hint") : "";
         el("derived").textContent = s.demo
-          ? "Demo mode: canned content, no models."
-          : `Models — fast: ${s.model_fast} · robust: ${s.model_robust}`;
+          ? t("derived.demo")
+          : t("derived.models", s.model_fast, s.model_robust);
         syncFields();
       }
 
@@ -211,7 +227,7 @@
 
       el("form").addEventListener("submit", async (e) => {
         e.preventDefault();
-        el("msg").textContent = "Saving…";
+        el("msg").textContent = t("status.saving");
         el("msg").className = "";
         const intent = [...document.getElementsByName("intent")].find(
           (r) => r.checked,
@@ -233,11 +249,11 @@
           el("apiKey").value = "";
           showStatus(s);
           el("msg").textContent = s.demo
-            ? "Saved. Running in demo mode."
-            : "Saved and applied — no restart needed.";
+            ? t("status.demoSaved")
+            : t("status.saved");
           el("msg").className = "ok";
         } catch (err) {
-          el("msg").textContent = "Error: " + err;
+          el("msg").textContent = t("error.prefix") + err;
           el("msg").className = "err";
         }
       });

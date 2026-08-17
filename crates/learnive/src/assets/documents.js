@@ -15,7 +15,7 @@ el("startForm").addEventListener("submit", async (e) => {
   const topic = el("topic").value.trim();
   if (!topic) return;
   pendingTopic = topic;
-  el("startStatus").textContent = "thinking about the objective…";
+  el("startStatus").textContent = t("status.objective");
   try {
     const resp = await postJson("/api/objective/propose", { topic });
     if (!resp.ok) throw new Error(await resp.text());
@@ -27,7 +27,7 @@ el("startForm").addEventListener("submit", async (e) => {
     el("objectiveConfirm").hidden = false;
   } catch (err) {
     el("startStatus").innerHTML =
-      '<span class="error">failed: ' + escapeHtml(String(err)) + "</span>";
+      '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
 });
 
@@ -38,7 +38,7 @@ el("objectiveBackBtn").addEventListener("click", () => {
 
 el("objectiveConfirmBtn").addEventListener("click", async () => {
   const objective_text = el("objectiveText").value.trim();
-  el("startStatus").textContent = "planning the curriculum…";
+    el("startStatus").textContent = t("status.curriculum");
   try {
     const resp = await postJson("/api/documents", {
       topic: pendingTopic,
@@ -58,7 +58,7 @@ el("objectiveConfirmBtn").addEventListener("click", async () => {
     generateNode(state.items[0].id);
   } catch (err) {
     el("startStatus").innerHTML =
-      '<span class="error">failed: ' + escapeHtml(String(err)) + "</span>";
+      '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
 });
 
@@ -101,12 +101,12 @@ function renderDocList() {
       name.textContent = d.name || d.topic || d.doc_id;
       const meta = document.createElement("span");
       meta.className = "doc-meta";
-      meta.textContent = d.demonstrated + " / " + d.total + " demonstrated";
+      meta.textContent = t("doc.count", d.demonstrated, d.total);
       const trash = document.createElement("button");
       trash.type = "button";
       trash.className = "doc-trash";
-      trash.title = "Delete this document";
-      trash.setAttribute("aria-label", "Delete this document");
+      trash.title = t("delete.title");
+      trash.setAttribute("aria-label", t("delete.title"));
       trash.textContent = "🗑";
       trash.addEventListener("click", (e) => {
         // The row itself opens the document — a delete must not do both.
@@ -129,15 +129,14 @@ function confirmDeleteDocument(li, d) {
   const box = document.createElement("div");
   box.className = "doc-confirm";
   const label = document.createElement("span");
-  label.textContent =
-    "Delete “" + (d.name || d.topic || d.doc_id) + "” and everything in it?";
+  label.textContent = t("delete.confirm", d.name || d.topic || d.doc_id);
   const yes = document.createElement("button");
   yes.type = "button";
   yes.className = "danger";
-  yes.textContent = "Delete";
+  yes.textContent = t("delete.button");
   const no = document.createElement("button");
   no.type = "button";
-  no.textContent = "Cancel";
+  no.textContent = t("delete.cancel");
   box.append(label, yes, no);
   box.addEventListener("click", (e) => e.stopPropagation());
   no.addEventListener("click", () => box.remove());
@@ -158,11 +157,12 @@ function confirmDeleteDocument(li, d) {
       renderDocList();
     } catch (err) {
       label.innerHTML =
-        '<span class="error">delete failed: ' +
+        '<span class="error">' +
+        t("delete.failed") +
         escapeHtml(String(err)) +
         "</span>";
       no.disabled = false;
-      no.textContent = "Close";
+      no.textContent = t("delete.close");
     }
   });
   li.appendChild(box);
@@ -210,13 +210,15 @@ function showOutlinePane() {
   el("outlinePane").hidden = false;
   el("docsPane").hidden = true;
   el("docsBackBtn").textContent = "←";
-  el("docsBackBtn").title = "All documents";
+  el("docsBackBtn").title = t("nav.allDocuments");
+  el("docsBackBtn").setAttribute("aria-label", t("nav.allDocuments"));
 }
 function showDocsPane() {
   el("outlinePane").hidden = true;
   el("docsPane").hidden = false;
   el("docsBackBtn").textContent = "→";
-  el("docsBackBtn").title = "Back to outline";
+  el("docsBackBtn").title = t("docs.backOutline");
+  el("docsBackBtn").setAttribute("aria-label", t("docs.backOutline"));
   refreshDocumentList();
 }
 el("docsBackBtn").addEventListener("click", () => {

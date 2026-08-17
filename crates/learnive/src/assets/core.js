@@ -8,7 +8,7 @@ const TOKEN = document.querySelector('meta[name="learnive-token"]').content;
 // Every request carries the token in the header (§3.1).
 function api(path, options = {}) {
   const headers = Object.assign(
-    { "X-Learnive-Token": TOKEN },
+    { "X-Learnive-Token": TOKEN, "X-Learnive-Lang": I18N_LANG },
     options.headers || {},
   );
   return fetch(path, Object.assign({}, options, { headers }));
@@ -74,7 +74,28 @@ el("themeToggle").addEventListener("click", () => {
   const next = currentTheme() === "light" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
   localStorage.setItem("learnive-theme", next);
-  syncThemeToggle();
+syncThemeToggle();
+
+// --- Language switcher ------------------------------------------------
+// The default locale is English; the learner can switch to pt-BR (or back).
+// The choice persists in localStorage (i18n.js) and rides every request as
+// the `X-Learnive-Lang` header, so server-rendered strings follow too.
+if (el("langToggle")) {
+  const refreshLangLabel = () => {
+    el("langToggle").textContent = currentLocale() === "pt-BR" ? "PT" : "EN";
+  };
+  refreshLangLabel();
+  el("langToggle").addEventListener("click", () => {
+    const next = currentLocale() === "pt-BR" ? "en" : "pt-BR";
+    i18nSetLang(next);
+    refreshLangLabel();
+    // Re-fill static chrome; already-rendered dynamic strings adopt the new
+    // locale on their next render (e.g. on the next navigation).
+    applyI18n(document);
+    if (typeof renderDocList === "function") renderDocList();
+    if (typeof renderOutline === "function") renderOutline();
+  });
+}
   // Re-theme every sandbox iframe (node check + remediation problems);
   // they're reachable only by message (§4.4).
   for (const f of document.querySelectorAll("iframe.sandbox")) {

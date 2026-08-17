@@ -202,15 +202,16 @@ function renderAskContext() {
   const box = el("askContext");
   if (pendingSelection) {
     box.innerHTML =
-      'Asking about: <span class="ask-quote">“' +
+      t("ask.aboutSelected") +
+      ' <span class="ask-quote">“' +
       escapeHtml(truncate(pendingSelection.quote, 90)) +
       '”</span>';
     return;
   }
   const line = currentReadingBlockId();
   box.textContent = line
-    ? "Asking about the line you're on: " + truncate(line.text.trim(), 90)
-    : "Asking about this page";
+    ? t("ask.aboutLine", truncate(line.text.trim(), 90))
+    : t("ask.aboutPage");
 }
 
 function truncate(s, n) {
@@ -285,7 +286,7 @@ el("askBar").addEventListener("submit", async (e) => {
   if (!anchor || !targetNodeId) return;
 
   el("askSend").disabled = true;
-  el("askStatus").textContent = "thinking…";
+  el("askStatus").textContent = t("ask.thinking");
   try {
     const resp = await postJson(
       `/api/documents/${state.docId}/nodes/${targetNodeId}/ask`,
@@ -301,7 +302,7 @@ el("askBar").addEventListener("submit", async (e) => {
         const sub = buildSubNodeWrapper(
           data.node_id,
           data.title,
-          "<strong>You asked:</strong> " + escapeHtml(text),
+          "<strong>" + t("asked.prefix") + ":</strong> " + escapeHtml(text),
         );
         sub.proseEl.innerHTML = sanitizeHtml(data.content_html);
         hydrateIslands(sub.proseEl, data.node_id);
@@ -456,7 +457,7 @@ function getAnnotationPlus() {
     annotationPlusEl.type = "button";
     annotationPlusEl.className = "annotation-plus";
     annotationPlusEl.textContent = "+";
-    annotationPlusEl.title = "Add a note";
+    annotationPlusEl.title = t("note.add");
     annotationPlusEl.addEventListener("click", () => {
       const line = currentReadingBlockId();
       if (line) startNewAnnotation(line.blockId);

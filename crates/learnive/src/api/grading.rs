@@ -32,23 +32,29 @@ pub struct AnswerResp {
 /// per-objective feedback. This is the ONLY place this markup is built — the
 /// live response and every future reload render this exact string (see
 /// `AnswerResp::attempt_html`).
-fn render_attempt(exercise_html: &str, answer: &str, grades: &[ObjectiveGrade]) -> String {
+fn render_attempt(
+    exercise_html: &str,
+    answer: &str,
+    grades: &[ObjectiveGrade],
+    locale: crate::locale::Locale,
+) -> String {
     let grades_html: String = grades
         .iter()
         .map(|g| {
             format!(
                 "<div class=\"grade {}\"><strong>{}</strong> — {}</div>",
                 grade_class(g.grade),
-                grade_label(g.grade),
+                grade_label(g.grade, locale),
                 escape_html(&g.feedback),
             )
         })
         .collect();
     format!(
         "<div class=\"attempt-exercise\">{}</div>\
-         <div class=\"attempt-answer\"><strong>Sua resposta:</strong>{}</div>\
+         <div class=\"attempt-answer\"><strong>{}</strong>{}</div>\
          <div class=\"grades\">{grades_html}</div>",
         learnive_core::freeze_exercise_html(exercise_html),
+        crate::locale::pick(locale, "Your answer:", "Sua resposta:"),
         render_answer(answer),
     )
 }
@@ -117,19 +123,26 @@ fn grade_class(g: Grade) -> &'static str {
     }
 }
 
-fn grade_label(g: Grade) -> &'static str {
+fn grade_label(g: Grade, locale: crate::locale::Locale) -> &'static str {
+    let (nd, p, d) = (
+        crate::locale::pick(locale, "not demonstrated", "não demonstrado"),
+        crate::locale::pick(locale, "partial", "parcial"),
+        crate::locale::pick(locale, "demonstrated", "demonstrado"),
+    );
     match g {
-        Grade::NotDemonstrated => "not demonstrated",
-        Grade::Partial => "partial",
-        Grade::Demonstrated => "demonstrated",
+        Grade::NotDemonstrated => nd,
+        Grade::Partial => p,
+        Grade::Demonstrated => d,
     }
 }
 
 pub async fn answer(
     State(state): State<AppState>,
     Path((doc_id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(body): Json<AnswerReq>,
 ) -> Result<Json<AnswerResp>, ApiError> {
+    let locale = crate::locale::Locale::from_header(&headers);
     let sidecar_json = state
         .store
         .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))?;
@@ -166,7 +179,12 @@ pub async fn answer(
         .exercise
         .as_ref()
         .map(|e| e.exercise_id.clone());
-    let attempt_html = render_attempt(&sidecar.exercise_html, &body.answer, &assessment.grades);
+    let attempt_html = render_attempt(
+        &sidecar.exercise_html,
+        &body.answer,
+        &assessment.grades,
+        locale,
+    );
     state.store.append_interaction(
         &doc_id,
         &node_id,

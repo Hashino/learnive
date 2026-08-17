@@ -364,7 +364,7 @@ async function generateNode(id, { instant = true } = {}) {
   rec.exerciseFrame = null;
   rec.interactions.innerHTML = "";
   rec.result.innerHTML = "";
-  rec.controls.innerHTML = '<p class="muted">generating…</p>';
+  rec.controls.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
   // Deliberately NOT disabling reading tools here (§9 continuous document):
   // every OTHER mounted section is fully readable right now, and the very
   // first call ever made (cold start, nothing mounted yet) leaves
@@ -487,7 +487,8 @@ async function generateNode(id, { instant = true } = {}) {
     });
   } catch (err) {
     rec.controls.innerHTML =
-      '<p class="error">generation error: ' +
+      '<p class="error">' +
+      t("gen.error") +
       escapeHtml(String(err)) +
       "</p>";
   }
@@ -572,7 +573,7 @@ function hydrateIslands(container, nodeId) {
     el.dataset.hydrated = "1";
     const iframe = document.createElement("iframe");
     iframe.className = "sandbox island";
-    iframe.title = "Interactive content";
+    iframe.title = t("iframe.interactive");
     iframe.setAttribute("sandbox", "allow-scripts");
     const url = new URL(
       `/api/documents/${state.docId}/nodes/${nodeId}/blocks/${el.dataset.blockId}/frame`,
@@ -580,6 +581,7 @@ function hydrateIslands(container, nodeId) {
     );
     url.searchParams.set("token", TOKEN);
     url.searchParams.set("theme", currentTheme());
+    url.searchParams.set("lang", I18N_LANG);
     iframe.src = url.toString();
     el.replaceChildren(iframe);
   }
@@ -588,7 +590,7 @@ function hydrateIslands(container, nodeId) {
 function buildExerciseIframe(nodeId) {
   const iframe = document.createElement("iframe");
   iframe.className = "sandbox";
-  iframe.title = "Exercise";
+    iframe.title = t("iframe.exercise");
   iframe.setAttribute("sandbox", "allow-scripts");
   const url = new URL(
     `/api/documents/${state.docId}/nodes/${nodeId}/exercise-frame`,
@@ -596,6 +598,7 @@ function buildExerciseIframe(nodeId) {
   );
   url.searchParams.set("token", TOKEN);
   url.searchParams.set("theme", currentTheme());
+  url.searchParams.set("lang", I18N_LANG);
   iframe.src = url.toString();
   return iframe;
 }
@@ -625,7 +628,7 @@ async function submitAnswer(answer) {
   const rec = state.sections.get(state.nodeId);
   if (!rec) return;
   // Transient status only — never wipes the interaction log below.
-  rec.result.innerHTML = '<p class="muted">evaluating…</p>';
+  rec.result.innerHTML = '<p class="muted">' + t("status.evaluating") + "</p>";
   try {
     const resp = await postJson(
       `/api/documents/${state.docId}/nodes/${state.nodeId}/answer`,
@@ -650,7 +653,7 @@ async function submitAnswer(answer) {
     }
   } catch (err) {
     rec.result.innerHTML =
-      '<p class="error">error: ' + escapeHtml(String(err)) + "</p>";
+      '<p class="error">' + t("answer.error") + escapeHtml(String(err)) + "</p>";
   }
 }
 
@@ -683,7 +686,7 @@ async function advanceAfterGrading() {
     const rec = state.sections.get(state.currentId);
     const p = document.createElement("p");
     p.className = "muted";
-    p.textContent = "You have completed the current outline.";
+    p.textContent = t("completed");
     (rec ? rec.controls : el("nodeSections")).appendChild(p);
   }
 }
@@ -712,7 +715,7 @@ document.addEventListener("click", (e) => {
 
 async function openSourcePanel(sourceId, locator) {
   el("sourcePanel").classList.add("open");
-  el("sourceTitle").textContent = "Loading…";
+  el("sourceTitle").textContent = t("source.loading");
   el("sourceMeta").textContent = "";
   el("sourceBody").innerHTML = "";
   try {
@@ -727,7 +730,7 @@ async function openSourcePanel(sourceId, locator) {
     }
     renderSource(source, locator);
   } catch (err) {
-    el("sourceTitle").textContent = "Source unavailable";
+    el("sourceTitle").textContent = t("source.unavailable");
     el("sourceMeta").textContent = String(err);
   }
 }
@@ -779,13 +782,13 @@ function appendRemediation(rec, explanationHtml) {
   const wrap = document.createElement("div");
   wrap.className = "remediation";
   const head = document.createElement("div");
-  head.innerHTML = "<h3>Let's review</h3>" + sanitizeHtml(explanationHtml);
+  head.innerHTML = "<h3>" + t("review.title") + "</h3>" + sanitizeHtml(explanationHtml);
   wrap.appendChild(head);
   // The server always regenerates a fresh exercise on a failed answer
   // (§8.2) — same node id, same frame URL, sidecar overwritten in place.
   const label = document.createElement("p");
   label.className = "muted";
-  label.textContent = "Now try this one:";
+  label.textContent = t("review.try");
   wrap.appendChild(label);
   const iframe = buildExerciseIframe(state.nodeId);
   rec.exerciseFrame = iframe;

@@ -19,7 +19,7 @@ use axum::{
     Json,
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn answer_header_names_the_selection_it_was_asked_on() {
-        let plain = question_header("why?", &Anchor::block("b1"));
+        let plain = question_header("why?", &Anchor::block("b1"), crate::locale::Locale::En);
         assert!(plain.contains("You asked:</strong> why?"));
         assert!(!plain.contains("about"));
 
@@ -133,6 +133,7 @@ mod tests {
                     suffix: None,
                 }),
             },
+            crate::locale::Locale::En,
         );
         // Question and quote are both escaped — a selection is user-chosen
         // document text and reaches the page through `innerHTML`.
@@ -151,6 +152,7 @@ mod tests {
                     suffix: None,
                 }),
             },
+            crate::locale::Locale::En,
         );
         assert!(clipped.contains('…'));
         assert!(clipped.len() < QUOTE_HEADER_BUDGET + 120);

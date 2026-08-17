@@ -57,7 +57,9 @@ pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 pub async fn generate_node(
     State(state): State<AppState>,
     Path((doc_id, item_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
+    let locale = crate::locale::Locale::from_header(&headers);
     // The fallible work that emits no tokens lives in `prepare`/`finalize`; the
     // generator only holds the `yield`s (async_stream does not rewrite `yield`
     // through a nested macro).
@@ -124,15 +126,26 @@ pub async fn generate_node(
                 // (withheld from the menu once true, `movement::prompt::menu`),
                 // so a source that genuinely can't be found costs exactly one
                 // of `MAX_MOVES_PER_NODE`'s slots, never a loop.
+                let looking_en = format!("Looking for sources on {}…", ctx.item_title);
+                let looking_pt = format!("Procurando fontes sobre {}…", ctx.item_title);
                 yield Ok(sse_frame(
                     "research",
-                    &format!("Looking for sources on {}…", ctx.item_title),
+                    crate::locale::pick(locale, &looking_en, &looking_pt),
                 ));
                 let outcome =
                     acquire(&state, &format!("{} {}", ctx.topic, ctx.item_title)).await;
                 let status = match &outcome.source_title {
-                    Some(title) => format!("Found a source: {title}"),
-                    None => "No adequate source found — continuing ungrounded".to_string(),
+                    Some(title) => {
+                        let en = format!("Found a source: {title}");
+                        let pt = format!("Fonte encontrada: {title}");
+                        crate::locale::pick(locale, &en, &pt).to_string()
+                    }
+                    None => crate::locale::pick(
+                        locale,
+                        "No adequate source found — continuing ungrounded",
+                        "Nenhuma fonte adequada encontrada — continuando sem fonte",
+                    )
+                    .to_string(),
                 };
                 yield Ok(sse_frame("research", &status));
                 if let Err(e) = event_log.append(
@@ -712,6 +725,7 @@ pub async fn get_node(
 #[derive(Deserialize)]
 pub struct FrameQuery {
     theme: Option<String>,
+    lang: Option<String>,
 }
 
 /// Serves the node's currently-active exercise as its own real HTTP response
@@ -737,7 +751,8 @@ pub async fn exercise_frame(
         serde_json::from_str(&sidecar_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let theme = query.theme.as_deref().unwrap_or("dark");
-    let page = engine::render_sandbox_frame(&sidecar.exercise_html, theme, true);
+    let locale = crate::locale::Locale::from_str_opt(query.lang.as_deref());
+    let page = engine::render_sandbox_frame(&sidecar.exercise_html, theme, true, locale);
     Ok(sandbox_frame_response(page))
 }
 
@@ -763,7 +778,8 @@ pub async fn block_frame(
         .ok_or_else(|| ApiError::BadRequest("block not found".to_string()))?;
 
     let theme = query.theme.as_deref().unwrap_or("dark");
-    let page = engine::render_sandbox_frame(&block_html, theme, false);
+    let locale = crate::locale::Locale::from_str_opt(query.lang.as_deref());
+    let page = engine::render_sandbox_frame(&block_html, theme, false, locale);
     Ok(sandbox_frame_response(page))
 }
 

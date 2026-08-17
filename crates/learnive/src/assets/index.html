@@ -17,6 +17,10 @@
          every request, including these — a plain <link>/<script src> cannot set
          a header. -->
     <link rel="stylesheet" href="/assets/app.css?token={{TOKEN}}" />
+    <!-- Localization layer (§3/§15): defines `t()`, `applyI18n()`, the locale
+         switcher and the en/pt-BR dictionary. Loaded before every other
+         script so `I18N_LANG` and the helpers already exist when they run. -->
+    <script src="/assets/i18n.js?token={{TOKEN}}"></script>
     <!-- Set the theme before first paint (no flash): saved choice, else the OS
          preference. Not deferred, on purpose — it must run before the body
          renders. The toggle itself is wired in core.js. -->
@@ -45,7 +49,7 @@
         >
           ←
         </button>
-        <h2 id="docName" title="Click to rename"></h2>
+        <h2 id="docName" data-i18n-title="doc.rename" title="Click to rename"></h2>
       </div>
 
       <div id="outlinePane">
@@ -60,21 +64,31 @@
       </div>
 
       <div id="docsPane" hidden>
-        <p class="sidebar-section">Documents</p>
+        <p class="sidebar-section" data-i18n="docs.section">Documents</p>
         <ul id="docList"></ul>
-        <button type="button" id="newDocBtn">+ New document</button>
+        <button type="button" id="newDocBtn" data-i18n="doc.new">+ New document</button>
       </div>
 
-      <!-- Footer: pushed to the bottom by the panes above it. Just the theme
-           toggle — nothing else earns permanent space next to the document. -->
+      <!-- Footer: pushed to the bottom by the panes above it. The theme
+            toggle and the language switcher — nothing else earns permanent
+            space next to the document. -->
       <div class="sidebar-foot">
         <button
           id="themeToggle"
           class="icon-btn"
           type="button"
+          data-i18n-aria="theme.toggle"
+          data-i18n-title="theme.toggle"
           aria-label="Toggle light/dark theme"
           title="Toggle light/dark theme"
         ></button>
+        <button
+          id="langToggle"
+          class="icon-btn"
+          type="button"
+          aria-label="Language"
+          title="Language"
+        >EN</button>
       </div>
     </aside>
     <!-- Invisible hover target along the left edge that reveals the sidebar. -->
@@ -83,13 +97,13 @@
     <!-- Source viewer (§11): opens on a <cite> click, on the right — the same
          edge the future PDF split-view will occupy (§11.1). Read-only: no
          annotation lands here, only in the living document. -->
-    <aside id="sourcePanel" aria-label="Source">
+    <aside id="sourcePanel" data-i18n-aria="source.title" aria-label="Source">
       <div class="source-head">
         <div>
           <div id="sourceTitle"></div>
           <div id="sourceMeta" class="muted"></div>
         </div>
-        <button type="button" id="sourceCloseBtn" aria-label="Close">×</button>
+        <button type="button" id="sourceCloseBtn" data-i18n-aria="source.close" aria-label="Close">×</button>
       </div>
       <div id="sourceBody"></div>
     </aside>
@@ -98,25 +112,25 @@
       <!-- Cold start (§6.1): a single generic question, then a confirmable
            objective (§S4) before the outline is generated. -->
       <section id="coldstart" class="card">
-        <h1>What are we learning?</h1>
+        <h1 data-i18n="coldstart.title">What are we learning?</h1>
         <form id="startForm">
           <textarea id="topic" rows="3" autofocus></textarea>
-          <p><button type="submit">Start</button></p>
+          <p><button type="submit" data-i18n="start.button">Start</button></p>
         </form>
 
         <!-- Objective confirm (§6.1/§S4): the app almost never skips this —
-             it anchors every future generation decision, so it's always
-             shown editable, even for an unambiguous request. -->
+              it anchors every future generation decision, so it's always
+              shown editable, even for an unambiguous request. -->
         <div id="objectiveConfirm" hidden>
-          <h2>Curriculum objective</h2>
-          <p class="muted">
+          <h2 data-i18n="objective.title">Curriculum objective</h2>
+          <p class="muted" data-i18n="objective.hint">
             Here's the objective we'll build the curriculum toward — edit it
             if this isn't quite right.
           </p>
           <textarea id="objectiveText" rows="2"></textarea>
           <p>
-            <button type="button" id="objectiveConfirmBtn">Confirm</button>
-            <button type="button" id="objectiveBackBtn">Back</button>
+            <button type="button" id="objectiveConfirmBtn" data-i18n="objective.confirm">Confirm</button>
+            <button type="button" id="objectiveBackBtn" data-i18n="objective.back">Back</button>
           </p>
         </div>
 
@@ -148,12 +162,12 @@
              since a `plan` move can only fire on the frontier node
              currently being generated, which is always the last one. -->
         <div id="planProposal" hidden class="card">
-          <h2>Proposed outline change</h2>
+          <h2 data-i18n="plan.title">Proposed outline change</h2>
           <div id="planRationale"></div>
           <ol id="planProposedOutline"></ol>
           <p>
-            <button type="button" id="planApproveBtn">Approve</button>
-            <button type="button" id="planRejectBtn">Reject</button>
+            <button type="button" id="planApproveBtn" data-i18n="plan.approve">Approve</button>
+            <button type="button" id="planRejectBtn" data-i18n="plan.reject">Reject</button>
           </p>
         </div>
       </main>
@@ -172,10 +186,12 @@
           <textarea
             id="askInput"
             rows="1"
+            data-i18n-placeholder="ask.placeholder"
+            data-i18n-aria="ask.aria"
             placeholder="Ask about what you're reading…"
             aria-label="Ask about what you're reading"
           ></textarea>
-          <button type="submit" id="askSend">Send</button>
+          <button type="submit" id="askSend" data-i18n="ask.send">Send</button>
         </div>
         <p id="askStatus" class="muted"></p>
       </div>

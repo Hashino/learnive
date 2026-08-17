@@ -230,6 +230,7 @@ async fn asset(Path(file): Path<String>) -> Response {
     let (mime, body) = match file.as_str() {
         "app.css" => (CSS, include_str!("assets/app.css")),
         "theme-init.js" => (JS, include_str!("assets/theme-init.js")),
+        "i18n.js" => (JS, include_str!("assets/i18n.js")),
         "core.js" => (JS, include_str!("assets/core.js")),
         "documents.js" => (JS, include_str!("assets/documents.js")),
         "outline.js" => (JS, include_str!("assets/outline.js")),

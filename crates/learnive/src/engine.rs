@@ -595,19 +595,27 @@ fn ensure_form_ids(exercise_html: &str, exercise_id: &str, rubric_id: &str) -> S
 /// origin's policy. Isolation still comes from `sandbox="allow-scripts"`
 /// with no `allow-same-origin` on the `<iframe>` (§3.1/§4.4) — this frame's
 /// own CSP is a second, orthogonal layer, not the isolation boundary itself.
-pub fn render_sandbox_frame(html: &str, theme: &str, graded: bool) -> String {
+pub fn render_sandbox_frame(
+    html: &str,
+    theme: &str,
+    graded: bool,
+    locale: crate::locale::Locale,
+) -> String {
     let theme = if theme == "light" { "light" } else { "dark" };
+    let submit_label = crate::locale::pick(locale, "Submit answer", "Enviar resposta");
     let submit_harness = if graded {
-        r#"function collect(){var f=document.querySelector('form');var o={};if(f){new FormData(f).forEach(function(v,k){o[k]=v;});}else{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}return o;}
-function send(){parent.postMessage({type:'learnive-answer',answer:JSON.stringify(collect())},'*');}
+        format!(
+            r#"function collect(){{var f=document.querySelector('form');var o={{}};if(f){{new FormData(f).forEach(function(v,k){{o[k]=v;}});}}else{{var t=document.querySelector('textarea,input');if(t)o.answer=t.value;}}return o;}}
+function send(){{parent.postMessage({{type:'learnive-answer',answer:JSON.stringify(collect())}},'*');}}
 var form=document.querySelector('form');if(form)form.setAttribute('novalidate','');
-document.addEventListener('submit',function(e){e.preventDefault();send();});
+document.addEventListener('submit',function(e){{e.preventDefault();send();}});
 var sb=document.querySelector('button[type=submit],input[type=submit]');
-if(!sb){var bs=document.querySelectorAll('button');if(bs.length===1&&(form||document.querySelector('input,textarea,select')))sb=bs[0];}
-if(sb){sb.addEventListener('click',function(e){e.preventDefault();send();});}
-else if(!document.querySelector('button,input[type=submit],input[type=image]')){var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='Submit answer';b.addEventListener('click',function(e){e.preventDefault();send();});p.appendChild(b);document.body.appendChild(p);}"#
+if(!sb){{var bs=document.querySelectorAll('button');if(bs.length===1&&(form||document.querySelector('input,textarea,select')))sb=bs[0];}}
+if(sb){{sb.addEventListener('click',function(e){{e.preventDefault();send();}});}}
+else if(!document.querySelector('button,input[type=submit],input[type=image]')){{var p=document.createElement('p');var b=document.createElement('button');b.type='button';b.textContent='{submit_label}';b.addEventListener('click',function(e){{e.preventDefault();send();}});p.appendChild(b);document.body.appendChild(p);}}"#
+        )
     } else {
-        ""
+        String::new()
     };
     format!(
         r#"<!doctype html><meta charset="utf-8"><style>

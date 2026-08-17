@@ -161,16 +161,22 @@ fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
 /// passage around it may have been asked about several times over. Long
 /// selections are clipped; the header is a label, not a second copy of the
 /// text.
-pub(super) fn question_header(question: &str, anchor: &Anchor) -> String {
+pub(super) fn question_header(
+    question: &str,
+    anchor: &Anchor,
+    locale: crate::locale::Locale,
+) -> String {
+    let asked = crate::locale::pick(locale, "You asked:", "Você perguntou:");
+    let about = crate::locale::pick(locale, "about", "sobre");
     let mut out = format!(
-        "<p class=\"question\"><strong>You asked:</strong> {}",
+        "<p class=\"question\"><strong>{asked}</strong> {}",
         escape_html(question)
     );
     if let Some(quote) = &anchor.quote {
         let exact = quote.exact.trim();
         if !exact.is_empty() {
             out.push_str(&format!(
-                " <span class=\"about\">about \u{201c}{}\u{201d}</span>",
+                " <span class=\"about\">{about} \u{201c}{}\u{201d}</span>",
                 escape_html(&head_chars(exact, QUOTE_HEADER_BUDGET))
             ));
         }
@@ -259,8 +265,10 @@ pub enum AskResp {
 pub async fn ask_question(
     State(state): State<AppState>,
     Path((doc_id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(body): Json<AskReq>,
 ) -> Result<Json<AskResp>, ApiError> {
+    let locale = crate::locale::Locale::from_header(&headers);
     let question = body.question.trim();
     if question.is_empty() {
         return Err(ApiError::BadRequest(
@@ -323,7 +331,7 @@ pub async fn ask_question(
             let answer_html = ensure_block_ids(&answer_html, &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
-                question_header(question, &body.anchor)
+                question_header(question, &body.anchor, locale)
             );
             state.store.append_interaction(
                 &doc_id,
@@ -373,7 +381,7 @@ pub async fn ask_question(
             );
             let body_html = format!(
                 "{}\n<p>↳ spawned a new section: {}</p>",
-                question_header(question, &body.anchor),
+                question_header(question, &body.anchor, locale),
                 escape_html(&sub_title)
             );
             state.store.append_interaction(

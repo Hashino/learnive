@@ -12,6 +12,7 @@ mod app;
 mod config;
 mod engine;
 mod events;
+mod locale;
 mod movement;
 mod objective;
 mod profile;

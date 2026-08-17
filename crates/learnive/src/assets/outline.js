@@ -43,6 +43,7 @@ el("sidebar").addEventListener("focusout", () => {
 // touches state declared further down, and running it inline would
 // depend on `await` happening to yield past the rest of the file.
 async function boot() {
+  applyI18n(document);
   await refreshDocumentList();
   const last = localStorage.getItem(LAST_DOC_KEY);
   const pick =
@@ -99,7 +100,7 @@ function renderRevisitHint() {
     return;
   }
   hint.hidden = false;
-  hint.textContent = "↺ Consider revisiting: " + target.title;
+  hint.textContent = t("revisit.hint", target.title);
   hint.style.cursor = "pointer";
   hint.onclick = () => openNode(target.id);
 }
@@ -145,7 +146,8 @@ async function openNode(id, opts = {}) {
   } catch (err) {
     const rec = state.sections.get(state.currentId);
     (rec ? rec.controls : el("nodeSections")).innerHTML =
-      '<p class="error">could not open node: ' +
+      '<p class="error">' +
+      t("open.failed") +
       escapeHtml(String(err)) +
       "</p>";
   }
@@ -187,7 +189,7 @@ function renderSkipControl(rec) {
   if (!other) return;
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.textContent = "Skip for now →";
+  btn.textContent = t("skip.button");
   btn.addEventListener("click", skipCurrentNode);
   rec.controls.appendChild(btn);
 }
@@ -213,11 +215,12 @@ async function skipCurrentNode() {
     if (next) {
       openNode(next.id);
     } else if (rec) {
-      rec.controls.innerHTML = '<p class="muted">Nothing else available yet.</p>';
+      rec.controls.innerHTML = '<p class="muted">' + t("skip.none") + "</p>";
     }
   } catch (err) {
     (rec ? rec.result : el("nodeSections")).innerHTML =
-      '<span class="error">skip failed: ' +
+      '<span class="error">' +
+      t("skip.failed") +
       escapeHtml(String(err)) +
       "</span>";
   }
