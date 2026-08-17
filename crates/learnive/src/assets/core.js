@@ -74,6 +74,18 @@ el("themeToggle").addEventListener("click", () => {
   const next = currentTheme() === "light" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
   localStorage.setItem("learnive-theme", next);
+  syncThemeToggle();
+  // Re-theme every sandbox iframe (node check + remediation problems);
+  // they're reachable only by message (§4.4).
+  for (const f of document.querySelectorAll("iframe.sandbox")) {
+    if (f.contentWindow) {
+      f.contentWindow.postMessage(
+        { type: "learnive-theme", theme: next },
+        "*",
+      );
+    }
+  }
+});
 syncThemeToggle();
 
 // --- Language switcher ------------------------------------------------
@@ -96,18 +108,6 @@ if (el("langToggle")) {
     if (typeof renderOutline === "function") renderOutline();
   });
 }
-  // Re-theme every sandbox iframe (node check + remediation problems);
-  // they're reachable only by message (§4.4).
-  for (const f of document.querySelectorAll("iframe.sandbox")) {
-    if (f.contentWindow) {
-      f.contentWindow.postMessage(
-        { type: "learnive-theme", theme: next },
-        "*",
-      );
-    }
-  }
-});
-syncThemeToggle();
 
 // --- SSE parser over fetch (POST) -------------------------------------
 async function readSse(response, onEvent) {
