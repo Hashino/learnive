@@ -936,17 +936,18 @@ async fn interactive_island_never_leaks_raw_script_but_is_served_sandboxed() {
 
 #[tokio::test]
 async fn prerequisite_proposal_degrades_to_empty_tree_on_unparseable_model_output() {
-    // §S15: confirmed live against a real reasoning-heavy fast-tier model
-    // (OpenCode Zen's nemotron-3.5-lightning-free) that the tree-proposal
-    // call can intermittently end its stream with no `content` at all —
-    // every token routed through `delta.reasoning` instead — which
-    // `parse::prereq_tree` can't read. `propose_prerequisites`'s own
-    // contract already treats a well-formed `[]` as a normal, common
-    // answer; a parse failure must degrade to the same empty tree rather
-    // than surface a 502, since the two are indistinguishable in effect
-    // and the caller (the cold-start toggle screen) already has a defined,
-    // safe behavior for "no prerequisites" — skip straight to
-    // `createLivingDocument`.
+    // §S15: `engine::collect` now requests a non-streamed completion
+    // (`Ai::complete`), which fixed the original live-confirmed failure
+    // mode here (a reasoning-heavy model routing its entire output through
+    // the streaming `reasoning` delta and never reaching `content`). This
+    // test covers the residual case that fix doesn't reach: the model
+    // answers with prose instead of JSON despite the contract.
+    // `propose_prerequisites`'s own contract already treats a well-formed
+    // `[]` as a normal, common answer; a parse failure must degrade to the
+    // same empty tree rather than surface a 502, since the two are
+    // indistinguishable in effect and the caller (the cold-start toggle
+    // screen) already has a defined, safe behavior for "no prerequisites"
+    // — skip straight to `createLivingDocument`.
     use crate::ai::{Ai, MockProvider, Models, Provider};
 
     let scripted = Provider::Mock(MockProvider::scripted(|req| {

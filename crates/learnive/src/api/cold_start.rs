@@ -162,21 +162,23 @@ pub async fn propose_prerequisites(
         body.objective_text.clone()
     };
     let ai = state.ai.load_full();
-    // A parse failure degrades to an empty tree rather than a 502: this is
-    // NOT theoretical — a reasoning-heavy fast-tier model (confirmed live,
-    // OpenCode Zen's nemotron-3.5-lightning-free) routes its entire output
-    // through `delta.reasoning` and only emits the final `delta.content` in
-    // one chunk at the very end, sometimes after 1500+ reasoning tokens;
-    // observed live to intermittently end the stream with no content chunk
-    // at all (~1 in 3 calls in a small sample), which `collect()` sees as an
-    // empty string. `engine::propose_prerequisites`'s own doc comment
-    // already treats an empty tree as a normal, common answer — a failure to
-    // read one is indistinguishable in effect from a model that genuinely
-    // found no prerequisites, so this is the same safe default the parser
-    // already applies to a well-formed `[]`, not new fallback behavior. A
-    // real provider/network failure (`EngineError::Provider`) still
-    // surfaces: it means the `Ai` this call shares with `generate_outline`
-    // is unusable, and that failure will resurface moments later regardless.
+    // A parse failure degrades to an empty tree rather than a 502. The
+    // original motivating case for this (a reasoning-heavy fast-tier model
+    // routing its entire output through the streaming `reasoning` delta and
+    // never reaching a final `content` chunk) is now fixed structurally —
+    // `engine::collect` asks for `stream: false` instead of buffering SSE
+    // (§14: this call is never rendered live anyway), which reliably gets a
+    // clean split between reasoning and content. This branch stays as a
+    // backstop for the residual case (the model answers with malformed JSON
+    // despite the contract) rather than the primary fix. `propose_prerequisites`'s
+    // own doc comment already treats an empty tree as a normal, common
+    // answer — a failure to read one is indistinguishable in effect from a
+    // model that genuinely found no prerequisites, so this is the same safe
+    // default the parser already applies to a well-formed `[]`, not new
+    // fallback behavior. A real provider/network failure
+    // (`EngineError::Provider`) still surfaces: it means the `Ai` this call
+    // shares with `generate_outline` is unusable, and that failure will
+    // resurface moments later regardless.
     let forest = match engine::propose_prerequisites(&ai, &body.topic, &objective).await {
         Ok(forest) => forest,
         Err(crate::engine::EngineError::Parse(msg)) => {

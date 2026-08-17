@@ -95,6 +95,21 @@ impl Provider {
             Provider::Mock(m) => Ok(m.stream(req)),
         }
     }
+
+    /// Non-streamed completion — for callers that buffer the whole response
+    /// before use anyway (`engine::collect`, §14: streaming exists for TTFT
+    /// on moves rendered token-by-token to the reader; a structured/JSON-only
+    /// call like an outline or a rubric proposal is never shown live, so
+    /// asking the provider to stream it bought nothing and cost reliability
+    /// — confirmed live against a reasoning-heavy model that routed its
+    /// entire output through the streaming `reasoning` delta and only
+    /// sometimes reached a final `content` chunk at all).
+    pub async fn complete(&self, req: ChatRequest) -> Result<String, ProviderError> {
+        match self {
+            Provider::OpenAiCompat(p) => p.complete(req).await,
+            Provider::Mock(m) => Ok(m.complete(req)),
+        }
+    }
 }
 
 /// Client for any endpoint compatible with OpenAI `chat/completions`.
@@ -179,6 +194,69 @@ impl OpenAiCompat {
 
         Ok(Box::pin(stream))
     }
+
+    /// Non-streamed `chat/completions` (`stream: false`) — the provider
+    /// returns the whole message in one JSON object instead of SSE deltas.
+    /// For a reasoning model this also gets a clean split (the provider's
+    /// own `message.reasoning` vs. `message.content`) that the streaming
+    /// path doesn't reliably deliver for every request.
+    async fn complete(&self, req: ChatRequest) -> Result<String, ProviderError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            model: &'a str,
+            messages: &'a [ChatMessage],
+            stream: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f32>,
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            choices: Vec<Choice>,
+        }
+        #[derive(Deserialize)]
+        struct Choice {
+            message: Msg,
+        }
+        #[derive(Deserialize)]
+        struct Msg {
+            content: Option<String>,
+        }
+
+        let mut builder = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&Body {
+                model: &req.model,
+                messages: &req.messages,
+                stream: false,
+                temperature: req.temperature,
+            });
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Api { status, body });
+        }
+
+        let body: Resp = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
+        Ok(body
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .unwrap_or_default())
+    }
 }
 
 /// Fake provider: streams a response token by token (word by word) — to run the
@@ -218,6 +296,10 @@ impl MockProvider {
             }
         };
         Box::pin(stream)
+    }
+
+    fn complete(&self, req: ChatRequest) -> String {
+        (self.responder)(&req)
     }
 }
 

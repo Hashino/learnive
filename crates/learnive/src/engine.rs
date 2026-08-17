@@ -8,7 +8,6 @@
 //! rubric, grading). The rubric is generated in a **separate** call from the
 //! prose and kept server-only (§8) — the student never sees it.
 //!
-use futures_util::StreamExt;
 use rand::{Rng, distributions::Alphanumeric};
 use serde::{Deserialize, Serialize};
 
@@ -288,11 +287,22 @@ pub struct PrereqNode {
 /// confirmation screen this feeds — a whole tree, visible and podable branch
 /// by branch before a single token of content gets generated — is the real
 /// backstop against runaway breadth, not prompt restraint (§S15 "como isto
-/// não vira Principia Mathematica"). Fast tier: titles only, so tree size
-/// doesn't change the cost class the way generating each node's content
-/// would. An empty result (`[]`) is a normal, common answer — most
-/// objectives need no prerequisites beyond common knowledge — not a parse
-/// failure.
+/// não vira Principia Mathematica"). An empty result (`[]`) is a normal,
+/// common answer — most objectives need no prerequisites beyond common
+/// knowledge — not a parse failure.
+///
+/// Robust tier, deliberately, though this is a titles-only call that would
+/// otherwise look like "frequent cheap task" (§12.1 Fast territory): confirmed
+/// live (2026-08-17) that the configured Fast-tier model — a free reasoning
+/// model — reliably answered "no prerequisites" for exactly the example
+/// from S15's own spec ("integração" → algebra/limites/derivadas), 0-for-6
+/// across raw non-streamed provider calls and the app's own code path,
+/// while the Robust-tier model produced the correct decomposition 2-for-2 on
+/// the identical prompt. This is a one-time call per cold start (not
+/// per-block like exercise generation), so the cost tradeoff favors
+/// correctness: a wrong answer here isn't graded and corrected later like a
+/// bad exercise — it silently skips the whole toggle-list confirmation step
+/// this session was called in to fix in the first place.
 pub async fn propose_prerequisites(
     ai: &Ai,
     topic: &str,
@@ -300,7 +310,7 @@ pub async fn propose_prerequisites(
 ) -> Result<Vec<PrereqNode>, EngineError> {
     let text = collect(
         ai,
-        Tier::Fast,
+        Tier::Robust,
         prompt::propose_prerequisites(topic, objective),
     )
     .await?;
@@ -608,20 +618,26 @@ pub fn finalize_node(
     wrap_article(doc_id, node_id, &format!("{tagged_content_html}\n{form}"))
 }
 
-/// Collects a full stream into a String (for non-streamed calls). Also reused
-/// by `movement.rs` (S2) — `decide_move`/`generate_move` are non-streamed the
-/// same way outline/exercise/grading are.
+/// A full, non-streamed completion (for calls never rendered live to the
+/// reader — §14: streaming exists for TTFT on moves shown token-by-token;
+/// a structured/JSON-only call like an outline or a rubric proposal was
+/// always buffered whole before use anyway, so requesting `stream: true`
+/// and reassembling it bought nothing). Also reused by `movement.rs` (S2) —
+/// `decide_move`/`generate_move` are non-streamed the same way
+/// outline/exercise/grading are.
+///
+/// Confirmed live (2026-08-17) this isn't just a latency nicety: against a
+/// reasoning-heavy model, the streaming path routed its entire output
+/// through the `reasoning` delta and only sometimes reached a final
+/// `content` chunk at all, while the identical prompt via `stream: false`
+/// reliably returned a clean, complete answer — `Ai::complete` sidesteps
+/// that class of failure structurally instead of degrading around it.
 pub(crate) async fn collect(
     ai: &Ai,
     tier: Tier,
     messages: Vec<ChatMessage>,
 ) -> Result<String, EngineError> {
-    let mut stream = ai.stream(tier, messages).await?;
-    let mut out = String::new();
-    while let Some(token) = stream.next().await {
-        out.push_str(&token?);
-    }
-    Ok(out)
+    Ok(ai.complete(tier, messages).await?)
 }
 
 /// Injects `data-exercise-id`/`data-rubric-id`/`data-block-id` into the first

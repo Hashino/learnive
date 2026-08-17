@@ -82,6 +82,22 @@ impl Ai {
             })
             .await
     }
+
+    /// Non-streamed completion in the requested tier — for callers that
+    /// never render the response live (`engine::collect`, §14).
+    pub async fn complete(
+        &self,
+        tier: Tier,
+        messages: Vec<ChatMessage>,
+    ) -> Result<String, ProviderError> {
+        self.provider
+            .complete(ChatRequest {
+                model: self.models.for_tier(tier).to_string(),
+                messages,
+                temperature: None,
+            })
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +134,19 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .concat();
+        assert_eq!(out, "generated answer");
+    }
+
+    #[tokio::test]
+    async fn ai_completes_via_provider_without_streaming() {
+        let ai = Ai::new(
+            Provider::Mock(MockProvider::new("generated answer")),
+            Models::single("mock"),
+        );
+        let out = ai
+            .complete(Tier::Robust, vec![ChatMessage::user("hi")])
+            .await
+            .unwrap();
         assert_eq!(out, "generated answer");
     }
 }
