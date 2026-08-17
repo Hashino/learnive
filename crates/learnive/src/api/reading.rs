@@ -552,6 +552,18 @@ pub(super) struct NodePrep {
     /// `MoveContext::review_mode` so the move prompts ask for a short pass
     /// (definition + a couple of exercises) instead of full generation.
     pub(super) review_mode: bool,
+    /// §S15: the title of this item's PARENT in the prerequisite tree
+    /// (`item.parent_id`), when it has one — fed to `MoveContext::parent_title`
+    /// so a sub-node's prompt can be told to stay inside its own narrow scope
+    /// instead of drifting into the parent's broader concept. Every prompt
+    /// already gets `topic` (the whole document's subject) alongside
+    /// `item_title` (this node's own, narrower one); with nothing telling the
+    /// model to keep those apart, a prerequisite sub-node's content leaned on
+    /// the document topic and taught the parent's own material instead
+    /// (observed live, 2026-08-17 — a "Defining and calling functions in
+    /// Rust" review sub-node ended up teaching recursion's base case/
+    /// recursive step, the parent node's own concept).
+    pub(super) parent_title: Option<String>,
 }
 
 /// Loads the outline, resolves the requested item by its stable id, and
@@ -643,6 +655,13 @@ pub(super) async fn prepare(
         .map(|i| i.title.clone())
         .collect();
     let review_mode = item.mode == NodeMode::Review;
+    let parent_title = item.parent_id.as_deref().and_then(|pid| {
+        outline
+            .items
+            .iter()
+            .find(|i| i.id == pid)
+            .map(|i| i.title.clone())
+    });
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -654,6 +673,7 @@ pub(super) async fn prepare(
         outline_titles,
         children_titles,
         review_mode,
+        parent_title,
     })
 }
 

@@ -100,6 +100,7 @@ pub async fn generate_node(
             profile: prep.profile.clone(),
             children_titles: prep.children_titles.clone(),
             review_mode: prep.review_mode,
+            parent_title: prep.parent_title.clone(),
             ..Default::default()
         };
         let mut content_html = String::new();

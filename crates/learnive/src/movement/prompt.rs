@@ -172,6 +172,29 @@ fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
     }
 }
 
+/// §S15: when this node is a prerequisite sub-node, every move prompt
+/// already sees `topic` (the whole document's subject) alongside
+/// `item_title` (this node's own, narrower concept) — with nothing telling
+/// the model to keep those apart, the document topic (usually the thing the
+/// PARENT node teaches) bled into the sub-node's own content instead of the
+/// sub-node's narrower concept staying self-contained. Observed live
+/// (2026-08-17): a "Defining and calling functions in Rust" prerequisite
+/// node, in a "recursive functions in Rust" document, ended up teaching
+/// recursion's base case/recursive step and setting a recursive exercise —
+/// the parent node's own material, taught before the parent node existed.
+fn scope_addendum(parent_title: Option<&str>, item_title: &str) -> String {
+    match parent_title {
+        None => String::new(),
+        Some(parent) => format!(
+            " This node is a PREREQUISITE STEP toward \"{parent}\", which is \
+             its own separate node, taught later. Stay strictly inside \
+             \"{item_title}\"'s own scope here: do not teach, preview, or \
+             lean on techniques/content specific to \"{parent}\" — leave \
+             that entirely for its own node."
+        ),
+    }
+}
+
 fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
     let base = match move_type {
         MoveType::Explain => {
@@ -220,8 +243,9 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         String::new()
     };
     format!(
-        "{base}{integration}{}",
-        review_addendum(ctx.review_mode, move_type)
+        "{base}{integration}{}{}",
+        review_addendum(ctx.review_mode, move_type),
+        scope_addendum(ctx.parent_title.as_deref(), &ctx.item_title)
     )
 }
 
@@ -398,5 +422,29 @@ mod tests {
         let bare = MoveContext::default();
         let bare_explain = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
         assert!(!bare_explain.contains("REVIEW"));
+    }
+
+    /// §S15: a prerequisite sub-node's prompt must name its parent and tell
+    /// the model to stay out of the parent's own scope — the fix for content
+    /// observed drifting into the parent's material (2026-08-17 live report).
+    /// A node with no parent must not see this instruction at all.
+    #[test]
+    fn sub_node_is_told_to_stay_out_of_its_parents_scope() {
+        let sub_node = MoveContext {
+            item_title: "Defining and calling functions in Rust".into(),
+            parent_title: Some("recursive functions in Rust".into()),
+            ..Default::default()
+        };
+        let explain_sys = &generate_move_streamed(MoveType::Explain, &sub_node)[0].content;
+        assert!(explain_sys.contains("PREREQUISITE STEP"));
+        assert!(explain_sys.contains("recursive functions in Rust"));
+        assert!(explain_sys.contains("Defining and calling functions in Rust"));
+
+        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &sub_node)[0].content;
+        assert!(test_sys.contains("PREREQUISITE STEP"));
+
+        let bare = MoveContext::default();
+        let bare_explain = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
+        assert!(!bare_explain.contains("PREREQUISITE STEP"));
     }
 }

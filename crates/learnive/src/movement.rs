@@ -202,6 +202,13 @@ pub struct MoveContext {
     /// full first-time generation; the gate is still the same
     /// `Demonstrated` grade any node needs.
     pub review_mode: bool,
+    /// §S15: the title of this node's PARENT in the prerequisite tree, when
+    /// it has one — every prompt already gets `topic` (whole document) and
+    /// `item_title` (this node's own concept), with nothing distinguishing
+    /// them from a THIRD scope in between: the parent's own, broader concept.
+    /// A prerequisite sub-node's prompt is told to stay out of it (§S15,
+    /// `purpose`'s `scope_addendum`) — the parent gets its own node later.
+    pub parent_title: Option<String>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.
