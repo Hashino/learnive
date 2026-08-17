@@ -30,7 +30,9 @@ use learnive_core::{Anchor, InteractionItem, Node, ThreadKind, ensure_block_ids}
 use crate::ai::{Ai, MockProvider, Models, OpenAiCompat, Provider, Tier};
 use crate::app::AppState;
 use crate::config::{AppConfig, Intent, ProviderKind};
-use crate::engine::{self, AskDecision, Grade, ObjectiveGrade, Outline, OutlineItem, Rubric};
+use crate::engine::{
+    self, AskDecision, Grade, NodeMode, ObjectiveGrade, Outline, OutlineItem, PrereqNode, Rubric,
+};
 use crate::events::EventKind;
 use crate::events::aggregate::{
     NodeState, activity_counts, calibrate_rung, ladder_signals, node_generated, node_states,

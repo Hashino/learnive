@@ -134,6 +134,25 @@
           </p>
         </div>
 
+        <!-- §S15: prerequisite tree confirmation — only shown when
+             `propose_prerequisites` returned a non-empty tree. Every
+             branch is podable in one click (skip/review cascade), which is
+             the real backstop against a runaway curriculum, not the
+             proposal prompt alone. -->
+        <div id="prereqConfirm" hidden>
+          <h2 data-i18n="prereq.title">Before we start</h2>
+          <p class="muted" data-i18n="prereq.hint">
+            These look like prerequisites for what you asked. Mark what you
+            already know as review or skip — everything else is taught in
+            full.
+          </p>
+          <ul id="prereqTree" class="prereq-tree"></ul>
+          <p>
+            <button type="button" id="prereqConfirmBtn" data-i18n="prereq.confirm">Confirm</button>
+            <button type="button" id="prereqBackBtn" data-i18n="objective.back">Back</button>
+          </p>
+        </div>
+
         <p id="startStatus" class="muted"></p>
       </section>
 

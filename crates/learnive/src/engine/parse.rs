@@ -1,5 +1,5 @@
 use super::{
-    AskDecision, Assessment, EngineError, ExerciseAndRubric, ObjectiveProposal, Rubric,
+    AskDecision, Assessment, EngineError, ExerciseAndRubric, ObjectiveProposal, PrereqNode, Rubric,
     RubricObjective,
 };
 use learnive_core::ObjectiveType;
@@ -30,6 +30,16 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
     } else {
         Ok(AskDecision::Inline)
     }
+}
+
+/// Prerequisite tree (§S15): a JSON array of `{title, children}`, parsed
+/// recursively by `serde` directly (`PrereqNode::children` already defaults
+/// to empty). `Some(vec![])` for an explicit empty array is a valid, common
+/// answer (most objectives need no prerequisites) — only unparseable text
+/// returns `None`.
+pub fn prereq_tree(text: &str) -> Option<Vec<PrereqNode>> {
+    let json = extract_json(text)?;
+    serde_json::from_str::<Vec<PrereqNode>>(json).ok()
 }
 
 /// Extracts the first JSON block (`{...}` or `[...]`) from the text, tolerating

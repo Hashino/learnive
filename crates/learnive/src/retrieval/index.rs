@@ -164,6 +164,15 @@ impl Retriever {
         self.index.is_empty()
     }
 
+    /// The embedder instance backing this index — reused (never a second
+    /// model load) by callers that need a raw text→vector embedding outside
+    /// the corpus index itself, e.g. §S15's cross-document prerequisite
+    /// matching (a separate, small, in-memory comparison over node titles,
+    /// not the corpus `VectorIndex`).
+    pub fn embedder(&self) -> &Embedder {
+        &self.embedder
+    }
+
     pub fn len(&self) -> usize {
         self.index.len()
     }

@@ -1315,10 +1315,11 @@ fn spawn_ai() -> crate::ai::Ai {
 
 #[tokio::test]
 async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
-    // §S8: the tutor can decide a question needs a real new section
-    // rather than a short inline reply — a real, versioned, revisitable
-    // `Node`, present in `outline.json`, parented to the node that
-    // spawned it, but never shown in the main-line sidebar.
+    // §S8, extended by §S15: the tutor can decide a question needs a real
+    // new section rather than a short inline reply — a real, versioned,
+    // revisitable `Node`, present in `outline.json`, parented to the node
+    // that spawned it, and now ALSO shown in the sidebar tree as its child
+    // (§S15 unified `parent_id` into the universal tree/sidebar pointer).
     let state = test_state_with_ai(spawn_ai());
     let call = |req: Request<Body>| {
         let state = state.clone();
@@ -1389,8 +1390,8 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
     // Prose-only in this slice: no exercise/gate on a spawned sub-node.
     assert!(sub_view["exercise_block_id"].is_null());
 
-    // Present in outline.json (parented, no prerequisites of its own),
-    // but never shown in the main-line sidebar.
+    // Present in outline.json (parented, no prerequisites of its own —
+    // §S15: never a main-graph gate).
     let outline_json = state.store.read_doc_file(&doc_id, "outline.json").unwrap();
     let outline: crate::engine::Outline = serde_json::from_str(&outline_json).unwrap();
     let sub_item = outline
@@ -1401,6 +1402,8 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
     assert_eq!(sub_item.parent_id.as_deref(), Some(node0.as_str()));
     assert!(sub_item.prerequisites.is_empty());
 
+    // §S15: shown in the sidebar tree, nested under the node that spawned
+    // it — `parent_id` now decides shape (sidebar nesting), never gating.
     let (_, body) = call(authed(
         "GET",
         &format!("/api/documents/{doc_id}/outline"),
@@ -1408,13 +1411,12 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
     ))
     .await;
     let sidebar: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let sidebar_ids: Vec<&str> = sidebar["items"]
-        .as_array()
-        .unwrap()
+    let sidebar_items = sidebar["items"].as_array().unwrap();
+    let sub_view = sidebar_items
         .iter()
-        .map(|i| i["id"].as_str().unwrap())
-        .collect();
-    assert!(!sidebar_ids.contains(&sub_id.as_str()));
+        .find(|i| i["id"].as_str() == Some(sub_id.as_str()))
+        .expect("sub-node must be in the sidebar tree (§S15)");
+    assert_eq!(sub_view["parent_id"], node0.as_str());
 
     // The parent's own interaction layer references the child, not a
     // woven-in-place answer.

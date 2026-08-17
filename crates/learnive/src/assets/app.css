@@ -597,6 +597,52 @@ button:disabled {
 #outline li.state-demonstrated:hover {
   color: var(--accent);
 }
+/* §S15: a sub-node (decomposed prerequisite or question-spawned
+   elaboration) nests under its parent — its own `<ul>`, indented like any
+   nested list, no extra decoration needed beyond that. */
+#outline li ul {
+  padding-left: 1.1rem;
+  margin: 0.15rem 0 0.15rem 0;
+}
+#outline .outline-row {
+  display: inline;
+}
+#outline li.mode-review .outline-row {
+  font-style: italic;
+}
+
+/* §S15 prerequisite tree confirmation (cold start) */
+.prereq-tree,
+.prereq-tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+.prereq-tree ul {
+  padding-left: 1.4rem;
+  border-left: 1px solid var(--card-border);
+  margin: 0.35rem 0 0.35rem 0.4rem;
+}
+.prereq-tree li {
+  margin: 0.5rem 0;
+}
+.prereq-tree .prereq-title {
+  font-weight: 600;
+}
+.prereq-tree .prereq-actions {
+  display: inline-flex;
+  gap: 0.75rem;
+  margin-left: 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.prereq-tree .prereq-actions label {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
 .prose {
   min-height: 2rem;
 }

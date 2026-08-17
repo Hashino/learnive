@@ -51,6 +51,11 @@ const state = {
   // sidebar's document list shows and what boot() resumes from.
   docs: [],
   items: [],
+  // §S15: the same items, unfiltered (sub-nodes included) — `renderOutline`
+  // nests on `parent_id` from this; `items` above stays main-line-only for
+  // every consumer that predates the tree (skip eligibility, lazy
+  // neighbor-loading, "next available" advance).
+  allItems: [],
   currentId: null,
   nodeId: null,
   suggestedRevisit: null,

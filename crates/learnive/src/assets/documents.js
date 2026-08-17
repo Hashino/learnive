@@ -36,31 +36,161 @@ el("objectiveBackBtn").addEventListener("click", () => {
   el("startForm").hidden = false;
 });
 
+// §S15: the objective's own outline still comes from the "eager
+// generation" guard unchanged — this is a SEPARATE, more generous call
+// proposing what the objective presupposes, shown as a podable tree
+// before anything generates. Skipped entirely (straight to
+// `createLivingDocument`) when the proposal comes back empty, which is
+// the common case for a simple, self-contained request.
+let pendingObjectiveText = "";
+let pendingPrereqTree = [];
+
 el("objectiveConfirmBtn").addEventListener("click", async () => {
-  const objective_text = el("objectiveText").value.trim();
-    el("startStatus").textContent = t("status.curriculum");
+  pendingObjectiveText = el("objectiveText").value.trim();
+  el("startStatus").textContent = t("status.curriculum");
   try {
-    const resp = await postJson("/api/documents", {
+    const resp = await postJson("/api/prerequisites/propose", {
       topic: pendingTopic,
-      objective_text,
-      name: pendingName,
+      objective_text: pendingObjectiveText,
     });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    state.docId = data.doc_id;
-    state.items = data.items;
-    setCurrentDocument(data.doc_id, data.name);
-    el("coldstart").hidden = true;
-    el("doc").hidden = false;
-    renderOutline();
-    showOutlinePane();
-    await refreshDocumentList();
-    generateNode(state.items[0].id);
+    el("startStatus").textContent = "";
+    if (!data.tree || data.tree.length === 0) {
+      await createLivingDocument(pendingObjectiveText, []);
+      return;
+    }
+    pendingPrereqTree = data.tree;
+    initPrereqActions(pendingPrereqTree);
+    renderPrereqTree();
+    el("objectiveConfirm").hidden = true;
+    el("prereqConfirm").hidden = false;
   } catch (err) {
     el("startStatus").innerHTML =
       '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
 });
+
+el("prereqBackBtn").addEventListener("click", () => {
+  el("prereqConfirm").hidden = true;
+  el("objectiveConfirm").hidden = false;
+});
+
+el("prereqConfirmBtn").addEventListener("click", async () => {
+  await createLivingDocument(pendingObjectiveText, pendingPrereqTree);
+});
+
+// §S15 toggle tree: every node defaults to what the server suggested
+// (`learn` — never seen anywhere; `review` — already `Demonstrated` in
+// another document) and is freely re-toggleable afterwards, even inside a
+// branch that just got cascaded (§S15 co-design: the parent click only
+// sets the branch's default, it doesn't lock the children).
+function initPrereqActions(nodes) {
+  for (const n of nodes) {
+    n.action = n.suggested;
+    initPrereqActions(n.children || []);
+  }
+}
+
+function cascadePrereqAction(node, action) {
+  node.action = action;
+  for (const c of node.children || []) cascadePrereqAction(c, action);
+}
+
+function findPrereqNode(nodes, id) {
+  for (const n of nodes) {
+    if (n.id === id) return n;
+    const found = findPrereqNode(n.children || [], id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function renderPrereqNode(node) {
+  const knownNote = node.known
+    ? ' <span class="muted">(' +
+      escapeHtml(t("prereq.knownIn", node.known.doc_name)) +
+      ")</span>"
+    : "";
+  const childrenHtml = (node.children || []).length
+    ? "<ul>" + node.children.map(renderPrereqNode).join("") + "</ul>"
+    : "";
+  const actions = ["learn", "review", "skip"]
+    .map(
+      (a) =>
+        '<label><input type="radio" name="prereq-' +
+        node.id +
+        '" value="' +
+        a +
+        '"' +
+        (node.action === a ? " checked" : "") +
+        "> " +
+        t("prereq.action." + a) +
+        "</label>",
+    )
+    .join("");
+  return (
+    '<li data-id="' +
+    node.id +
+    '">' +
+    '<span class="prereq-title">' +
+    escapeHtml(node.title) +
+    knownNote +
+    "</span> " +
+    '<span class="prereq-actions" data-id="' +
+    node.id +
+    '">' +
+    actions +
+    "</span>" +
+    childrenHtml +
+    "</li>"
+  );
+}
+
+function renderPrereqTree() {
+  el("prereqTree").innerHTML = pendingPrereqTree.map(renderPrereqNode).join("");
+  el("prereqTree")
+    .querySelectorAll("input[type=radio]")
+    .forEach((input) => {
+      input.addEventListener("change", () => {
+        const id = input.closest(".prereq-actions").dataset.id;
+        const node = findPrereqNode(pendingPrereqTree, id);
+        if (node) cascadePrereqAction(node, input.value);
+        renderPrereqTree();
+      });
+    });
+}
+
+async function createLivingDocument(objective_text, prerequisites) {
+  el("startStatus").textContent = t("status.curriculum");
+  try {
+    const resp = await postJson("/api/documents", {
+      topic: pendingTopic,
+      objective_text,
+      name: pendingName,
+      prerequisites,
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    state.docId = data.doc_id;
+    setOutlineItems(data.items);
+    setCurrentDocument(data.doc_id, data.name);
+    el("coldstart").hidden = true;
+    el("prereqConfirm").hidden = true;
+    el("doc").hidden = false;
+    renderOutline();
+    showOutlinePane();
+    await refreshDocumentList();
+    // §S15: the main line's own first item is no longer necessarily the
+    // first thing to open — a confirmed prerequisite tree can gate it, in
+    // which case the first available node is a prerequisite leaf instead.
+    const first = state.allItems.find((it) => it.state === "available");
+    if (first) generateNode(first.id);
+  } catch (err) {
+    el("startStatus").innerHTML =
+      '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
+  }
+}
 
 // --- Documents: resume, switch, rename (§S12) -------------------------
 // The app used to always cold-start: documents were persisted under
@@ -183,10 +313,13 @@ async function openDocument(summary) {
   await refreshOutline();
   if (summary.resume_node_id) {
     await openNode(summary.resume_node_id);
-  } else if (state.items.length) {
+  } else if (state.allItems.length) {
     // No node generated yet — the document opens by generating the first
-    // one, rather than parking on a placeholder waiting for a click.
-    generateNode(state.items[0].id);
+    // AVAILABLE one, rather than parking on a placeholder waiting for a
+    // click. §S15: a confirmed prerequisite tree can gate the main line's
+    // own first item, so that isn't necessarily it — walk the full tree.
+    const first = state.allItems.find((it) => it.state === "available");
+    if (first) generateNode(first.id);
   } else {
     // Outline itself came back empty — genuinely nothing to show yet.
     el("nodeSections").innerHTML = "";
@@ -233,12 +366,14 @@ el("newDocBtn").addEventListener("click", () => {
   el("docName").textContent = "";
   resetNodeView();
   state.items = [];
+  state.allItems = [];
   renderOutline();
   showOutlinePane();
   el("doc").hidden = true;
   el("coldstart").hidden = false;
   el("startForm").hidden = false;
   el("objectiveConfirm").hidden = true;
+  el("prereqConfirm").hidden = true;
   el("startStatus").textContent = "";
   el("topic").value = "";
   el("topic").focus();

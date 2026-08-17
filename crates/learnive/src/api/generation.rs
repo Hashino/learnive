@@ -98,6 +98,8 @@ pub async fn generate_node(
             grounding: prep.grounding.clone(),
             objective: prep.objective.clone(),
             profile: prep.profile.clone(),
+            children_titles: prep.children_titles.clone(),
+            review_mode: prep.review_mode,
             ..Default::default()
         };
         let mut content_html = String::new();
@@ -442,15 +444,30 @@ pub async fn decide_plan_proposal(
                 })
                 .collect();
             // A `plan` move only ever proposes titles for the main line
-            // (§S4/§S5) — sub-nodes spawned from a question (§S8) are never
-            // among them, so rebuilding `outline.items` from `proposed`
-            // wholesale would silently drop them. Preserve them verbatim.
+            // (§S4/§S5) — sub-nodes spawned from a question (§S8) and
+            // prerequisite-tree items (§S15) are never among them, so
+            // rebuilding `outline.items` from `proposed` wholesale would
+            // silently drop them. Preserve them verbatim.
             let sub_nodes: Vec<OutlineItem> = outline
                 .items
                 .iter()
                 .filter(|i| i.parent_id.is_some())
                 .cloned()
                 .collect();
+            // §S15: the old main-line item 0 carries the prerequisite tree's
+            // root ids as its own `prerequisites` (nothing else can be there
+            // — idx 0 has no chain predecessor). Carried forward onto the new
+            // item 0 so a `plan` reorder doesn't silently unlock content that
+            // was gated behind an unfinished prerequisite. If item 0's title
+            // changed, the roots' own `parent_id` still points at the old id
+            // — the same accepted degradation a title-only rename already
+            // causes for chain prerequisites (see this fn's doc comment).
+            let carried_prereqs = outline
+                .items
+                .iter()
+                .find(|i| i.parent_id.is_none())
+                .map(|i| i.prerequisites.clone())
+                .unwrap_or_default();
             outline.items = proposal
                 .proposed
                 .iter()
@@ -461,11 +478,12 @@ pub async fn decide_plan_proposal(
                     id,
                     title,
                     prerequisites: if idx == 0 {
-                        Vec::new()
+                        carried_prereqs.clone()
                     } else {
                         vec![ids[idx - 1].clone()]
                     },
                     parent_id: None,
+                    mode: NodeMode::Learn,
                 })
                 .collect();
             outline.items.extend(sub_nodes);

@@ -51,39 +51,77 @@ async function boot() {
   if (pick) await openDocument(pick);
 }
 
-// Renders the outline with its gate state (§S5): locked items are
-// shown but not clickable, available/demonstrated items jump straight
-// to that node (not just "next" — a diamond can leave several
-// available at once, even though today's outlines are all linear).
+// §S15: splits an `OutlineResp.items` response into the main line
+// (`state.items`, unchanged shape/meaning — everything that isn't part of
+// the sidebar tree already relies on this being main-line-only: skip
+// eligibility, neighbor lazy-loading, "next available" advance) and the
+// full tree (`state.allItems`, used only by `renderOutline` below to nest
+// sub-nodes — a decomposed prerequisite or a question-spawned elaboration,
+// both `parent_id`-pointing since §S15 unified them).
+function setOutlineItems(items) {
+  state.allItems = items;
+  state.items = items.filter((it) => !it.parent_id);
+}
+
+// Renders the outline as a tree (§S15, extending §S5's gate state):
+// locked items are shown but not clickable, available/demonstrated items
+// jump straight to that node. A sub-node (question-spawned or a decomposed
+// prerequisite) nests under whatever item its `parent_id` points to;
+// dangling `parent_id` (rare — e.g. a `plan` reorder minted a fresh id for
+// the item it used to point to) falls back to top-level rather than being
+// dropped.
 function renderOutline() {
-  el("outline").innerHTML = state.items
-    .map((it) => {
-      const cls = [
-        it.id === state.currentId ? "current" : "",
-        "state-" + it.state,
-      ]
-        .filter(Boolean)
-        .join(" ");
-      const badge =
-        it.state === "locked" ? " 🔒" : it.state === "demonstrated" ? " ✓" : "";
-      return (
-        '<li class="' +
-        cls +
-        '" data-id="' +
-        it.id +
-        '">' +
-        escapeHtml(it.title) +
-        badge +
-        "</li>"
-      );
-    })
-    .join("");
+  const byParent = new Map();
+  for (const it of state.allItems || state.items) {
+    const key = it.parent_id && state.allItems.some((p) => p.id === it.parent_id)
+      ? it.parent_id
+      : null;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(it);
+  }
+  function renderLevel(parentKey) {
+    const items = byParent.get(parentKey) || [];
+    return items.map((it) => renderItem(it)).join("");
+  }
+  function renderItem(it) {
+    const cls = [
+      it.id === state.currentId ? "current" : "",
+      "state-" + it.state,
+      it.mode === "review" ? "mode-review" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const badge =
+      it.state === "locked" ? " 🔒" : it.state === "demonstrated" ? " ✓" : "";
+    const reviewBadge = it.mode === "review" ? " " + t("prereq.reviewBadge") : "";
+    const children = renderLevel(it.id);
+    return (
+      '<li class="' +
+      cls +
+      '" data-id="' +
+      it.id +
+      '">' +
+      '<span class="outline-row" data-id="' +
+      it.id +
+      '">' +
+      escapeHtml(it.title) +
+      reviewBadge +
+      badge +
+      "</span>" +
+      (children ? "<ul>" + children + "</ul>" : "") +
+      "</li>"
+    );
+  }
+  // `#outline` is itself the top-level `<ol>` (§S5) — only NESTED levels
+  // get their own `<ul>` wrapper (built into `renderItem` above), so a
+  // top-level item is a direct `<li>` child exactly like before §S15.
+  el("outline").innerHTML = renderLevel(null);
   el("outline")
-    .querySelectorAll("li[data-id]")
-    .forEach((li) => {
-      const it = state.items.find((i) => i.id === li.dataset.id);
+    .querySelectorAll(".outline-row[data-id]")
+    .forEach((row) => {
+      const it = state.allItems.find((i) => i.id === row.dataset.id);
       if (it && it.state !== "locked") {
-        li.addEventListener("click", () => openNode(it.id));
+        row.addEventListener("click", () => openNode(it.id));
       }
     });
 }
@@ -111,7 +149,7 @@ async function refreshOutline() {
   const resp = await api(`/api/documents/${state.docId}/outline`);
   if (resp.ok) {
     const data = await resp.json();
-    state.items = data.items;
+    setOutlineItems(data.items);
     state.suggestedRevisit = data.suggested_revisit || null;
     renderOutline();
     renderRevisitHint();
@@ -183,7 +221,10 @@ async function renderExistingNode(id, data, opts = {}) {
 // another reachable node to skip to — never for a linear doc's last
 // (or only) available item.
 function renderSkipControl(rec) {
-  const other = state.items.find(
+  // §S15: search the full tree, not just the main line — on a
+  // prerequisite-gated document every main-line item can be locked while
+  // `currentId` sits on a sub-node, which used to hide this control entirely.
+  const other = state.allItems.find(
     (it) => it.id !== state.currentId && it.state !== "locked",
   );
   if (!other) return;
@@ -205,11 +246,12 @@ async function skipCurrentNode() {
     );
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    state.items = data.items;
+    setOutlineItems(data.items);
     state.suggestedRevisit = data.suggested_revisit || null;
     renderOutline();
     renderRevisitHint();
-    const next = state.items.find(
+    // §S15: same full-tree search as renderSkipControl above.
+    const next = state.allItems.find(
       (it) => it.id !== skippedId && it.state !== "locked",
     );
     if (next) {

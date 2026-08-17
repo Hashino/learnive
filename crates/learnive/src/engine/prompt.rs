@@ -207,6 +207,39 @@ pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
     ]
 }
 
+/// Prerequisite tree proposal (§S15) — a separate call from [`outline`],
+/// deliberately more generous: `outline`'s guard exists to stop a direct
+/// answer from ballooning into an unrelated curriculum, but a genuine
+/// prerequisite (limits/derivatives on the way to integration) may need real
+/// decomposition of its own. The confirmation tree the caller shows before
+/// generating anything is the actual backstop against runaway breadth here,
+/// not prompt restraint — so this prompt asks for honest decomposition
+/// rather than terseness.
+pub fn propose_prerequisites(topic: &str, objective: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "You propose the TREE of prerequisite concepts a curriculum \
+             objective presupposes — background the learner needs before the \
+             objective itself makes sense, not the objective's own content. \
+             Most objectives need few or even zero prerequisites: a simple, \
+             self-contained request should get an empty tree. When \
+             prerequisites are genuinely needed, give each one a title, and \
+             give a prerequisite its OWN children only when it is genuinely a \
+             bundle of separable sub-skills that each need to be \
+             demonstrated on their own — apply this same test recursively at \
+             every level, exactly like planning a normal outline; do not \
+             decompose a concept just because you could. A prerequisite that \
+             is already atomic gets no children. Order matters within a \
+             list: most basic first. Respond ONLY with a JSON array (empty \
+             array `[]` if there are no prerequisites), each element shaped \
+             {\"title\":\"...\",\"children\":[...]} (children is the same \
+             shape, recursively, and may be an empty array). No comments, no \
+             markdown, no prose outside the JSON.",
+        ),
+        ChatMessage::user(format!("Topic: {topic}\nCurriculum objective: {objective}")),
+    ]
+}
+
 /// Derives a short catalog-search phrase for source acquisition (§11) from
 /// the learner's own topic/objective — NOT a semantic search: the acquisition
 /// backend matches against textbook titles, so a full question or sentence

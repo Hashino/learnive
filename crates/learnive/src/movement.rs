@@ -187,6 +187,21 @@ pub struct MoveContext {
     /// acquisition attempts. Not persisted; scoped to one `generate_node`
     /// call, same lifetime as `prior_moves`.
     pub research_attempted: bool,
+    /// §S15: titles of this node's own children in the outline tree
+    /// (`OutlineItem::parent_id` pointing back at it) — a prerequisite
+    /// decomposed into sub-skills, or a question that spawned an
+    /// elaboration. When non-empty, the `test` move is told to integrate
+    /// what the children taught rather than probing each in isolation
+    /// again — the structural answer to shallow mastery a light pass
+    /// through prerequisites would otherwise risk.
+    pub children_titles: Vec<String>,
+    /// §S15 learn/review/skip toggle: true when this node's
+    /// `OutlineItem::mode` is `Review` — the learner already believes they
+    /// know this prerequisite. Every move prompt is told to keep it short
+    /// (a definition-level refresher, a couple of exercises) instead of
+    /// full first-time generation; the gate is still the same
+    /// `Demonstrated` grade any node needs.
+    pub review_mode: bool,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.
@@ -1036,10 +1051,16 @@ mod tests {
             ("Thermodynamics", "the first law of thermodynamics"),
             ("Linear algebra", "computing a matrix determinant"),
             ("Cellular respiration", "the stages of glycolysis"),
-            ("Probability", "expected value of a discrete random variable"),
+            (
+                "Probability",
+                "expected value of a discrete random variable",
+            ),
             ("Roman history", "the causes of the fall of the Republic"),
             ("SQL", "writing an INNER JOIN across two tables"),
-            ("Macroeconomics", "the effect of a tariff on consumer surplus"),
+            (
+                "Macroeconomics",
+                "the effect of a tariff on consumer surplus",
+            ),
         ];
 
         for (topic, item_title) in topics {
@@ -1094,7 +1115,10 @@ mod tests {
             let move_type = match decide_move(&ai, policy, &ctx).await {
                 Ok(mt) => mt,
                 Err(e) => {
-                    println!("round {round}: decide_move ERROR after {:?}: {e}", t0.elapsed());
+                    println!(
+                        "round {round}: decide_move ERROR after {:?}: {e}",
+                        t0.elapsed()
+                    );
                     continue;
                 }
             };
@@ -1112,12 +1136,18 @@ mod tests {
             let mut tokens = match generate_move_stream(&ai, move_type, &ctx).await {
                 Ok(s) => s,
                 Err(e) => {
-                    println!("round {round}: generate_move_stream ERROR after {:?}: {e}", t1.elapsed());
+                    println!(
+                        "round {round}: generate_move_stream ERROR after {:?}: {e}",
+                        t1.elapsed()
+                    );
                     continue;
                 }
             };
             let t2 = std::time::Instant::now();
-            println!("round {round}: stream() call itself returned in {:?}", t2 - t1);
+            println!(
+                "round {round}: stream() call itself returned in {:?}",
+                t2 - t1
+            );
             match tokens.next().await {
                 Some(Ok(first)) => {
                     let t3 = std::time::Instant::now();
@@ -1227,7 +1257,10 @@ mod tests {
             ("Linear algebra", "computing a matrix determinant"),
             ("Cellular respiration", "the stages of glycolysis"),
             ("Thermodynamics", "the first law of thermodynamics"),
-            ("Probability", "expected value of a discrete random variable"),
+            (
+                "Probability",
+                "expected value of a discrete random variable",
+            ),
         ];
 
         for (i, (topic, item_title)) in topics.iter().enumerate() {
@@ -1276,7 +1309,10 @@ mod tests {
             ("Linear algebra", "computing a matrix determinant"),
             ("Cellular respiration", "the stages of glycolysis"),
             ("Thermodynamics", "the first law of thermodynamics"),
-            ("Probability", "expected value of a discrete random variable"),
+            (
+                "Probability",
+                "expected value of a discrete random variable",
+            ),
         ];
 
         for (i, (topic, item_title)) in topics.iter().enumerate() {

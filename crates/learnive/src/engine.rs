@@ -48,15 +48,41 @@ pub struct OutlineItem {
     pub title: String,
     #[serde(default)]
     pub prerequisites: Vec<String>,
-    /// Set for a sub-node spawned from a question asked inside another node
-    /// (§7/§S8): the id of the node it was spawned from. `None` for every
-    /// item on the document's main line. A sub-node is never a prerequisite
-    /// of anything (asymmetric scoping — §S8) and carries none of its own in
-    /// this slice; it's excluded from the outline sidebar
-    /// (`api::outline_view`) and from "next available" advance, both filtered
-    /// on `parent_id.is_none()`.
+    /// The tree-shaped pointer for the sidebar (§S15, extending §S8): set for
+    /// a sub-node spawned from a mid-reading question OR a prerequisite
+    /// decomposed by `propose_prerequisites`, either way the id of the item
+    /// it's subordinate to. `None` for every item on the document's main
+    /// line. This field decides SHAPE only (sidebar tree nesting, inline
+    /// splice point) — whether an item gates anything is `prerequisites`'
+    /// job alone: a question-spawned child carries none of its own (never
+    /// gates its parent), while a prerequisite-tree child's id is placed in
+    /// its parent's `prerequisites` at materialization time (the parent only
+    /// becomes available once every child is `Demonstrated`). "Next
+    /// available" advance still walks the main line only (`parent_id.is_
+    /// none()`) — every call site that needs that must filter explicitly
+    /// now, since `api::outline_view` no longer does (S15's sidebar shows
+    /// the whole tree).
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// How this node's content gets generated (§S15 learn/review/skip
+    /// toggle): `Learn` is full generation as always; `Review` is a short
+    /// definition-only pass plus a couple of exercises, chosen by the
+    /// learner for a prerequisite they believe they already know. Either way
+    /// the gate is the same `Demonstrated` grade any node needs — `Review`
+    /// only shrinks the volume of exposure, never the evidence bar. A
+    /// `skip`ped item needs no mode of its own: it is never generated at
+    /// all, recorded instead as a `NodeSkipped` event (§S5).
+    #[serde(default)]
+    pub mode: NodeMode,
+}
+
+/// See [`OutlineItem::mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeMode {
+    #[default]
+    Learn,
+    Review,
 }
 
 /// Skeleton of the living document (§6).
@@ -230,10 +256,56 @@ pub fn linear_items(titles: Vec<String>) -> Vec<OutlineItem> {
             title,
             prerequisites: prev_id.into_iter().collect(),
             parent_id: None,
+            mode: NodeMode::Learn,
         });
         prev_id = Some(id);
     }
     items
+}
+
+/// One node of the prerequisite tree an objective presupposes (§S15) —
+/// titles only, no ids: `api::cold_start` mints those once the tree is
+/// resolved against existing documents, so the client has something stable
+/// to toggle and confirm against, and materialization decides gating
+/// (`OutlineItem::prerequisites`) from tree structure, not from anything
+/// carried here. Most concepts have no children; a concept only gets them
+/// when it's genuinely a bundle of separable sub-skills that must each be
+/// demonstrated on their own (the same granularity judgement `outline()`
+/// already applies at the top level, recursive here at every level).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrereqNode {
+    pub title: String,
+    #[serde(default)]
+    pub children: Vec<PrereqNode>,
+}
+
+/// Proposes the tree of prerequisite concepts an objective presupposes
+/// (§S15) — a second, separate call from [`generate_outline`], with its own,
+/// more generous discipline: `outline()`'s "eager generation" guard exists
+/// to stop a direct answer to the learner's question from ballooning into an
+/// unrelated curriculum, but a genuine prerequisite (limits/derivatives on
+/// the way to integration) might need real decomposition of its own. The
+/// confirmation screen this feeds — a whole tree, visible and podable branch
+/// by branch before a single token of content gets generated — is the real
+/// backstop against runaway breadth, not prompt restraint (§S15 "como isto
+/// não vira Principia Mathematica"). Fast tier: titles only, so tree size
+/// doesn't change the cost class the way generating each node's content
+/// would. An empty result (`[]`) is a normal, common answer — most
+/// objectives need no prerequisites beyond common knowledge — not a parse
+/// failure.
+pub async fn propose_prerequisites(
+    ai: &Ai,
+    topic: &str,
+    objective: &str,
+) -> Result<Vec<PrereqNode>, EngineError> {
+    let text = collect(
+        ai,
+        Tier::Fast,
+        prompt::propose_prerequisites(topic, objective),
+    )
+    .await?;
+    parse::prereq_tree(&text)
+        .ok_or_else(|| EngineError::Parse("could not read prerequisite tree".to_string()))
 }
 
 /// Grades an answer against the locked rubric (§8). Light tier.
@@ -931,6 +1003,38 @@ mod tests {
         );
         let ids: std::collections::HashSet<_> = outline.items.iter().map(|i| &i.id).collect();
         assert_eq!(ids.len(), 3, "every item gets a distinct id");
+    }
+
+    #[tokio::test]
+    async fn propose_prerequisites_via_mock() {
+        let ai = mock_ai(
+            r#"[{"title":"Algebra basics","children":[]},
+               {"title":"Derivatives","children":[
+                   {"title":"Product rule","children":[]},
+                   {"title":"Chain rule","children":[]}
+               ]}]"#,
+        );
+        let forest = propose_prerequisites(&ai, "calculus", "Learn integration")
+            .await
+            .unwrap();
+        assert_eq!(forest.len(), 2);
+        assert_eq!(forest[0].title, "Algebra basics");
+        assert!(forest[0].children.is_empty());
+        assert_eq!(forest[1].title, "Derivatives");
+        assert_eq!(forest[1].children.len(), 2);
+        assert_eq!(forest[1].children[0].title, "Product rule");
+    }
+
+    /// §S15: an explicit empty array is a normal, common answer (most
+    /// objectives need no prerequisites) — must not be treated as a parse
+    /// failure.
+    #[tokio::test]
+    async fn propose_prerequisites_empty_tree_is_not_an_error() {
+        let ai = mock_ai("[]");
+        let forest = propose_prerequisites(&ai, "greetings", "Say hello in French")
+            .await
+            .unwrap();
+        assert!(forest.is_empty());
     }
 
     #[tokio::test]

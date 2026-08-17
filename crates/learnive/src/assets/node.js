@@ -535,7 +535,7 @@ async function decidePlanProposal(approve) {
     );
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    state.items = data.items;
+    setOutlineItems(data.items);
     renderOutline();
   } catch (err) {
     const rec = state.sections.get(state.currentId);

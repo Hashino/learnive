@@ -132,8 +132,48 @@ fn tail_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
-fn purpose(move_type: MoveType) -> &'static str {
+/// §S15 addendum for `Test`: when this node has its own decomposed
+/// sub-concepts (a prerequisite tree, or a question that spawned an
+/// elaboration), at least one objective must require combining them — the
+/// structural answer to shallow mastery a light pass through prerequisites
+/// would otherwise risk (a node only reaches `Demonstrated` after an
+/// exercise that genuinely needs its children together, not each isolated).
+fn integration_addendum(children_titles: &[String]) -> String {
+    if children_titles.is_empty() {
+        return String::new();
+    }
+    format!(
+        " This node has its own sub-concepts, already taught separately: {}. \
+         At least one objective here MUST require combining or applying them \
+         TOGETHER, not testing any one of them in isolation again.",
+        children_titles.join(", ")
+    )
+}
+
+/// §S15 learn/review/skip: the learner marked this node as a review, not
+/// first-time learning — every move purpose gets told to shrink its scope
+/// accordingly, never to lower the evidence bar (`Test` still must grade).
+fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
+    if !review_mode {
+        return "";
+    }
     match move_type {
+        MoveType::Test => {
+            " The learner marked this as a REVIEW of something they already \
+             believe they know: keep the check to just one or two short \
+             exercises, not a full battery."
+        }
+        _ => {
+            " The learner marked this as a REVIEW of something they already \
+             believe they know, not first-time learning: keep this to a \
+             compact definition-level refresher, a few sentences, not a full \
+             lesson."
+        }
+    }
+}
+
+fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
+    let base = match move_type {
         MoveType::Explain => {
             "Write short, atomic explanatory prose for this concept. Do \
              not include an exercise or ask a question — those are separate \
@@ -173,7 +213,16 @@ fn purpose(move_type: MoveType) -> &'static str {
              learner is never asked to approve a non-change."
         }
         _ => "Produce this move's content, atomic and focused on its stated purpose.",
-    }
+    };
+    let integration = if move_type == MoveType::Test {
+        integration_addendum(&ctx.children_titles)
+    } else {
+        String::new()
+    };
+    format!(
+        "{base}{integration}{}",
+        review_addendum(ctx.review_mode, move_type)
+    )
 }
 
 /// Prompt for the **streamed** path (`MoveRender::Streamed` types): pure
@@ -193,7 +242,7 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
              <!--tactics: label-one, label-two-->. This comment is invisible \
              when rendered and is stripped before storage — it is bookkeeping, \
              not content.",
-            purpose(move_type),
+            purpose(move_type, ctx),
             continuity_note()
         )),
         ChatMessage::user(format!(
@@ -256,7 +305,7 @@ pub fn generate_move(
              \"outline\":[\"...\"]}}. Omit \"objectives\" (or leave it empty) \
              when graded=false. Omit \"outline\" (or leave it empty) for every \
              move type except \"plan\" with a concrete structural change.",
-            purpose(move_type),
+            purpose(move_type, ctx),
             continuity_note()
         )),
         ChatMessage::user(format!(
@@ -308,5 +357,46 @@ mod tests {
             ..Default::default()
         };
         assert!(!menu_text(&attempted).contains(", research"));
+    }
+
+    /// §S15: a node with materialized children must be told, in its `test`
+    /// move, to integrate them rather than probe each in isolation — the
+    /// structural answer to shallow prerequisite mastery. A node with none
+    /// must not see this instruction (it would be nonsensical noise).
+    #[test]
+    fn test_move_asks_to_integrate_children_only_when_present() {
+        let with_children = MoveContext {
+            children_titles: vec!["Product rule".into(), "Chain rule".into()],
+            ..Default::default()
+        };
+        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &with_children)[0].content;
+        assert!(sys.contains("Product rule"));
+        assert!(sys.contains("MUST require combining"));
+
+        let bare = MoveContext::default();
+        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &bare)[0].content;
+        assert!(!sys.contains("MUST require combining"));
+    }
+
+    /// §S15 learn/review/skip: a review-mode node's moves are told to stay
+    /// short, in both the streamed and structured paths — but the check
+    /// still must grade (never a lowered evidence bar).
+    #[test]
+    fn review_mode_asks_for_a_short_pass_not_a_lower_bar() {
+        let review = MoveContext {
+            review_mode: true,
+            ..Default::default()
+        };
+        let explain_sys = &generate_move_streamed(MoveType::Explain, &review)[0].content;
+        assert!(explain_sys.contains("REVIEW"));
+        assert!(explain_sys.contains("compact"));
+
+        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &review)[0].content;
+        assert!(test_sys.contains("REVIEW"));
+        assert!(test_sys.contains("MUST be graded"));
+
+        let bare = MoveContext::default();
+        let bare_explain = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
+        assert!(!bare_explain.contains("REVIEW"));
     }
 }

@@ -29,6 +29,16 @@ const I18N = {
       "Here's the objective we'll build the curriculum toward — edit it if this isn't quite right.",
     "objective.confirm": "Confirm",
     "objective.back": "Back",
+    // Prerequisite tree confirmation (§S15)
+    "prereq.title": "Before we start",
+    "prereq.hint":
+      "These look like prerequisites for what you asked. Mark what you already know as review or skip — everything else is taught in full.",
+    "prereq.confirm": "Confirm",
+    "prereq.action.learn": "Learn",
+    "prereq.action.review": "Review",
+    "prereq.action.skip": "Skip",
+    "prereq.knownIn": "known in {0}",
+    "prereq.reviewBadge": "(review)",
     // Plan proposal
     "plan.title": "Proposed outline change",
     "plan.approve": "Approve",
@@ -113,6 +123,15 @@ const I18N = {
       "Este é o objetivo para o qual vamos construir o currículo — edite se não estiver certo.",
     "objective.confirm": "Confirmar",
     "objective.back": "Voltar",
+    "prereq.title": "Antes de começar",
+    "prereq.hint":
+      "Estes parecem ser pré-requisitos para o que você pediu. Marque o que já sabe como revisar ou pular — o resto é ensinado por completo.",
+    "prereq.confirm": "Confirmar",
+    "prereq.action.learn": "Aprender",
+    "prereq.action.review": "Revisar",
+    "prereq.action.skip": "Pular",
+    "prereq.knownIn": "já aprendido em {0}",
+    "prereq.reviewBadge": "(revisão)",
     "plan.title": "Mudança de estrutura proposta",
     "plan.approve": "Aprovar",
     "plan.reject": "Rejeitar",

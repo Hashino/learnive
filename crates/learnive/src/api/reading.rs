@@ -372,6 +372,7 @@ pub async fn ask_question(
                     title: sub_title.clone(),
                     prerequisites: Vec::new(),
                     parent_id: Some(node_id.clone()),
+                    mode: NodeMode::Learn,
                 });
                 serde_json::to_string(&outline).map_err(|e| e.to_string())
             })?;
@@ -543,6 +544,14 @@ pub(super) struct NodePrep {
     /// Current outline item titles, for `generate_node` to detect whether a
     /// `plan` move's proposal is a real structural change (§5).
     pub(super) outline_titles: Vec<String>,
+    /// §S15: titles of this node's own children (`parent_id` pointing at
+    /// it) — fed to `MoveContext::children_titles` so a `test` move on a
+    /// node with a decomposed prerequisite tree can integrate them.
+    pub(super) children_titles: Vec<String>,
+    /// §S15: this item's `NodeMode` is `Review` — fed to
+    /// `MoveContext::review_mode` so the move prompts ask for a short pass
+    /// (definition + a couple of exercises) instead of full generation.
+    pub(super) review_mode: bool,
 }
 
 /// Loads the outline, resolves the requested item by its stable id, and
@@ -597,10 +606,18 @@ pub(super) async fn prepare(
 
     let event_log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
     let states = node_states(event_log.iter().map_err(|e| e.to_string())?);
-    let unlocked = item
-        .prerequisites
-        .iter()
-        .all(|p| matches!(states.get(p), Some(NodeState::Demonstrated)));
+    // §S15: a `Skipped` prerequisite satisfies the gate exactly like
+    // `Demonstrated` — a deliberate, permanent "I don't need this" is not
+    // supposed to lock the rest of the document forever, and once real
+    // trees (siblings, integration exercises gated on ALL children) exist,
+    // that's not just cosmetic: a skipped branch would otherwise leave its
+    // parent's gate impossible to ever satisfy.
+    let unlocked = item.prerequisites.iter().all(|p| {
+        matches!(
+            states.get(p),
+            Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
+        )
+    });
     if !unlocked {
         return Err("this node is locked: its prerequisites are not yet demonstrated".to_string());
     }
@@ -615,6 +632,17 @@ pub(super) async fn prepare(
     let objective = objective_for(state, doc_id);
     let profile = profile_for(state, doc_id);
     let outline_titles = outline.items.iter().map(|i| i.title.clone()).collect();
+    // §S15: titles of this node's own prerequisite-tree/question-spawned
+    // children (`parent_id` pointing back at it) — fed to the `test` move so
+    // a node with children can be told to integrate what they taught rather
+    // than testing each in isolation again (`purpose(MoveType::Test)`).
+    let children_titles = outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(item.id.as_str()))
+        .map(|i| i.title.clone())
+        .collect();
+    let review_mode = item.mode == NodeMode::Review;
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -624,6 +652,8 @@ pub(super) async fn prepare(
         objective,
         profile,
         outline_titles,
+        children_titles,
+        review_mode,
     })
 }
 

@@ -117,6 +117,13 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         // engine::prompt::propose_objective (§6.1/§S4) contract.
         return r#"{"text":"Learn the essentials of the requested topic, well enough to explain and apply it","title":"Demo document"}"#.to_string();
     }
+    if text.contains("TREE of prerequisite concepts") {
+        // engine::prompt::propose_prerequisites (§S15) contract — a small,
+        // deterministic tree so demo mode exercises the toggle-confirmation
+        // screen too, instead of always skipping straight to document
+        // creation like an empty-tree response would.
+        return r#"[{"title":"Demo prerequisite","children":[{"title":"Demo sub-skill","children":[]}]}]"#.to_string();
+    }
     if text.contains("choosing the next move") {
         // movement::decide_move (L1/L2) contract.
         return r#"{"move_type":"explain","rationale":"demo: start with an explanation"}"#
