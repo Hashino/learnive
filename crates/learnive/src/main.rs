@@ -23,6 +23,10 @@ mod source;
 mod store;
 
 use std::net::SocketAddr;
+use std::path::Path;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 #[tokio::main]
 async fn main() {
@@ -35,6 +39,23 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(7420);
+
+    // Single instance per port: the port, not the data dir, is the resource a
+    // second launch would actually collide on (`LEARNIVE_DATA_DIR` resolves
+    // relative to cwd, so it isn't a stable identity across launches). The
+    // lock lives in the system temp dir, keyed by port, so two launches find
+    // each other regardless of cwd.
+    let lock_path = std::env::temp_dir().join(format!("learnive-{port}.lock"));
+    if let Some(lock) = InstanceLock::read(&lock_path)
+        && let Some(url) = lock.verify_alive().await
+    {
+        println!("learnive is already running.");
+        println!("Open in your browser: {url}");
+        if std::env::var_os("LEARNIVE_NO_OPEN").is_none() {
+            open_browser(&url);
+        }
+        return;
+    }
 
     let state = app::AppState::new(port);
     let router = app::build_router(state.clone());
@@ -50,6 +71,12 @@ async fn main() {
         }
     };
 
+    InstanceLock {
+        port,
+        token: state.token.to_string(),
+    }
+    .write(&lock_path);
+
     let url = format!("http://127.0.0.1:{port}/?token={}", state.token);
     println!("learnive running.");
     println!("Open in your browser: {url}");
@@ -64,6 +91,66 @@ async fn main() {
     if let Err(e) = axum::serve(listener, router).await {
         eprintln!("server exited with error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Which port/token a running instance is bound to. Written (owner-only,
+/// `0600`) after a successful bind at `$TMPDIR/learnive-{port}.lock`, read
+/// before the next launch on that same port tries to bind — a crash can leave
+/// a stale file behind, so it is only ever trusted after
+/// [`InstanceLock::verify_alive`] confirms it over HTTP.
+#[derive(Serialize, Deserialize)]
+struct InstanceLock {
+    port: u16,
+    token: String,
+}
+
+impl InstanceLock {
+    fn read(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn write(&self, path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let Ok(json) = serde_json::to_vec(self) else {
+            return;
+        };
+        // Owner-only permissions (0600): this file carries the session token
+        // that gates access to the user's stored API keys (§3.1), same
+        // convention as `secret::set_owner_only`. Written before the rename
+        // so the file is never briefly world-readable.
+        let tmp = path.with_extension("lock.tmp");
+        if std::fs::write(&tmp, &json).is_err() {
+            return;
+        }
+        let _ = secret::set_owner_only(&tmp);
+        let _ = std::fs::rename(&tmp, path);
+    }
+
+    /// Confirms a live server actually answers at `port` with this exact
+    /// token — the file alone isn't enough, since it may be stale after a
+    /// crash or the port may since have been recycled by an unrelated
+    /// process. Returns the confirmed instance's URL.
+    async fn verify_alive(&self) -> Option<String> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/health", self.port))
+            .header("x-learnive-token", &self.token)
+            .send()
+            .await
+            .ok()?;
+        resp.status()
+            .is_success()
+            .then(|| format!("http://127.0.0.1:{}/?token={}", self.port, self.token))
     }
 }
 

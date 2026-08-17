@@ -100,7 +100,7 @@ impl FileStore {
 }
 
 /// Restricts a file to owner read/write (`0600`) on Unix; a no-op elsewhere.
-fn set_owner_only(path: &Path) -> io::Result<()> {
+pub(crate) fn set_owner_only(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
