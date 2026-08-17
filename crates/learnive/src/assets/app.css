@@ -616,17 +616,6 @@ button:disabled {
    the row's right edge regardless of nesting (only the left side insets,
    via the nested-`ul` padding below), which is what keeps every toggle in
    the tree — at any depth — anchored to the same right-hand column. */
-.prereq-legend {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.75rem;
-  padding-bottom: 0.35rem;
-  margin-bottom: 0.5rem;
-  border-bottom: 1px solid var(--card-border);
-  font-size: 0.75rem;
-  color: var(--muted);
-}
 .prereq-tree,
 .prereq-tree ul {
   list-style: none;
@@ -654,6 +643,13 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A sub-node under a `skip`-marked ancestor is locked to Skip (see
+   `renderPrereqNode`'s `locked` parameter, documents.js) — greyed title,
+   disabled toggle, so the branch reads as "not taught" without the user
+   being able to un-skip a piece of it independently of the whole branch. */
+.prereq-tree .prereq-row.prereq-locked .prereq-title {
+  color: var(--muted);
+}
 .prereq-tree .prereq-toggle {
   flex: 0 0 auto;
   display: inline-flex;
@@ -676,12 +672,27 @@ button:disabled {
 .prereq-tree .prereq-toggle-seg:last-child {
   border-right: none;
 }
-.prereq-tree .prereq-toggle-seg:hover:not(.active) {
+.prereq-tree .prereq-toggle-seg:hover:not(.active):not(:disabled) {
   background: var(--card-bg);
 }
-.prereq-tree .prereq-toggle-seg.active {
-  background: var(--btn-bg);
-  color: var(--btn-fg);
+.prereq-tree .prereq-toggle-seg:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+/* Color-coded by action, fixed across themes (like `.grade.*`'s nord
+   tokens above) rather than the theme-swapping `--accent`/`--btn-bg`, so
+   skip/review/learn read the same traffic-light-ish way in light or dark. */
+.prereq-tree .prereq-toggle-seg[data-action="skip"].active {
+  background: var(--nord3);
+  color: var(--nord6);
+}
+.prereq-tree .prereq-toggle-seg[data-action="review"].active {
+  background: var(--nord10);
+  color: var(--nord6);
+}
+.prereq-tree .prereq-toggle-seg[data-action="learn"].active {
+  background: var(--nord14);
+  color: var(--nord0);
 }
 .prose {
   min-height: 2rem;

@@ -87,17 +87,25 @@ function findPrereqNode(nodes, id) {
   return null;
 }
 
-function renderPrereqNode(node) {
+// `lockedBySkip`: true when an ancestor is (or was just cascaded to) `skip`
+// — a whole skipped branch is "not taught", so its descendants can't be
+// independently re-toggled without first un-skipping the branch. Forcing
+// `node.action = "skip"` here (not just visually) keeps the data model in
+// sync even for a node whose own `suggested` value came back non-skip from
+// cross-document matching before any cascade touched it.
+function renderPrereqNode(node, lockedBySkip) {
+  if (lockedBySkip) node.action = "skip";
   const knownNote = node.known
     ? ' <span class="muted">(' +
       escapeHtml(t("prereq.knownIn", node.known.doc_name)) +
       ")</span>"
     : "";
+  const childLocked = lockedBySkip || node.action === "skip";
   const childrenHtml = (node.children || []).length
-    ? "<ul>" + node.children.map(renderPrereqNode).join("") + "</ul>"
+    ? "<ul>" +
+      node.children.map((c) => renderPrereqNode(c, childLocked)).join("") +
+      "</ul>"
     : "";
-  // Order matches the legend ("Skip / Review / Learn") — a single
-  // 3-stage segmented toggle, not three separate radio boxes.
   const segments = ["skip", "review", "learn"]
     .map(
       (a) =>
@@ -107,7 +115,9 @@ function renderPrereqNode(node) {
         a +
         '" aria-pressed="' +
         (node.action === a) +
-        '">' +
+        '"' +
+        (lockedBySkip ? " disabled" : "") +
+        ">" +
         t("prereq.action." + a) +
         "</button>",
     )
@@ -116,7 +126,9 @@ function renderPrereqNode(node) {
     '<li data-id="' +
     node.id +
     '">' +
-    '<div class="prereq-row">' +
+    '<div class="prereq-row' +
+    (lockedBySkip ? " prereq-locked" : "") +
+    '">' +
     '<span class="prereq-title">' +
     escapeHtml(node.title) +
     knownNote +
@@ -133,7 +145,9 @@ function renderPrereqNode(node) {
 }
 
 function renderPrereqTree() {
-  el("prereqTree").innerHTML = pendingPrereqTree.map(renderPrereqNode).join("");
+  el("prereqTree").innerHTML = pendingPrereqTree
+    .map((n) => renderPrereqNode(n, false))
+    .join("");
   el("prereqTree")
     .querySelectorAll(".prereq-toggle-seg")
     .forEach((btn) => {
