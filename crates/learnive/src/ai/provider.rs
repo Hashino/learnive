@@ -29,6 +29,22 @@ use serde::{Deserialize, Serialize};
 /// past 45s in total even though no single gap should.
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Retries a bare transport failure (connection reset, DNS hiccup, a
+/// malformed/truncated body) before giving up — live QA runs (2026-08-18)
+/// against the free-tier default provider hit exactly this class of error
+/// ("error sending request", "error decoding response body") often enough
+/// to strand a whole node, and once every prerequisite under a locked
+/// main-line item hits the same wall, the document itself gets stuck with
+/// nothing available to generate. Only ever retries before any bytes of a
+/// successful response have reached the caller: `complete()` retries the
+/// full round trip (nothing is shown to the user until it returns — used
+/// for `test`/`profile`/outline/rubric/grading calls, never the live
+/// prose stream), `stream()` retries only the initial connect — once a
+/// chunk has actually been read from a 200 response, retrying would risk
+/// duplicating or racing content already on its way to a live SSE client.
+const TRANSIENT_RETRIES: u32 = 2;
+const RETRY_BACKOFF: Duration = Duration::from_millis(750);
+
 /// Stream of text deltas (§14 — token-by-token streaming for low TTFT).
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> + Send>>;
 
@@ -171,23 +187,35 @@ impl OpenAiCompat {
             temperature: Option<f32>,
         }
 
-        let mut builder = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&Body {
-                model: &req.model,
-                messages: &req.messages,
-                stream: true,
-                temperature: req.temperature,
-            });
-        if let Some(key) = &self.api_key {
-            builder = builder.bearer_auth(key);
+        let mut last_err = String::new();
+        let mut sent = None;
+        for attempt in 0..=TRANSIENT_RETRIES {
+            let mut builder = self
+                .http
+                .post(format!("{}/chat/completions", self.base_url))
+                .json(&Body {
+                    model: &req.model,
+                    messages: &req.messages,
+                    stream: true,
+                    temperature: req.temperature,
+                });
+            if let Some(key) = &self.api_key {
+                builder = builder.bearer_auth(key);
+            }
+            match builder.send().await {
+                Ok(resp) => {
+                    sent = Some(resp);
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    if attempt < TRANSIENT_RETRIES {
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                    }
+                }
+            }
         }
-
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| ProviderError::Http(e.to_string()))?;
+        let resp = sent.ok_or(ProviderError::Http(last_err))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -243,6 +271,27 @@ impl OpenAiCompat {
     /// own `message.reasoning` vs. `message.content`) that the streaming
     /// path doesn't reliably deliver for every request.
     async fn complete(&self, req: ChatRequest) -> Result<String, ProviderError> {
+        let mut last_err = None;
+        for attempt in 0..=TRANSIENT_RETRIES {
+            match self.complete_once(&req).await {
+                Ok(text) => return Ok(text),
+                // Api errors carry a real status the provider chose to
+                // return (auth, bad request, ...) — repeating the exact
+                // same request won't change that, so only Http (transport)
+                // failures are worth another attempt.
+                Err(e @ ProviderError::Api { .. }) => return Err(e),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < TRANSIENT_RETRIES {
+                        tokio::time::sleep(RETRY_BACKOFF).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("loop always sets last_err before exiting on retry exhaustion"))
+    }
+
+    async fn complete_once(&self, req: &ChatRequest) -> Result<String, ProviderError> {
         #[derive(Serialize)]
         struct Body<'a> {
             model: &'a str,
