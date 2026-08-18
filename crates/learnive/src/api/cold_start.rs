@@ -117,7 +117,7 @@ pub struct ProposePrereqReq {
 /// part of this slice (a `Store` read/write indirection touching every
 /// existing document), sequenced after the tree+toggle mechanism is proven
 /// end to end on its own.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct KnownMatch {
     doc_id: String,
     doc_name: String,
@@ -325,6 +325,16 @@ pub struct ConfirmedPrereqNode {
     id: String,
     title: String,
     action: PrereqAction,
+    /// Round-tripped verbatim from `ProposedPrereqNode.known` — the "already
+    /// learned in {doc}" badge the confirm screen showed next to this node
+    /// (`documents.js`'s `knownNote`). Not read by `materialize_prereq_tree`
+    /// (which document a match came from doesn't affect what gets generated,
+    /// only the toggle's suggested default did, before confirmation); its
+    /// only remaining purpose is `render_transcript_node` replaying the same
+    /// badge the learner actually saw, so the persisted record doesn't drop
+    /// content the live screen showed.
+    #[serde(default)]
+    known: Option<KnownMatch>,
     #[serde(default)]
     children: Vec<ConfirmedPrereqNode>,
 }
@@ -511,11 +521,23 @@ fn render_transcript_node(node: &ConfirmedPrereqNode, locale: crate::locale::Loc
                 .collect::<String>()
         )
     };
+    // Same "known in {doc}" badge `documents.js`'s `knownNote` shows live —
+    // replayed here so the persisted record doesn't drop something the
+    // learner actually saw on the confirm screen.
+    let known_note = match &node.known {
+        Some(k) => format!(
+            " <span class=\"muted\">({} {})</span>",
+            crate::locale::pick(locale, "known in", "já aprendido em"),
+            escape_html(&k.doc_name),
+        ),
+        None => String::new(),
+    };
     format!(
         "<li><div class=\"prereq-row prereq-locked\">\
-         <span class=\"prereq-title\">{}</span>\
+         <span class=\"prereq-title\">{}{}</span>\
          <div class=\"prereq-toggle\" role=\"group\">{}</div></div>{}</li>",
         escape_html(&node.title),
+        known_note,
         segments,
         children_html,
     )
@@ -1156,6 +1178,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             action: PrereqAction::Learn,
+            known: None,
             children,
         }
     }
@@ -1165,6 +1188,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             action,
+            known: None,
             children: Vec::new(),
         }
     }
@@ -1194,6 +1218,28 @@ mod tests {
         let html = render_topic_transcript("Big-O notation", &[], crate::locale::Locale::En);
         assert!(html.contains("Big-O notation"));
         assert!(!html.contains("<ul"));
+    }
+
+    /// §S4/§S15: a node the confirm screen showed with a "known in {doc}"
+    /// badge (a cross-document match, `documents.js`'s `knownNote`) must
+    /// keep that badge in the persisted transcript — the append-only
+    /// contract means nothing the learner saw on screen is allowed to
+    /// silently vanish once it's written to disk.
+    #[test]
+    fn transcript_replays_known_match_badge() {
+        let tree = vec![ConfirmedPrereqNode {
+            id: "c1".to_string(),
+            title: "Derivatives".to_string(),
+            action: PrereqAction::Review,
+            known: Some(KnownMatch {
+                doc_id: "abc123".to_string(),
+                doc_name: "Calc I".to_string(),
+            }),
+            children: Vec::new(),
+        }];
+        let html = render_topic_transcript("Integration", &tree, crate::locale::Locale::En);
+        assert!(html.contains("Calc I"));
+        assert!(html.contains("known in"));
     }
 
     /// §S15: a `learn` node with children gets its children's ids as its
@@ -1238,6 +1284,7 @@ mod tests {
             id: "p1".to_string(),
             title: "Limits".to_string(),
             action: PrereqAction::Skip,
+            known: None,
             children: vec![leaf("c1", "Epsilon-delta", PrereqAction::Learn)],
         }];
         let mut items = Vec::new();
@@ -1258,6 +1305,7 @@ mod tests {
             id: "p1".to_string(),
             title: "Algebra basics".to_string(),
             action: PrereqAction::Review,
+            known: None,
             children: vec![leaf("c1", "Factoring", PrereqAction::Learn)],
         }];
         let mut items = Vec::new();
