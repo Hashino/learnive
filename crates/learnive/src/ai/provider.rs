@@ -10,9 +10,24 @@
 #![allow(dead_code)]
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+
+/// Bounds a single body read once response headers have already arrived.
+/// `reqwest::ClientBuilder::timeout` only wraps the future returned by
+/// `.send()` (connect through response *headers*) — confirmed live
+/// (2026-08-18) against a stuck node: the client already carried a 120s
+/// timeout, yet a provider that accepted the connection, returned 200, then
+/// stalled mid-body hung well past that. `.text()`/`.json()`/the streamed
+/// body's chunks are all read in a separate await afterward, unguarded by
+/// that client-level setting. 45s comfortably covers the idle gap between
+/// two chunks of a healthy stream (documented TTFT ~1-2s) or one full
+/// non-streamed completion; used per-chunk below rather than once for the
+/// whole body, since a long legitimate streamed prose move can run well
+/// past 45s in total even though no single gap should.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Stream of text deltas (§14 — token-by-token streaming for low TTFT).
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> + Send>>;
@@ -176,7 +191,11 @@ impl OpenAiCompat {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
             return Err(ProviderError::Api { status, body });
         }
 
@@ -184,7 +203,17 @@ impl OpenAiCompat {
         let stream = async_stream::stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buf = String::new();
-            while let Some(chunk) = byte_stream.next().await {
+            loop {
+                let next = match tokio::time::timeout(BODY_READ_TIMEOUT, byte_stream.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        yield Err(ProviderError::Http(format!(
+                            "stream stalled: no data for {BODY_READ_TIMEOUT:?}"
+                        )));
+                        return;
+                    }
+                };
+                let Some(chunk) = next else { break };
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
@@ -255,13 +284,21 @@ impl OpenAiCompat {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
             return Err(ProviderError::Api { status, body });
         }
 
-        let body: Resp = resp
-            .json()
+        let body: Resp = tokio::time::timeout(BODY_READ_TIMEOUT, resp.json())
             .await
+            .map_err(|_| {
+                ProviderError::Http(format!(
+                    "reading response body stalled for {BODY_READ_TIMEOUT:?}"
+                ))
+            })?
             .map_err(|e| ProviderError::Http(e.to_string()))?;
         Ok(body
             .choices
