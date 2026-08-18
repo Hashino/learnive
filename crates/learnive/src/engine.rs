@@ -996,17 +996,12 @@ mod tests {
         assert!(ex_sys.contains("sandbox"));
     }
 
-    /// Live quality-iteration harness for `prompt::outline` — not a
-    /// correctness test (nothing to assert against), a print-and-eyeball
-    /// loop for tuning the prompt against the REAL configured Fast-tier
-    /// provider (the model outline generation actually runs on). Ignored by
-    /// default: needs `.env`'s real key sourced into the shell env (`set -a;
-    /// source .env; set +a`) and spends real tokens. Run with
-    /// `cargo test -p learnive --lib engine::tests::outline_quality_probe \
-    /// -- --ignored --nocapture`.
-    #[tokio::test]
-    #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
-    async fn outline_quality_probe() {
+    /// Shared by the live quality-iteration probes below: builds the REAL
+    /// `Ai` from `.env`'s configured provider (must be sourced into the
+    /// shell env first — `set -a; source .env; set +a`) — not a mock, so the
+    /// probes exercise the actual model/tier each prompt runs on in
+    /// production.
+    fn live_ai_from_env() -> Ai {
         let base_url = std::env::var("LEARNIVE_API_BASE_URL").expect("set LEARNIVE_API_BASE_URL");
         let key = std::env::var("LEARNIVE_API_KEY")
             .ok()
@@ -1015,10 +1010,22 @@ mod tests {
             std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
         let robust =
             std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "openai/gpt-4o".into());
-        let ai = Ai::new(
+        Ai::new(
             Provider::OpenAiCompat(crate::ai::OpenAiCompat::new(base_url, key)),
             Models::new(fast, robust),
-        );
+        )
+    }
+
+    /// Live quality-iteration harness for `prompt::outline` — not a
+    /// correctness test (nothing to assert against), a print-and-eyeball
+    /// loop for tuning the prompt against the REAL configured Fast-tier
+    /// provider (the model outline generation actually runs on). Ignored by
+    /// default: spends real tokens. Run with `cargo test -p learnive \
+    /// engine::tests::outline_quality_probe -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
+    async fn outline_quality_probe() {
+        let ai = live_ai_from_env();
 
         let cases: &[(&str, &str)] = &[
             (
@@ -1061,6 +1068,53 @@ mod tests {
                         eprintln!("  - {}", item.title);
                     }
                 }
+                Err(e) => eprintln!("  ERROR: {e:?}"),
+            }
+        }
+    }
+
+    fn print_prereq_tree(nodes: &[PrereqNode], depth: usize) {
+        for n in nodes {
+            eprintln!("{}- {}", "  ".repeat(depth + 1), n.title);
+            print_prereq_tree(&n.children, depth + 1);
+        }
+    }
+
+    /// Live quality-iteration harness for `prompt::propose_prerequisites`
+    /// (§S15) — same print-and-eyeball shape as `outline_quality_probe`,
+    /// against the REAL configured Robust-tier provider this call actually
+    /// runs on (deliberately Robust, not Fast — see the doc comment on
+    /// `propose_prerequisites` for why). Run with `cargo test -p learnive \
+    /// engine::tests::prerequisites_quality_probe -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
+    async fn prerequisites_quality_probe() {
+        let ai = live_ai_from_env();
+
+        let cases: &[(&str, &str)] = &[
+            (
+                // §S15's own spec example — should propose something like
+                // álgebra/limites/derivadas.
+                "integração",
+                "Aprender a calcular integrais de funções polinomiais e trigonométricas simples",
+            ),
+            (
+                // Self-contained — should come back an empty tree.
+                "como funciona busca binária",
+                "Entender como a busca binária encontra um valor em um vetor ordenado e implementá-la corretamente",
+            ),
+            (
+                "aprendizado de máquina supervisionado",
+                "Entender os fundamentos de aprendizado supervisionado: regressão, classificação, e como treinar e avaliar um modelo",
+            ),
+        ];
+
+        for (topic, objective) in cases {
+            let tree = propose_prerequisites(&ai, topic, objective).await;
+            eprintln!("\n=== topic: {topic}\n    objective: {objective}");
+            match tree {
+                Ok(nodes) if nodes.is_empty() => eprintln!("  (empty tree)"),
+                Ok(nodes) => print_prereq_tree(&nodes, 0),
                 Err(e) => eprintln!("  ERROR: {e:?}"),
             }
         }
