@@ -122,7 +122,20 @@ pub struct OpenAiCompat {
 impl OpenAiCompat {
     pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Live report (2026-08-17, `hidc0ayawb`): the free-tier provider
+            // this app defaults new users toward is documented (`.env.example`)
+            // to hang for minutes under load with no error — an unbounded
+            // client left `generate_node`'s SSE loop stuck forever, which is
+            // what put a node on disk with content but no `NodeGenerated`
+            // event in the first place. 120s comfortably covers a full
+            // streamed prose move (TTFT is ~1-2s on a healthy model); a short
+            // connect timeout fails fast on a dead endpoint instead of
+            // queueing behind the same 120s.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client builder with static config"),
             base_url: base_url.into(),
             api_key,
         }

@@ -627,6 +627,18 @@ pub struct NodeView {
     /// inline. Degrades to "" if the outline no longer carries this item,
     /// same convention as `topic_and_title`.
     title: String,
+    /// Whether generation actually reached `finalize` (a `NodeGenerated`
+    /// event exists) rather than stopping mid-loop after an error the
+    /// `generate_node` SSE stream could only report to the tab that was
+    /// open at the time (2026-08-17 live report: a node can end up on disk
+    /// with only its first move's content, no rubric, and no way for a
+    /// later page load to tell that apart from a real finished node). Same
+    /// `node_generated` check `prepare`'s regen guard already uses — when
+    /// this is `false`, `prepare` is guaranteed to accept a retry for this
+    /// node (its prerequisites don't change by generation stalling), so the
+    /// client can safely offer one instead of rendering `content_html` as
+    /// if it were finished.
+    complete: bool,
 }
 
 /// Non-destructive read of an already-generated node (§S5, §4.3) — the
@@ -731,6 +743,12 @@ pub async fn get_node(
     let title = topic_and_title(&state, &doc_id, &node_id)
         .map(|(_, title)| title)
         .unwrap_or_default();
+    let complete = node_generated(
+        event_log
+            .iter()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        &node_id,
+    );
 
     Ok(Json(NodeView {
         content_html,
@@ -738,6 +756,7 @@ pub async fn get_node(
         interactions,
         demonstrated,
         title,
+        complete,
     }))
 }
 

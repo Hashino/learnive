@@ -233,12 +233,16 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         }
         MoveType::Profile => {
             "Investigate ONE of the open hypotheses about the learner listed in \
-             the profile context — a short probing question or a targeted \
-             mini-check whose answer would confirm or refute it. If none is \
-             listed (L2 may still pick this move off-menu), probe how the \
-             learner approaches THIS concept instead — one short question. \
-             NEVER write about the absence of a hypothesis: whatever you \
-             produce is what the learner reads."
+             the profile context: ONE short conversational question about HOW \
+             the learner thinks about or approaches this concept. If none is \
+             listed (L2 may still pick this move off-menu), ask one short \
+             question about how the learner would approach THIS concept \
+             instead. This is NOT an exercise: never pose a task with a \
+             correct answer to check ('write a function that…', 'calculate…', \
+             'implement…'), never require code or a worked solution, never \
+             emit a form — that is what the \"test\" move is for. graded MUST \
+             be false. NEVER write about the absence of a hypothesis: \
+             whatever you produce is what the learner reads."
         }
         MoveType::Plan => {
             "Revise the outline non-destructively ONLY if you have a concrete \
@@ -488,5 +492,18 @@ mod tests {
 
         let plan_sys = &generate_move_streamed(MoveType::Plan, &ctx)[0].content;
         assert!(!plan_sys.contains("background context ONLY"));
+    }
+
+    /// Live report (2026-08-17, `hidc0ayawb`): a `profile` move wrote a full
+    /// ungradable coding task ("Please define a recursive function...") as
+    /// plain prose instead of a short conversational question — the old
+    /// "targeted mini-check" wording read as license to pose a task. The
+    /// prompt must rule that out explicitly.
+    #[test]
+    fn profile_move_is_told_it_is_not_an_exercise() {
+        let ctx = MoveContext::default();
+        let profile_sys = &generate_move(AgentPolicy::L1, MoveType::Profile, &ctx)[0].content;
+        assert!(profile_sys.contains("NOT an exercise"));
+        assert!(profile_sys.contains("graded MUST be false"));
     }
 }

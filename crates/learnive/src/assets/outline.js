@@ -180,7 +180,18 @@ async function openNode(id, opts = {}) {
       return generateNode(id, opts);
     }
     if (!resp.ok) throw new Error(await resp.text());
-    await renderExistingNode(id, await resp.json(), opts);
+    const data = await resp.json();
+    // A node whose generation stalled mid-loop (an error the SSE stream
+    // could only report to the tab that was open at the time, 2026-08-17
+    // live report) is on disk with partial content and no `NodeGenerated`
+    // event. `prepare`'s regen guard only rejects an already-finished node,
+    // so it's always safe to just retry generation here rather than render
+    // the leftover partial content as if it were done — same path a
+    // never-generated (404) node already takes.
+    if (data.complete === false) {
+      return generateNode(id, opts);
+    }
+    await renderExistingNode(id, data, opts);
   } catch (err) {
     // Append, never overwrite via innerHTML — this container can already
     // hold other mounted sections (§S15: a prerequisite tree can have
