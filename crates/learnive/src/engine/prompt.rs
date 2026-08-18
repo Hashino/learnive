@@ -213,25 +213,30 @@ pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
              SCOPE from the objective, not a fixed node count: a narrow, \
              self-contained question is the size of a single textbook \
              section and gets ONE node — do not pad it with background \
-             sections its own phrasing doesn't ask for, and do not scaffold \
-             prerequisites the question already assumes the learner has. A \
-             broader subject — the kind that fills a whole textbook chapter \
-             or course unit — gets multiple nodes, one per genuinely \
-             distinct sub-topic a table of contents would list as its own \
-             section, most basic first, each a transitive step toward the \
-             objective; under-planning a broad objective down to one or two \
-             nodes is as much a mistake as over-planning a narrow one. \
-             Compress a little more than a real textbook would, though: \
-             this app's real depth grows from the learner's own follow-up \
-             questions and the `plan` move that revises the outline as they \
-             read (§9), so this initial plan does not need to enumerate \
-             every sub-case, formula variant, or worked-example category — \
-             those emerge later, from questions, not from you now. Write the \
-             titles in the SAME language as the request below, regardless of \
-             what language the examples in this conversation happen to use. \
-             Respond ONLY with a JSON array of strings — the concept titles, \
-             most basic first, each a transitive prerequisite of the \
-             objective. No comments, no markdown.",
+             sections its own phrasing doesn't ask for. A broader subject — \
+             the kind that fills a whole textbook chapter or course unit — \
+             gets multiple nodes, one per genuinely distinct sub-topic a \
+             table of contents would list as its own section, most basic \
+             first, each a transitive step toward the objective; \
+             under-planning a broad objective down to one or two nodes is \
+             as much a mistake as over-planning a narrow one. Compress a \
+             little more than a real textbook would, though: this app's \
+             real depth grows from the learner's own follow-up questions \
+             and the `plan` move that revises the outline as they read \
+             (§9), so this initial plan does not need to enumerate every \
+             sub-case, formula variant, or worked-example category — those \
+             emerge later, from questions, not from you now. Do NOT decide \
+             what background the learner already has, and do NOT leave it \
+             out of the curriculum on that assumption — a separate step \
+             proposes prerequisite background as its own reviewable tree, \
+             which the learner then confirms or skips one item at a time; \
+             your only job here is the topic's own content, at the size the \
+             objective actually asks for. Write the titles in the SAME \
+             language as the request below, regardless of what language the \
+             examples in this conversation happen to use. Respond ONLY with \
+             a JSON array of strings — the concept titles, most basic \
+             first, each a transitive prerequisite of the objective. No \
+             comments, no markdown.",
         ),
         ChatMessage::user(request(
             "how does binary search work",
@@ -257,30 +262,58 @@ pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
 }
 
 /// Prerequisite tree proposal (§S15) — a separate call from [`outline`],
-/// deliberately more generous: `outline`'s guard exists to stop a direct
-/// answer from ballooning into an unrelated curriculum, but a genuine
-/// prerequisite (limits/derivatives on the way to integration) may need real
-/// decomposition of its own. The confirmation tree the caller shows before
-/// generating anything is the actual backstop against runaway breadth here,
-/// not prompt restraint — so this prompt asks for honest decomposition
-/// rather than terseness.
+/// deliberately more generous: `outline`'s job is the topic's own content at
+/// the size the objective asks for, never a guess at what background to
+/// silently withhold. That guess used to live in `outline`'s own prompt
+/// ("don't scaffold prerequisites the question already assumes the learner
+/// has") — moved out entirely (2026-08-18) after a live report of exactly
+/// the failure mode a model making that judgment call predictably produces:
+/// a whole document's own topic ("the French Revolution") proposed as a
+/// PREREQUISITE of itself, and separately, a topic that should have
+/// decomposed into several main-line steps (Big-O notation) collapsed into
+/// one node with nothing pushed to prerequisites either — the guess failed
+/// in both directions on real data. The confirmation tree the caller shows
+/// before generating anything (learn/review/skip, one click per item, prior
+/// mastery detected and pre-filled) is the actual backstop against runaway
+/// breadth here, not prompt restraint — so this prompt asks for honest,
+/// inclusion-biased decomposition rather than terseness: a model this size
+/// guessing "the learner probably already knows X" is not reliable judgment
+/// to build on, and the asymmetry favors listing X — the learner dismisses
+/// an unwanted item in one click, but a gap silently omitted is invisible
+/// and gets no click to fix it.
 pub fn propose_prerequisites(topic: &str, objective: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
             "You propose the TREE of prerequisite concepts a curriculum \
              objective presupposes — background the learner needs before the \
              objective itself makes sense, not the objective's own content. \
-             Most objectives need few or even zero prerequisites: a simple, \
-             self-contained request should get an empty tree. When \
-             prerequisites are genuinely needed, give each one a title, and \
-             give a prerequisite its OWN children only when it is genuinely a \
-             bundle of separable sub-skills that each need to be \
-             demonstrated on their own — apply this same test recursively at \
-             every level, exactly like planning a normal outline; do not \
-             decompose a concept just because you could. A prerequisite that \
-             is already atomic gets no children. Order matters within a \
-             list: most basic first. Respond ONLY with a JSON array (empty \
-             array `[]` if there are no prerequisites), each element shaped \
+             Err toward INCLUDING a prerequisite whenever you are unsure \
+             whether the learner already has it: this tree is a proposal, \
+             not a commitment — the learner reviews it themselves and marks \
+             each item skip/review/learn with one click before anything is \
+             generated, and any item they already demonstrated elsewhere is \
+             shown to them pre-filled and disabled. Assuming familiarity \
+             instead of listing it costs the learner nothing to fix if you \
+             are wrong the other way — silently leaving it out is the \
+             mistake, because a gap the learner cannot see and cannot click \
+             away is a gap that stays. The ONLY thing that should produce an \
+             empty tree is an objective that presupposes nothing beyond \
+             basic literacy/numeracy and everyday reasoning — that floor is \
+             low and should be rare to actually hit; do not treat \"someone \
+             asking this probably already knows X\" as a reason to omit X. \
+             Never include the objective's own topic or a restatement of it \
+             as a prerequisite of itself — a prerequisite is always \
+             something the learner needs BEFORE this objective makes sense, \
+             never the objective's own subject matter. When prerequisites \
+             are needed, give each one a title, and give a prerequisite its \
+             OWN children only when it is genuinely a bundle of separable \
+             sub-skills that each need to be demonstrated on their own — \
+             apply this same test recursively at every level, exactly like \
+             planning a normal outline; do not decompose a concept just \
+             because you could. A prerequisite that is already atomic gets \
+             no children. Order matters within a list: most basic first. \
+             Respond ONLY with a JSON array (empty array `[]` only for that \
+             literacy/numeracy floor), each element shaped \
              {\"title\":\"...\",\"children\":[...]} (children is the same \
              shape, recursively, and may be an empty array). No comments, no \
              markdown, no prose outside the JSON.",

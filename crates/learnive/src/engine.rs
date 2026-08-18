@@ -1057,6 +1057,16 @@ mod tests {
                 "genética básica",
                 "Entender os princípios da herança genética: genes, alelos, dominância, e as leis de Mendel",
             ),
+            (
+                // Live report (2026-08-18, QA generation run, doc au1wfnmxnk):
+                // collapsed to a single main-line node with the whole topic
+                // pushed nowhere — should decompose into several main-line
+                // steps (what Big-O is -> common complexity classes ->
+                // best/worst/average case -> comparing growth), same
+                // textbook-chapter scale as thermodynamics/genetics above.
+                "Big-O notation and algorithm complexity",
+                "Quantify algorithm complexity using Big-O notation.",
+            ),
         ];
 
         for (topic, objective) in cases {
@@ -1099,13 +1109,43 @@ mod tests {
                 "Aprender a calcular integrais de funções polinomiais e trigonométricas simples",
             ),
             (
-                // Self-contained — should come back an empty tree.
+                // Not the alphabetization/numeracy floor (§S15 calibration,
+                // 2026-08-18): array/vector indexing is domain-specific, not
+                // universal literacy, so this should now propose it (or a
+                // "programming logic" node covering it) rather than an empty
+                // tree — the old "self-contained question -> empty tree"
+                // assumption was the model guessing at learner familiarity,
+                // which the calibration session moved out of this prompt's
+                // job entirely.
                 "como funciona busca binária",
                 "Entender como a busca binária encontra um valor em um vetor ordenado e implementá-la corretamente",
             ),
             (
                 "aprendizado de máquina supervisionado",
                 "Entender os fundamentos de aprendizado supervisionado: regressão, classificação, e como treinar e avaliar um modelo",
+            ),
+            (
+                // Live report (2026-08-18, QA generation run, doc
+                // azfnqbvwym): the model proposed "knowledge of the French
+                // Revolution as a historical event" as a PREREQUISITE of a
+                // document whose entire topic is the French Revolution —
+                // exactly the self-as-prerequisite failure the rewritten
+                // prompt now explicitly forbids. Should come back empty or
+                // with genuine background (e.g. Ancien Régime social/political
+                // structure as of the 1780s), never the topic itself.
+                "the causes of the French Revolution",
+                "Analyze the interdependent conditions that led to the French Revolution",
+            ),
+            (
+                // Same doc as the outline probe's Big-O case — checking the
+                // two calls now divide labor correctly: outline should carry
+                // Big-O's own content (complexity classes, best/worst case),
+                // this call should propose real background (basic math
+                // functions/growth rates, or "programming logic" per the
+                // 2026-08-18 calibration) without also trying to re-teach
+                // Big-O itself.
+                "Big-O notation and algorithm complexity",
+                "Quantify algorithm complexity using Big-O notation.",
             ),
         ];
 
