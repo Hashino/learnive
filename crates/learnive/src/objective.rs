@@ -35,18 +35,6 @@ pub struct ObjectiveVersion {
     pub source: ObjectiveSource,
     /// Unix epoch milliseconds — same convention as `events::Event::ts`.
     pub ts: u64,
-    /// A frozen, self-contained HTML fragment replaying the exchange that
-    /// produced this version — the raw topic typed and the confirmed
-    /// prerequisite tree, rendered once (`cold_start::render_topic_transcript`)
-    /// and never rebuilt, same "render once, persist, replay the identical
-    /// string" contract `grading::render_attempt` already uses for a graded
-    /// attempt. `None` for a version with nothing to replay (a `plan`/
-    /// `user_edit` revision, or any version written before this field
-    /// existed) — the client just shows nothing at that point, the same
-    /// graceful-degradation convention every other §S-era optional field
-    /// here uses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript_html: Option<String>,
 }
 
 /// The full version chain — `<doc>/objective.json`.
@@ -68,27 +56,12 @@ impl ObjectiveLog {
     /// Appends a new version (§5 non-destructive) — never mutates or removes
     /// any prior entry.
     pub fn push(&mut self, text: String, source: ObjectiveSource) {
-        self.push_with_transcript(text, source, None);
-    }
-
-    /// Same as [`Self::push`], carrying the frozen replay fragment for a
-    /// version that came from an actual topic/prerequisite exchange (cold
-    /// start today; a future `next`-topic continuation the same way) —
-    /// kept as a separate method rather than a third `push` parameter every
-    /// existing caller would have to pass `None` for.
-    pub fn push_with_transcript(
-        &mut self,
-        text: String,
-        source: ObjectiveSource,
-        transcript_html: Option<String>,
-    ) {
         let version = self.versions.last().map_or(1, |v| v.version + 1);
         self.versions.push(ObjectiveVersion {
             version,
             text,
             source,
             ts: now_ms(),
-            transcript_html,
         });
     }
 }

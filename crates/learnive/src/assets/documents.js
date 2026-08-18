@@ -173,13 +173,11 @@ async function createLivingDocument(objective_text, prerequisites) {
     const data = await resp.json();
     state.docId = data.doc_id;
     setOutlineItems(data.items);
-    state.transcriptHtml = data.transcript_html || null;
     setCurrentDocument(data.doc_id, data.name);
     el("coldstart").hidden = true;
     el("prereqConfirm").hidden = true;
     el("doc").hidden = false;
     renderOutline();
-    renderTranscriptBlock();
     showOutlinePane();
     await refreshDocumentList();
     // §S15: the main line's own first item is no longer necessarily the
@@ -319,7 +317,6 @@ async function openDocument(summary) {
   showOutlinePane();
   resetNodeView();
   await refreshOutline();
-  renderTranscriptBlock();
   if (summary.resume_node_id) {
     await openNode(summary.resume_node_id);
   } else if (state.allItems.length) {

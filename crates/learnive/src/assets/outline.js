@@ -151,23 +151,9 @@ async function refreshOutline() {
     const data = await resp.json();
     setOutlineItems(data.items);
     state.suggestedRevisit = data.suggested_revisit || null;
-    state.transcriptHtml = data.transcript_html || null;
     renderOutline();
     renderRevisitHint();
   }
-}
-
-// The cold-start exchange (§S4), replayed as a static, non-interactive
-// leading block — same "render once, persist, replay the identical string"
-// contract as a graded attempt (`grading::render_attempt`). Callers only
-// invoke this right after `#nodeSections` was cleared (a fresh document, or
-// `resetNodeView` just ran), so a plain append can't duplicate it.
-function renderTranscriptBlock() {
-  if (!state.transcriptHtml) return;
-  const div = document.createElement("div");
-  div.className = "transcript-block";
-  div.innerHTML = state.transcriptHtml;
-  el("nodeSections").appendChild(div);
 }
 
 // Opens an outline item non-destructively: an already-generated node

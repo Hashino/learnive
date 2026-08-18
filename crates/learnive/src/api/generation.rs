@@ -518,7 +518,6 @@ pub async fn decide_plan_proposal(
     Ok(Json(OutlineResp {
         items,
         suggested_revisit,
-        transcript_html: None,
     }))
 }
 
@@ -534,11 +533,9 @@ pub async fn get_outline(
         serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let items = outline_view(&state, &doc_id, &outline)?;
     let suggested_revisit = suggested_revisit(&state, &doc_id)?;
-    let transcript_html = cold_start_transcript(&state, &doc_id);
     Ok(Json(OutlineResp {
         items,
         suggested_revisit,
-        transcript_html,
     }))
 }
 
@@ -585,7 +582,6 @@ pub async fn skip_node(
     Ok(Json(OutlineResp {
         items,
         suggested_revisit,
-        transcript_html: None,
     }))
 }
 

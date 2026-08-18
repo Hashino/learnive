@@ -59,10 +59,6 @@ const state = {
   currentId: null,
   nodeId: null,
   suggestedRevisit: null,
-  // Frozen cold-start replay fragment (§S4), rendered as the leading block
-  // in `#nodeSections` — `null` for a pre-this-feature document or one the
-  // server couldn't read `objective.json` for.
-  transcriptHtml: null,
   // One entry per mounted `.node-section` (nodeId -> {el, prose, exercise,
   // sentinel, interactions, result, controls, exerciseFrame, ...}) — the
   // continuous document is however many of these are currently in
