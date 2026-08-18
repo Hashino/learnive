@@ -1,4 +1,4 @@
-use super::reading::read_profile;
+use super::reading::{escape_html, read_profile};
 use super::*;
 
 use std::sync::Arc;
@@ -434,6 +434,93 @@ fn materialize_skip_subtree(
     }
 }
 
+/// Renders the cold-start exchange that produced this document as a frozen,
+/// self-contained HTML fragment — the raw topic as typed, and a read-only
+/// replay of the confirmed prerequisite tree — so it can be persisted into
+/// `ObjectiveVersion::transcript_html` and shown at the top of the document
+/// forever after, not thrown away once `create_document` returns. Same
+/// "render once, persist, replay the identical string" contract
+/// `grading::render_attempt` already uses for a graded exercise attempt;
+/// deliberately mirrors the LIVE toggle screen's own markup (same
+/// `prereq-*` CSS classes `documents.js`'s `renderPrereqNode` uses) rather
+/// than a prose summary, since the learner asked for "a mesma tela" — the
+/// same screen — not a paraphrase of it. Shows exactly what the learner
+/// saw: the raw topic, never the polished objective text the app has never
+/// shown up front (`document_name`'s doc comment, §6.1).
+fn render_topic_transcript(
+    topic: &str,
+    tree: &[ConfirmedPrereqNode],
+    locale: crate::locale::Locale,
+) -> String {
+    let tree_html = if tree.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<ul class=\"prereq-tree\">{}</ul>",
+            tree.iter()
+                .map(|n| render_transcript_node(n, locale))
+                .collect::<String>()
+        )
+    };
+    format!(
+        "<div class=\"transcript-prompt\"><strong>{}</strong> {}</div>{}",
+        crate::locale::pick(locale, "What are we learning?", "O que vamos aprender?"),
+        escape_html(topic),
+        tree_html,
+    )
+}
+
+/// One frozen node of the confirmed tree — same nesting/segmented-toggle
+/// markup as `documents.js`'s live `renderPrereqNode`, but every segment
+/// `disabled` and only the CONFIRMED action carries `active` (there is
+/// nothing left to click). Renders the tree exactly as it was shown and
+/// decided, including a `review`/`skip` node's children — this is a replay
+/// of the SCREEN, not of what `materialize_prereq_tree` chose to generate
+/// from it (that function prunes a `review` node's children instead).
+fn render_transcript_node(node: &ConfirmedPrereqNode, locale: crate::locale::Locale) -> String {
+    let action_label = |a: PrereqAction| match a {
+        PrereqAction::Skip => crate::locale::pick(locale, "Skip", "Pular"),
+        PrereqAction::Review => crate::locale::pick(locale, "Review", "Revisar"),
+        PrereqAction::Learn => crate::locale::pick(locale, "Learn", "Aprender"),
+    };
+    let action_attr = |a: PrereqAction| match a {
+        PrereqAction::Skip => "skip",
+        PrereqAction::Review => "review",
+        PrereqAction::Learn => "learn",
+    };
+    let segments: String = [PrereqAction::Skip, PrereqAction::Review, PrereqAction::Learn]
+        .into_iter()
+        .map(|a| {
+            format!(
+                "<button type=\"button\" class=\"prereq-toggle-seg{}\" data-action=\"{}\" disabled aria-pressed=\"{}\">{}</button>",
+                if a == node.action { " active" } else { "" },
+                action_attr(a),
+                a == node.action,
+                action_label(a),
+            )
+        })
+        .collect();
+    let children_html = if node.children.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<ul>{}</ul>",
+            node.children
+                .iter()
+                .map(|c| render_transcript_node(c, locale))
+                .collect::<String>()
+        )
+    };
+    format!(
+        "<li><div class=\"prereq-row prereq-locked\">\
+         <span class=\"prereq-title\">{}</span>\
+         <div class=\"prereq-toggle\" role=\"group\">{}</div></div>{}</li>",
+        escape_html(&node.title),
+        segments,
+        children_html,
+    )
+}
+
 /// One outline item as shown to the client (§S5): the graph's gate, resolved.
 /// `state` is `"locked"` (a prerequisite isn't `Demonstrated` yet and the
 /// item was never touched), `"available"` (prerequisites met, or already
@@ -468,6 +555,28 @@ pub struct OutlineResp {
     /// item instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) suggested_revisit: Option<String>,
+    /// The cold-start transcript (`render_topic_transcript`), replayed for a
+    /// document reopened after creation. Only populated by `get_outline` —
+    /// the one call `refreshOutline()` makes when a document is (re)opened;
+    /// `decide_plan_proposal`/`skip_node` reuse this same response shape for
+    /// an already-open document, whose client already holds the transcript
+    /// from when it first opened, so they pass `None` rather than re-reading
+    /// `objective.json` on every outline mutation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) transcript_html: Option<String>,
+}
+
+/// The first (cold-start) version's frozen transcript, if this document has
+/// one (§S-era documents created before this field existed, or one whose
+/// `objective.json` failed to read/parse, both degrade to `None` — same
+/// graceful-degradation convention as every other optional field here).
+pub(super) fn cold_start_transcript(state: &AppState, doc_id: &str) -> Option<String> {
+    state
+        .store
+        .read_doc_file(doc_id, "objective.json")
+        .ok()
+        .and_then(|json| serde_json::from_str::<ObjectiveLog>(&json).ok())
+        .and_then(|log| log.versions.first().and_then(|v| v.transcript_html.clone()))
 }
 
 /// §S5 revisit scheduler, wired to the response: see
@@ -542,15 +651,22 @@ pub struct CreateResp {
     doc_id: String,
     name: String,
     items: Vec<OutlineItemView>,
+    /// The frozen replay of the cold-start exchange (`render_topic_transcript`)
+    /// — returned inline so the live path can mount it as the document's own
+    /// first block without a second round trip, the same way `AnswerResp`
+    /// already inlines `attempt_html` instead of making the client re-fetch.
+    transcript_html: String,
 }
 
 pub async fn create_document(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<CreateReq>,
 ) -> Result<Json<CreateResp>, ApiError> {
     if body.topic.trim().is_empty() {
         return Err(ApiError::BadRequest("empty topic".to_string()));
     }
+    let locale = crate::locale::Locale::from_header(&headers);
     let objective_text = if body.objective_text.trim().is_empty() {
         body.topic.clone()
     } else {
@@ -583,8 +699,13 @@ pub async fn create_document(
     let doc_id = engine::new_id();
     state.store.create_document(&doc_id)?;
 
+    let transcript_html = render_topic_transcript(&body.topic, &body.prerequisites, locale);
     let mut objective_log = ObjectiveLog::default();
-    objective_log.push(objective_text.clone(), ObjectiveSource::ColdStart);
+    objective_log.push_with_transcript(
+        objective_text.clone(),
+        ObjectiveSource::ColdStart,
+        Some(transcript_html.clone()),
+    );
     state.store.write_doc_file(
         &doc_id,
         "objective.json",
@@ -624,6 +745,7 @@ pub async fn create_document(
         doc_id,
         name,
         items,
+        transcript_html,
     }))
 }
 
@@ -1045,6 +1167,33 @@ mod tests {
             action,
             children: Vec::new(),
         }
+    }
+
+    /// §S4: the transcript replays the topic and the confirmed tree
+    /// verbatim, with every toggle disabled and only the confirmed action
+    /// carrying `data-action`/`active` — nothing left clickable.
+    #[test]
+    fn transcript_replays_topic_and_confirmed_actions() {
+        let tree = vec![
+            leaf("c1", "Derivatives", PrereqAction::Review),
+            leaf("c2", "Set theory", PrereqAction::Skip),
+        ];
+        let html = render_topic_transcript("Integration", &tree, crate::locale::Locale::En);
+        assert!(html.contains("Integration"));
+        assert!(html.contains("Derivatives"));
+        assert!(html.contains("Set theory"));
+        assert!(html.contains(r#"data-action="review" disabled aria-pressed="true""#));
+        assert!(html.contains(r#"data-action="skip" disabled aria-pressed="true""#));
+        assert!(!html.contains("aria-pressed=\"true\"\">Learn"));
+    }
+
+    /// An empty confirmed tree (no prerequisites proposed/all rejected)
+    /// still replays the topic, just with no `<ul>` beneath it.
+    #[test]
+    fn transcript_with_empty_tree_has_no_list() {
+        let html = render_topic_transcript("Big-O notation", &[], crate::locale::Locale::En);
+        assert!(html.contains("Big-O notation"));
+        assert!(!html.contains("<ul"));
     }
 
     /// §S15: a `learn` node with children gets its children's ids as its

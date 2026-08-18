@@ -694,6 +694,23 @@ button:disabled {
   background: var(--nord14);
   color: var(--nord0);
 }
+
+/* Cold-start transcript, replayed inline as the document's own leading
+   record (§S4) — a frozen fragment, so it reuses the same `.prereq-tree`
+   rules above (every toggle already `disabled`) rather than defining its
+   own variant. */
+.transcript-block {
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--card-border);
+}
+.transcript-block .transcript-prompt {
+  margin-bottom: 0.75rem;
+}
+.transcript-block .transcript-prompt strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
 .prose {
   min-height: 2rem;
 }
