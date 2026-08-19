@@ -25,12 +25,11 @@ const I18N = {
     "coldstart.title": "What are we learning?",
     "start.button": "Start",
     "coldstart.back": "Back",
-    // Main-line outline preview (§S16), shown above the prerequisite tree
+    // Unified outline confirmation (§S15/§S16): one tree, prerequisites
+    // first, ending in the requested topic's own breakdown (locked).
     "outline.mainlineTitle": "What you'll learn",
-    // Prerequisite tree confirmation (§S15)
-    "prereq.title": "Before we start",
     "prereq.hint":
-      "These look like prerequisites for what you asked. Mark what you already know as review or skip — everything else is taught in full.",
+      "Mark what you already know as review or skip. What you asked for is always taught in full and can't be skipped.",
     "prereq.confirm": "Confirm",
     "prereq.action.learn": "Learn",
     "prereq.action.review": "Review",
@@ -118,9 +117,8 @@ const I18N = {
     "start.button": "Começar",
     "coldstart.back": "Voltar",
     "outline.mainlineTitle": "O que você vai aprender",
-    "prereq.title": "Antes de começar",
     "prereq.hint":
-      "Estes parecem ser pré-requisitos para o que você pediu. Marque o que já sabe como revisar ou pular — o resto é ensinado por completo.",
+      "Marque o que já sabe como revisar ou pular. O que você pediu é sempre ensinado por completo e não pode ser pulado.",
     "prereq.confirm": "Confirmar",
     "prereq.action.learn": "Aprender",
     "prereq.action.review": "Revisar",

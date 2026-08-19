@@ -83,43 +83,33 @@ pub struct CreateReq {
     /// back to the topic, same convention as `objective_text`.
     #[serde(default)]
     name: String,
-    /// The learner's confirmed learn/review/skip choices over the tree
-    /// `propose_prerequisites` returned (§S15) — empty for a caller that
-    /// skipped that screen entirely (e.g. a direct API call, or an objective
-    /// the learner confirmed with no prerequisites proposed), same
-    /// graceful-degradation convention as `objective_text`/`name`.
+    /// The learner's confirmed outline tree (§S15/§S16, unified
+    /// 2026-08-19): `propose_outline`'s response, round-tripped back with
+    /// per-node learn/review/skip choices. Every element but the LAST of
+    /// the top-level array is a prerequisite; the LAST is the objective's
+    /// own topic (client-locked to `learn`, see `ProposedNode`'s doc
+    /// comment). Empty for a caller that skipped that screen entirely (e.g.
+    /// a direct API call) — degrades to generating a fresh tree here and
+    /// auto-confirming every node `learn`, same graceful-degradation
+    /// convention as `objective_text`/`name` above.
     #[serde(default)]
-    prerequisites: Vec<ConfirmedPrereqNode>,
-    /// The main-line outline `propose_prerequisites` minted and the client
-    /// showed on the confirmation screen (§S16), round-tripped verbatim so
-    /// `create_document` persists the exact structure the learner saw
-    /// rather than generating a second, possibly-different one. Empty for a
-    /// caller that skipped that screen (e.g. a direct API call) — degrades
-    /// to generating a fresh outline here, same convention as the other
-    /// optional fields above.
-    #[serde(default)]
-    mainline: Vec<ConfirmedMainlineNode>,
-}
-
-/// Round-trips one `MainlineNode` id+title back from the confirmation
-/// screen (§S16) — see `CreateReq::mainline`.
-#[derive(Deserialize, Clone)]
-pub struct ConfirmedMainlineNode {
-    id: String,
-    title: String,
+    nodes: Vec<ConfirmedNode>,
 }
 
 // ---------------------------------------------------------------------------
-// Prerequisites (§S15): the agent proposes a tree of prerequisite concepts
-// for the confirmed objective, resolved against every other document the
-// learner has (already `Demonstrated` there → suggested `review`); the
-// learner confirms learn/review/skip per branch before anything generates.
-// Two stateless calls bracket `create_document`, mirroring `propose_
-// objective`: nothing here is persisted until the learner confirms.
+// Outline proposal (§S15/§S16, unified 2026-08-19): the agent proposes the
+// FULL outline in one tree — prerequisite background the objective
+// presupposes, then the objective's own content, as one ordered sequence —
+// resolved against every other document the learner has (already
+// `Demonstrated` there → suggested `review`); the learner confirms
+// learn/review/skip per branch before anything generates (the objective's
+// own subtree stays locked to `learn` client-side — it's the requested
+// topic, not background). A stateless call, like `propose_objective`:
+// nothing here is persisted until the learner confirms via `create_document`.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-pub struct ProposePrereqReq {
+pub struct ProposeOutlineReq {
     topic: String,
     #[serde(default)]
     objective_text: String,
@@ -140,8 +130,15 @@ pub struct KnownMatch {
     doc_name: String,
 }
 
+/// One node of the proposed outline tree, resolved against known concepts
+/// (§S15) — see `engine::ProposedOutlineNode`'s doc comment for the array
+/// contract (every element but the last of a sibling list at the TOP level
+/// is a prerequisite, the last is the objective's own topic). The client
+/// renders every node the same way structurally, but locks the toggle to
+/// `learn` for the last top-level node and its whole subtree — it can't be
+/// skipped/reviewed, since it IS the requested topic.
 #[derive(Serialize, Clone)]
-pub struct ProposedPrereqNode {
+pub struct ProposedNode {
     /// Freshly minted here — becomes the real `OutlineItem::id` if the
     /// learner confirms this node (§S15, avoids a second id-remapping pass
     /// between propose and confirm).
@@ -150,51 +147,37 @@ pub struct ProposedPrereqNode {
     /// `"review"` when an already-`Demonstrated` match was found elsewhere,
     /// `"learn"` otherwise — a DEFAULT the client shows pre-selected, not a
     /// lock: the learner can freely override to `skip`/`learn`/`review` on
-    /// any node (a false positive here must have an escape hatch).
+    /// any prerequisite node (a false positive here must have an escape
+    /// hatch). Ignored by the client for the objective's own subtree, which
+    /// stays locked to `learn` regardless.
     suggested: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     known: Option<KnownMatch>,
-    children: Vec<ProposedPrereqNode>,
-}
-
-/// One item of the confirmed-objective's own main-line outline (§S16),
-/// minted here and round-tripped back verbatim by `create_document` via
-/// `ConfirmedMainlineNode` — the same "mint once, reuse the id" convention
-/// `ProposedPrereqNode` already uses for the prerequisite tree, so what's
-/// shown on the cold-start confirmation screen is guaranteed identical to
-/// what actually gets created (never regenerated fresh a second time).
-#[derive(Serialize, Clone)]
-pub struct MainlineNode {
-    id: String,
-    title: String,
+    children: Vec<ProposedNode>,
 }
 
 #[derive(Serialize)]
-pub struct ProposePrereqResp {
-    tree: Vec<ProposedPrereqNode>,
-    /// The objective's own main-line outline (§S16) — shown alongside the
-    /// prerequisite tree so the confirmation screen displays the REAL full
-    /// structure of what will be generated, not just the prerequisites.
-    /// These items can't be skipped/reviewed (they ARE the requested
-    /// topic), so the client shows them with their toggle locked to
-    /// "learn" rather than omitting them from the toggle list entirely.
-    mainline: Vec<MainlineNode>,
+pub struct ProposeOutlineResp {
+    /// One ordered sequence — see `ProposedNode`'s doc comment.
+    nodes: Vec<ProposedNode>,
 }
 
-/// Proposes the prerequisite tree AND the main-line outline for a
-/// (possibly not-yet-created) objective (§S15/§S16) — stateless, like
+/// Proposes the FULL outline tree for a (possibly not-yet-created)
+/// objective (§S15/§S16, unified 2026-08-19) — stateless, like
 /// `propose_objective`; nothing is persisted until `create_document`
-/// receives the learner's confirmed choices back. The two generations run
-/// concurrently (§14: independent calls, no reason to pay their latency
-/// twice in a row) — `create_document` used to call `generate_outline`
-/// itself, strictly after this endpoint returned, which is why the
-/// main-line structure was never visible before confirmation; it now
-/// reuses the exact items minted here instead of generating a second,
-/// possibly-different outline.
-pub async fn propose_prerequisites(
+/// receives the learner's confirmed choices back. A single call now (see
+/// `engine::propose_outline`'s doc comment for why the old two-call design —
+/// a separately-generated prerequisite forest grafted onto a
+/// separately-generated main line — was the actual bug behind a live report,
+/// "Funções Recursivas" prerequisites nested under an unrelated main-line
+/// item), so there is no longer a parse-failure-degrades-to-empty branch
+/// either: the objective's own node is always at least one element of the
+/// response, so any failure here is a hard error, the same as the old
+/// main-line generation's failure mode.
+pub async fn propose_outline(
     State(state): State<AppState>,
-    Json(body): Json<ProposePrereqReq>,
-) -> Result<Json<ProposePrereqResp>, ApiError> {
+    Json(body): Json<ProposeOutlineReq>,
+) -> Result<Json<ProposeOutlineResp>, ApiError> {
     if body.topic.trim().is_empty() {
         return Err(ApiError::BadRequest("empty topic".to_string()));
     }
@@ -204,53 +187,10 @@ pub async fn propose_prerequisites(
         body.objective_text.clone()
     };
     let ai = state.ai.load_full();
-    let (forest_result, outline_result) = tokio::join!(
-        engine::propose_prerequisites(&ai, &body.topic, &objective),
-        engine::generate_outline(&ai, &body.topic, &objective),
-    );
-    // A parse failure degrades to an empty tree rather than a 502. The
-    // original motivating case for this (a reasoning-heavy fast-tier model
-    // routing its entire output through the streaming `reasoning` delta and
-    // never reaching a final `content` chunk) is now fixed structurally —
-    // `engine::collect` asks for `stream: false` instead of buffering SSE
-    // (§14: this call is never rendered live anyway), which reliably gets a
-    // clean split between reasoning and content. This branch stays as a
-    // backstop for the residual case (the model answers with malformed JSON
-    // despite the contract) rather than the primary fix. `propose_prerequisites`'s
-    // own doc comment already treats an empty tree as a normal, common
-    // answer — a failure to read one is indistinguishable in effect from a
-    // model that genuinely found no prerequisites, so this is the same safe
-    // default the parser already applies to a well-formed `[]`, not new
-    // fallback behavior. A real provider/network failure
-    // (`EngineError::Provider`) still surfaces: it means the `Ai` this call
-    // shares with `generate_outline` is unusable, and that failure will
-    // resurface moments later regardless.
-    let forest = match forest_result {
-        Ok(forest) => forest,
-        Err(crate::engine::EngineError::Parse(msg)) => {
-            eprintln!(
-                "propose_prerequisites: model response could not be read ({msg}) — \
-                 degrading to an empty prerequisite tree"
-            );
-            Vec::new()
-        }
-        Err(e) => return Err(e.into()),
-    };
-    // Unlike the prerequisite tree, the main-line outline has no safe empty
-    // default — it's the actual content being confirmed, so a failure here
-    // is a hard error rather than a silent degradation.
-    let outline = outline_result?;
-    let mainline = outline
-        .items
-        .into_iter()
-        .map(|item| MainlineNode {
-            id: item.id,
-            title: item.title,
-        })
-        .collect();
+    let tree = engine::propose_outline(&ai, &body.topic, &objective).await?;
     let known = known_concepts(&state)?;
-    let tree = resolve_prereq_forest(&state, &forest, &known).await;
-    Ok(Json(ProposePrereqResp { tree, mainline }))
+    let nodes = resolve_outline_forest(&state, &tree, &known).await;
+    Ok(Json(ProposeOutlineResp { nodes }))
 }
 
 /// One `Demonstrated` concept already in some document — the candidate pool
@@ -308,17 +248,19 @@ fn known_concepts(state: &AppState) -> Result<Vec<KnownConcept>, ApiError> {
 /// reused here.
 const PREREQ_MATCH_THRESHOLD: f32 = 0.86;
 
-/// Resolves a proposed prerequisite forest against known `Demonstrated`
-/// concepts (§S15): embeds every known title once, then every proposed
-/// title once per node, comparing by cosine similarity. `None` embedder
-/// (grounding disabled — `state.retriever` unset) degrades to every node
-/// suggested `learn`, the same graceful degradation `acquire` already uses
-/// for a missing retriever.
-async fn resolve_prereq_forest(
+/// Resolves a proposed outline tree against known `Demonstrated` concepts
+/// (§S15/§S16): embeds every known title once, then every proposed title
+/// once per node — every node, prerequisite or objective alike, there is no
+/// structural reason to skip the objective's own subtree here even though
+/// the client locks its toggle regardless — comparing by cosine similarity.
+/// `None` embedder (grounding disabled — `state.retriever` unset) degrades
+/// to every node suggested `learn`, the same graceful degradation `acquire`
+/// already uses for a missing retriever.
+async fn resolve_outline_forest(
     state: &AppState,
-    forest: &[PrereqNode],
+    tree: &[engine::ProposedOutlineNode],
     known: &[KnownConcept],
-) -> Vec<ProposedPrereqNode> {
+) -> Vec<ProposedNode> {
     let embedder = match &state.retriever {
         Some(r) => Some(r.read().await.embedder().clone()),
         None => None,
@@ -327,18 +269,17 @@ async fn resolve_prereq_forest(
         let titles: Vec<String> = known.iter().map(|k| k.title.clone()).collect();
         e.embed_batch(&titles)
     });
-    forest
-        .iter()
-        .map(|node| resolve_prereq_node(node, known, known_vecs.as_deref(), embedder.as_ref()))
+    tree.iter()
+        .map(|node| resolve_outline_node(node, known, known_vecs.as_deref(), embedder.as_ref()))
         .collect()
 }
 
-fn resolve_prereq_node(
-    node: &PrereqNode,
+fn resolve_outline_node(
+    node: &engine::ProposedOutlineNode,
     known: &[KnownConcept],
     known_vecs: Option<&[Vec<f32>]>,
     embedder: Option<&crate::retrieval::Embedder>,
-) -> ProposedPrereqNode {
+) -> ProposedNode {
     let matched = match (embedder, known_vecs) {
         (Some(embedder), Some(known_vecs)) if !known.is_empty() => {
             let qv = embedder.embed(&node.title);
@@ -362,7 +303,7 @@ fn resolve_prereq_node(
         ),
         None => ("learn", None),
     };
-    ProposedPrereqNode {
+    ProposedNode {
         id: engine::new_id(),
         title: node.title.clone(),
         suggested,
@@ -370,21 +311,21 @@ fn resolve_prereq_node(
         children: node
             .children
             .iter()
-            .map(|c| resolve_prereq_node(c, known, known_vecs, embedder))
+            .map(|c| resolve_outline_node(c, known, known_vecs, embedder))
             .collect(),
     }
 }
 
-/// The learner's confirmed choice for one prerequisite-tree node (§S15
+/// The learner's confirmed choice for one outline-tree node (§S15/§S16
 /// toggle screen), sent back to `create_document`. `id`/`title` round-trip
-/// verbatim from `ProposedPrereqNode` — the server never re-derives them.
+/// verbatim from `ProposedNode` — the server never re-derives them.
 #[derive(Deserialize, Clone)]
-pub struct ConfirmedPrereqNode {
+pub struct ConfirmedNode {
     id: String,
     title: String,
     action: PrereqAction,
     #[serde(default)]
-    children: Vec<ConfirmedPrereqNode>,
+    children: Vec<ConfirmedNode>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -395,8 +336,12 @@ pub enum PrereqAction {
     Skip,
 }
 
-/// Turns the learner's confirmed prerequisite tree into `OutlineItem`s
-/// (§S15) — mirrors the toggle screen's own cascade rules:
+/// Turns the learner's confirmed outline tree into `OutlineItem`s (§S15/
+/// §S16, unified 2026-08-19) — mirrors the confirmation screen's own
+/// cascade rules, uniformly for prerequisite and objective nodes alike
+/// (the objective's own node is simply the LAST element of the top-level
+/// `nodes` list, its toggle client-locked to `learn` — nothing here treats
+/// it specially, see `ProposedNode`'s doc comment):
 ///
 /// - `skip` cascades to the WHOLE branch: the node and every descendant are
 ///   DISCARDED, never materialized as an `OutlineItem` at all — only queued
@@ -409,34 +354,52 @@ pub enum PrereqAction {
 ///   hiding (see `OutlineItem::mode`'s doc comment for why that weaker form
 ///   was tried and failed live, 2026-08-18).
 /// - `review` also cascades, the opposite way: descendants are NOT
-///   materialized at all — only this node, in `NodeMode::Review`. Its own
-///   short pass is meant to cover the whole branch, so there is nothing left
-///   for a hidden child to gate or be gated by.
-/// - `learn` recurses normally; the node's `prerequisites` become its
-///   children's ids (whatever their own action) so it only opens once every
-///   child reaches `Demonstrated` — `Skipped` satisfies that gate too
-///   (`api::reading::prepare`), so a skipped branch never locks its parent
-///   forever.
+///   materialized at all — only this node, in `NodeMode::Review`.
+/// - `learn` recurses normally: children are materialized (nested under
+///   this node via `parent_id` — genuine decomposition, untouched by the
+///   sequencing change below) and chained to each other in confirmed
+///   order; this node's own `prerequisites` become its LAST child's id
+///   (available once the whole decomposition is `Demonstrated`), or,
+///   childless, whatever gate is threaded in from its own preceding
+///   sibling.
 ///
-/// Returns this level's minted ids, for the caller to wire as the
-/// PARENT's `prerequisites` (top-level call: the objective's own first
-/// main-line item) — a discarded `skip` node's id is still returned here,
-/// so its parent still gates on it even though it has no `OutlineItem`.
-fn materialize_prereq_tree(
-    nodes: &[ConfirmedPrereqNode],
+/// SEQUENCING (`incoming_gate`, threaded through every level, not just the
+/// top): every node in a sibling list — prerequisite roots, the objective's
+/// own root, or one node's own children — also requires the id of the
+/// sibling immediately before it, so the whole confirmed tree reads as one
+/// continuous chain: prerequisite 1 -> prerequisite 2 -> ... -> the
+/// objective's own (possibly decomposed) topic. This replaces the old
+/// design, where every prerequisite root nested under the main line's first
+/// item via `parent_id` and gated it in PARALLEL — the actual bug behind a
+/// live report (2026-08-19, "Funções Recursivas"): the roots rendered in
+/// the sidebar as false decomposition of an unrelated main-line item
+/// instead of the sequential background topics they were.
+///
+/// Returns the id that should gate whatever comes next in the CALLER's own
+/// sibling list (the last-processed node's id, `Skipped` included — a
+/// discarded `skip` node's id is still returned, so whatever follows it
+/// still gates on it even though it has no `OutlineItem` of its own;
+/// `NodeSkipped` satisfies that gate immediately, so this costs no delay).
+fn materialize_outline_tree(
+    nodes: &[ConfirmedNode],
     parent_id: Option<&str>,
+    incoming_gate: Option<String>,
     items: &mut Vec<OutlineItem>,
     to_skip: &mut Vec<String>,
-) -> Vec<String> {
-    nodes
-        .iter()
-        .map(|node| materialize_prereq_node(node, parent_id, items, to_skip))
-        .collect()
+) -> Option<String> {
+    let mut gate = incoming_gate;
+    for node in nodes {
+        gate = Some(materialize_outline_node(
+            node, parent_id, gate, items, to_skip,
+        ));
+    }
+    gate
 }
 
-fn materialize_prereq_node(
-    node: &ConfirmedPrereqNode,
+fn materialize_outline_node(
+    node: &ConfirmedNode,
     parent_id: Option<&str>,
+    incoming_gate: Option<String>,
     items: &mut Vec<OutlineItem>,
     to_skip: &mut Vec<String>,
 ) -> String {
@@ -449,18 +412,23 @@ fn materialize_prereq_node(
             items.push(OutlineItem {
                 id: node.id.clone(),
                 title: node.title.clone(),
-                prerequisites: Vec::new(),
+                prerequisites: incoming_gate.into_iter().collect(),
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Review,
             });
         }
         PrereqAction::Learn => {
-            let child_ids =
-                materialize_prereq_tree(&node.children, Some(node.id.as_str()), items, to_skip);
+            let child_exit = materialize_outline_tree(
+                &node.children,
+                Some(node.id.as_str()),
+                incoming_gate.clone(),
+                items,
+                to_skip,
+            );
             items.push(OutlineItem {
                 id: node.id.clone(),
                 title: node.title.clone(),
-                prerequisites: child_ids,
+                prerequisites: child_exit.or(incoming_gate).into_iter().collect(),
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Learn,
             });
@@ -473,13 +441,29 @@ fn materialize_prereq_node(
 /// `action` on a descendant is ignored once an ancestor is skipped, the
 /// literal "um clique, nada daquele subnodo ou dos seus próprios filhos é
 /// gerado" from the co-design. Only queues `NodeSkipped` events; no
-/// `OutlineItem` is ever created for any of them (see `materialize_prereq_node`'s
+/// `OutlineItem` is ever created for any of them (see `materialize_outline_node`'s
 /// `Skip` arm).
-fn queue_skip_subtree(nodes: &[ConfirmedPrereqNode], to_skip: &mut Vec<String>) {
+fn queue_skip_subtree(nodes: &[ConfirmedNode], to_skip: &mut Vec<String>) {
     for node in nodes {
         to_skip.push(node.id.clone());
         queue_skip_subtree(&node.children, to_skip);
     }
+}
+
+/// Mints ids and auto-confirms every node `Learn` (§S15/§S16) — the
+/// fallback `create_document` uses for a caller that skipped the
+/// confirmation screen entirely (e.g. a direct API call), so a freshly
+/// proposed tree still has something to feed `materialize_outline_tree`.
+fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNode> {
+    nodes
+        .iter()
+        .map(|n| ConfirmedNode {
+            id: engine::new_id(),
+            title: n.title.clone(),
+            action: PrereqAction::Learn,
+            children: auto_confirm_learn(&n.children),
+        })
+        .collect()
 }
 
 /// One outline item as shown to the client (§S5): the graph's gate, resolved.
@@ -607,57 +591,44 @@ pub async fn create_document(
         body.objective_text.clone()
     };
 
-    // §S16: reuse the exact main-line items already minted and shown by
-    // `propose_prerequisites` rather than generating a second, possibly
-    // different outline — only a caller that skipped that screen entirely
-    // (e.g. a direct API call) falls back to generating fresh here.
-    let mut outline = if body.mainline.is_empty() {
+    // §S15/§S16 (unified 2026-08-19): reuse the exact confirmed outline tree
+    // — prerequisites, then the objective's own topic as the last top-level
+    // node — already minted and shown by `propose_outline` rather than
+    // generating a second, possibly different tree. Only a caller that
+    // skipped that screen entirely (e.g. a direct API call) falls back to
+    // generating fresh here and auto-confirming every node `learn`.
+    //
+    // `materialize_outline_tree` chains every top-level node to the one
+    // before it (each requires the previous node's id), so the document
+    // reads as one continuous sequence: prerequisite 1 -> prerequisite 2 ->
+    // ... -> the objective's own (possibly decomposed) topic — see its doc
+    // comment for why the old design (prerequisite roots nested under the
+    // main line's first item via `parent_id`, gating it in parallel) was
+    // the actual bug behind a live report, "Funções Recursivas": prereqs
+    // rendered in the sidebar as false decomposition of an unrelated
+    // main-line item instead of the sequential background topics they were.
+    let confirmed_nodes = if body.nodes.is_empty() {
         let ai = state.ai.load_full();
-        engine::generate_outline(&ai, &body.topic, &objective_text).await?
+        let mut tree = engine::propose_outline(&ai, &body.topic, &objective_text).await?;
+        // A caller that skips the confirmation screen never saw — let alone
+        // approved — the proposed prerequisites, so only auto-confirm the
+        // objective's own (last) top-level node and drop the rest, rather
+        // than silently committing a learner to a prerequisite chain nobody
+        // reviewed.
+        let objective_node = tree
+            .pop()
+            .ok_or_else(|| ApiError::Internal("outline proposal returned no nodes".to_string()))?;
+        auto_confirm_learn(std::slice::from_ref(&objective_node))
     } else {
-        engine::Outline {
-            topic: body.topic.clone(),
-            items: engine::linear_items_from_confirmed(
-                body.mainline
-                    .iter()
-                    .map(|m| (m.id.clone(), m.title.clone()))
-                    .collect(),
-            ),
-        }
+        body.nodes
     };
-
-    // §S15 (revised 2026-08-19): the confirmed prerequisite tree's ROOTS are
-    // the learner's own prior topics (e.g. "C data types" -> "C functions"
-    // before "Recursion in C" itself) — a sequence of gating siblings, not
-    // sub-parts of the main-line topic they gate. The original design nested
-    // them under the main line's first item via `parent_id`, which rendered
-    // in the sidebar as false decomposition (bug report 2026-08-19, "Funções
-    // Recursivas": "C data types"/"C functions" showed as subitems of "What
-    // is recursion in C", an unrelated main-line item). Roots are therefore
-    // materialized at the TOP level (`parent_id: None`, siblings of the main
-    // line) and chained to each other in forest order — each root also
-    // requires the previous root's id, and only the LAST root gates the main
-    // line's first item. A root's OWN children (its internal decomposition —
-    // e.g. "C functions" -> its four subtopics) are untouched by this: that
-    // nesting is genuine decomposition, not gating, and still comes from
-    // `materialize_prereq_tree` exactly as before.
-    let mut prereq_items = Vec::new();
+    let mut items = Vec::new();
     let mut to_skip = Vec::new();
-    let prereq_root_ids =
-        materialize_prereq_tree(&body.prerequisites, None, &mut prereq_items, &mut to_skip);
-    let mut prev_root_id: Option<String> = None;
-    for root_id in &prereq_root_ids {
-        if let Some(prev) = &prev_root_id
-            && let Some(item) = prereq_items.iter_mut().find(|i| &i.id == root_id)
-        {
-            item.prerequisites.push(prev.clone());
-        }
-        prev_root_id = Some(root_id.clone());
-    }
-    if let (Some(first), Some(last_root)) = (outline.items.first_mut(), prev_root_id) {
-        first.prerequisites = vec![last_root];
-    }
-    outline.items.extend(prereq_items);
+    materialize_outline_tree(&confirmed_nodes, None, None, &mut items, &mut to_skip);
+    let outline = engine::Outline {
+        topic: body.topic.clone(),
+        items,
+    };
 
     let doc_id = engine::new_id();
     state.store.create_document(&doc_id)?;
@@ -1108,8 +1079,8 @@ pub fn build_fallback_source() -> Source {
 mod tests {
     use super::*;
 
-    fn learn(id: &str, title: &str, children: Vec<ConfirmedPrereqNode>) -> ConfirmedPrereqNode {
-        ConfirmedPrereqNode {
+    fn learn(id: &str, title: &str, children: Vec<ConfirmedNode>) -> ConfirmedNode {
+        ConfirmedNode {
             id: id.to_string(),
             title: title.to_string(),
             action: PrereqAction::Learn,
@@ -1117,8 +1088,8 @@ mod tests {
         }
     }
 
-    fn leaf(id: &str, title: &str, action: PrereqAction) -> ConfirmedPrereqNode {
-        ConfirmedPrereqNode {
+    fn leaf(id: &str, title: &str, action: PrereqAction) -> ConfirmedNode {
+        ConfirmedNode {
             id: id.to_string(),
             title: title.to_string(),
             action,
@@ -1126,11 +1097,12 @@ mod tests {
         }
     }
 
-    /// §S15: a `learn` node with children gets its children's ids as its
-    /// own `prerequisites` (only opens once every child is `Demonstrated`),
-    /// and every child is materialized regardless of its own action.
+    /// §S15/§S16: a `learn` node's children are chained SEQUENTIALLY (each
+    /// requires the previous sibling), and the node's own `prerequisites`
+    /// become its LAST child's id only — the earlier ones are covered
+    /// transitively through the chain, not listed as a parallel AND-gate.
     #[test]
-    fn learn_recurses_and_gates_on_children() {
+    fn learn_recurses_and_chains_children_sequentially() {
         let tree = vec![learn(
             "p1",
             "Derivatives",
@@ -1141,33 +1113,78 @@ mod tests {
         )];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
-        let roots = materialize_prereq_tree(&tree, None, &mut items, &mut to_skip);
-        assert_eq!(roots, vec!["p1".to_string()]);
+        let exit = materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
+        assert_eq!(exit, Some("p1".to_string()));
         assert!(to_skip.is_empty());
         assert_eq!(items.len(), 3);
+
+        let c1 = items.iter().find(|i| i.id == "c1").unwrap();
+        assert!(c1.prerequisites.is_empty());
+        assert_eq!(c1.parent_id.as_deref(), Some("p1"));
+        let c2 = items.iter().find(|i| i.id == "c2").unwrap();
+        assert_eq!(c2.prerequisites, vec!["c1".to_string()]);
+        assert_eq!(c2.parent_id.as_deref(), Some("p1"));
+
         let parent = items.iter().find(|i| i.id == "p1").unwrap();
-        assert_eq!(
-            parent.prerequisites,
-            vec!["c1".to_string(), "c2".to_string()]
-        );
+        assert_eq!(parent.prerequisites, vec!["c2".to_string()]);
         assert_eq!(parent.parent_id, None);
-        for child_id in ["c1", "c2"] {
-            let child = items.iter().find(|i| i.id == child_id).unwrap();
-            assert_eq!(child.parent_id.as_deref(), Some("p1"));
-            assert!(child.prerequisites.is_empty());
+    }
+
+    /// §S15/§S16 (unified 2026-08-19): top-level nodes — prerequisite roots
+    /// and the objective's own root alike — are SIBLINGS (`parent_id:
+    /// None`), chained to each other in confirmed order, never nested under
+    /// one another. Regression test for the live bug report 2026-08-19
+    /// ("Funções Recursivas"): "C data types"/"C functions" must never
+    /// render as subitems of the unrelated main-line item "Recursion in C".
+    #[test]
+    fn top_level_nodes_chain_as_siblings_not_nested() {
+        let tree = vec![
+            leaf(
+                "data_types",
+                "C data types and variables",
+                PrereqAction::Learn,
+            ),
+            learn(
+                "c_functions",
+                "C functions",
+                vec![leaf("fn_def", "Function definition", PrereqAction::Learn)],
+            ),
+            learn(
+                "recursion",
+                "Recursion in C",
+                vec![leaf("what_is", "What is recursion", PrereqAction::Learn)],
+            ),
+        ];
+        let mut items = Vec::new();
+        let mut to_skip = Vec::new();
+        materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
+
+        for id in ["data_types", "c_functions", "recursion"] {
+            let item = items.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(item.parent_id, None, "{id} should be top-level");
         }
+        let data_types = items.iter().find(|i| i.id == "data_types").unwrap();
+        assert!(data_types.prerequisites.is_empty());
+        let fn_def = items.iter().find(|i| i.id == "fn_def").unwrap();
+        assert_eq!(fn_def.prerequisites, vec!["data_types".to_string()]);
+        let c_functions = items.iter().find(|i| i.id == "c_functions").unwrap();
+        assert_eq!(c_functions.prerequisites, vec!["fn_def".to_string()]);
+        let what_is = items.iter().find(|i| i.id == "what_is").unwrap();
+        assert_eq!(what_is.prerequisites, vec!["c_functions".to_string()]);
+        let recursion = items.iter().find(|i| i.id == "recursion").unwrap();
+        assert_eq!(recursion.prerequisites, vec!["what_is".to_string()]);
     }
 
     /// §S15: `skip` cascades to the whole branch — the node and every
     /// descendant are DISCARDED (never materialized as an `OutlineItem`, so
     /// the sidebar can't show nor generate them) and only queued for a
     /// `NodeSkipped` event each, regardless of what action they were
-    /// individually given. The parent still gates on the discarded id
-    /// (`materialize_prereq_tree` returns it), so a node behind this one can
-    /// still unlock once the event is appended.
+    /// individually given. Whatever follows still gates on the discarded id
+    /// (`materialize_outline_tree` still returns it), so a node behind this
+    /// one can still unlock once the event is appended.
     #[test]
     fn skip_cascades_to_the_whole_branch() {
-        let tree = vec![ConfirmedPrereqNode {
+        let tree = vec![ConfirmedNode {
             id: "p1".to_string(),
             title: "Limits".to_string(),
             action: PrereqAction::Skip,
@@ -1175,11 +1192,11 @@ mod tests {
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
-        let roots = materialize_prereq_tree(&tree, None, &mut items, &mut to_skip);
+        let exit = materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
         // nothing is materialized — the whole branch is discarded
         assert_eq!(items.len(), 0);
-        // but the parent still gates on the (now absent) id
-        assert_eq!(roots, vec!["p1".to_string()]);
+        // but whatever comes next still gates on the (now absent) id
+        assert_eq!(exit, Some("p1".to_string()));
         let mut skipped = to_skip.clone();
         skipped.sort();
         assert_eq!(skipped, vec!["c1".to_string(), "p1".to_string()]);
@@ -1190,7 +1207,7 @@ mod tests {
     /// `NodeMode::Review`.
     #[test]
     fn review_omits_children_entirely() {
-        let tree = vec![ConfirmedPrereqNode {
+        let tree = vec![ConfirmedNode {
             id: "p1".to_string(),
             title: "Algebra basics".to_string(),
             action: PrereqAction::Review,
@@ -1198,7 +1215,7 @@ mod tests {
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
-        materialize_prereq_tree(&tree, None, &mut items, &mut to_skip);
+        materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
         assert_eq!(items.len(), 1);
         assert!(to_skip.is_empty());
         assert_eq!(items[0].id, "p1");

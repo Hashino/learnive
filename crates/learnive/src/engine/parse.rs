@@ -1,6 +1,6 @@
 use super::{
-    AskDecision, Assessment, EngineError, ExerciseAndRubric, ObjectiveProposal, PrereqNode, Rubric,
-    RubricObjective,
+    AskDecision, Assessment, EngineError, ExerciseAndRubric, ObjectiveProposal,
+    ProposedOutlineNode, Rubric, RubricObjective,
 };
 use learnive_core::ObjectiveType;
 use serde::Deserialize;
@@ -32,14 +32,16 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
     }
 }
 
-/// Prerequisite tree (§S15): a JSON array of `{title, children}`, parsed
-/// recursively by `serde` directly (`PrereqNode::children` already defaults
-/// to empty). `Some(vec![])` for an explicit empty array is a valid, common
-/// answer (most objectives need no prerequisites) — only unparseable text
-/// returns `None`.
-pub fn prereq_tree(text: &str) -> Option<Vec<PrereqNode>> {
+/// Full outline tree (§S15/§S16, unified 2026-08-19): a JSON array of
+/// `{title, children}`, parsed recursively by `serde` directly
+/// (`ProposedOutlineNode::children` already defaults to empty). Unlike the
+/// old prerequisite-only forest this replaces, an empty array is NOT treated
+/// specially here — `engine::propose_outline` rejects it (the objective's
+/// own node is always at least one element) — this function only reports
+/// whether the text was readable JSON at all.
+pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
     let json = extract_json(text)?;
-    serde_json::from_str::<Vec<PrereqNode>>(json).ok()
+    serde_json::from_str::<Vec<ProposedOutlineNode>>(json).ok()
 }
 
 /// Extracts the first JSON block (`{...}` or `[...]`) from the text, tolerating
@@ -55,29 +57,6 @@ pub(crate) fn extract_json(text: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-/// Outline: JSON array of strings, with a fallback to bulleted lines.
-pub fn outline(text: &str) -> Option<Vec<String>> {
-    if let Some(json) = extract_json(text)
-        && let Ok(list) = serde_json::from_str::<Vec<String>>(json)
-        && !list.is_empty()
-    {
-        return Some(list.into_iter().map(|s| s.trim().to_string()).collect());
-    }
-    // Fallback: one line per concept, stripping bullets/numbering.
-    let items: Vec<String> = text
-        .lines()
-        .map(|l| {
-            l.trim()
-                .trim_start_matches(['-', '*', '#', '•'])
-                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')')
-                .trim()
-                .to_string()
-        })
-        .filter(|l| !l.is_empty())
-        .collect();
-    (!items.is_empty()).then_some(items)
 }
 
 pub fn exercise_rubric(text: &str) -> Result<ExerciseAndRubric, EngineError> {

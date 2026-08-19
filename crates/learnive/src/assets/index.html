@@ -121,31 +121,23 @@
           <p><button type="submit" data-i18n="start.button">Start</button></p>
         </form>
 
-        <!-- §S15/§S16: the confirmation screen shown before a single token
-             of content generates. Two parts: the main-line outline itself
-             (§S16 — the real structure of what will be generated, locked to
-             "learn" since it can't be skipped/reviewed) and, below it, the
-             prerequisite tree (§S15, may be empty) where every branch is
-             podable in one click (skip/review cascade) — the real backstop
-             against a runaway curriculum, not the proposal prompt alone.
-             `create_document` reuses these exact main-line items verbatim,
-             so what's confirmed here is guaranteed identical to what gets
-             created. -->
+        <!-- §S15/§S16 (unified 2026-08-19): the confirmation screen shown
+             before a single token of content generates — ONE ordered tree,
+             every prerequisite root chained before the requested topic's
+             own root, which comes last and is locked to "learn" (it's what
+             was asked for, so it can't be skipped/reviewed) while every
+             prerequisite branch is toggleable in one click (skip/review
+             cascade) — the real backstop against a runaway curriculum, not
+             the proposal prompt alone. `create_document` reuses these exact
+             confirmed nodes verbatim, so what's confirmed here is
+             guaranteed identical to what gets created. -->
         <div id="prereqConfirm" hidden>
           <h2 data-i18n="outline.mainlineTitle">What you'll learn</h2>
-          <ul id="mainlineTree" class="prereq-tree"></ul>
-          <!-- Hidden entirely when the tree comes back empty (the common
-               case for a simple, self-contained request) — see
-               `renderPrereqTree` in documents.js. -->
-          <div id="prereqSection">
-            <h2 data-i18n="prereq.title">Before we start</h2>
-            <p class="muted" data-i18n="prereq.hint">
-              These look like prerequisites for what you asked. Mark what you
-              already know as review or skip — everything else is taught in
-              full.
-            </p>
-            <ul id="prereqTree" class="prereq-tree"></ul>
-          </div>
+          <p class="muted" data-i18n="prereq.hint">
+            Mark what you already know as review or skip. What you asked for
+            is always taught in full and can't be skipped.
+          </p>
+          <ul id="outlineTree" class="prereq-tree"></ul>
           <p>
             <button type="button" id="prereqConfirmBtn" data-i18n="prereq.confirm">Confirm</button>
             <button type="button" id="prereqBackBtn" data-i18n="coldstart.back">Back</button>

@@ -52,12 +52,13 @@ async function boot() {
 }
 
 // §S15: splits an `OutlineResp.items` response into the main line
-// (`state.items`, unchanged shape/meaning — everything that isn't part of
-// the sidebar tree already relies on this being main-line-only: skip
-// eligibility, neighbor lazy-loading, "next available" advance) and the
-// full tree (`state.allItems`, used only by `renderOutline` below to nest
-// sub-nodes — a decomposed prerequisite or a question-spawned elaboration,
-// both `parent_id`-pointing since §S15 unified them).
+// (`state.items`, top-level only — used for edge-based neighbor
+// lazy-loading, where "how far from either end of the reading order" only
+// makes sense at that granularity) and the full tree (`state.allItems`,
+// everything else — skip eligibility, "next available" advance, the revisit
+// hint target, and `renderOutline`'s nesting — all search the full tree
+// since a decomposed prerequisite or a question-spawned elaboration can be
+// the reachable/suggested node, not just a top-level item).
 function setOutlineItems(items) {
   state.allItems = items;
   state.items = items.filter((it) => !it.parent_id);
@@ -131,7 +132,7 @@ function renderOutline() {
 // there's nothing to suggest.
 function renderRevisitHint() {
   const hint = el("revisitHint");
-  const target = state.items.find((it) => it.id === state.suggestedRevisit);
+  const target = state.allItems.find((it) => it.id === state.suggestedRevisit);
   if (!target) {
     hint.hidden = true;
     hint.onclick = null;

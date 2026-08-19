@@ -35,10 +35,10 @@ pub enum Grade {
 ///
 /// `prerequisites` are the graph edges (§S5, "Grafo com arestas"): ids of
 /// items that must be `Demonstrated` (§8/`events::aggregate::NodeState`)
-/// before this one is available. A linear outline (no diamonds — everything
-/// `generate_outline`/`decide_plan_proposal` produce today) is just a chain,
-/// each item's sole prerequisite the previous item's id; that degenerates to
-/// the old rigid one-at-a-time gate, per PLAN.md's S5 note. Multiple
+/// before this one is available. `api::cold_start::materialize_outline_tree`
+/// and `decide_plan_proposal` both today only ever chain items in sequence
+/// (each item's sole prerequisite the previous item's id), which degenerates
+/// to the old rigid one-at-a-time gate, per PLAN.md's S5 note. Multiple
 /// prerequisites (a real diamond) are a data shape this already supports,
 /// even though nothing generates one yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,10 +48,13 @@ pub struct OutlineItem {
     #[serde(default)]
     pub prerequisites: Vec<String>,
     /// The tree-shaped pointer for the sidebar (§S15, extending §S8): set for
-    /// a sub-node spawned from a mid-reading question OR a prerequisite
-    /// decomposed by `propose_prerequisites`, either way the id of the item
-    /// it's subordinate to. `None` for every item on the document's main
-    /// line. This field decides SHAPE only (sidebar tree nesting, inline
+    /// a sub-node spawned from a mid-reading question OR any node decomposed
+    /// by `propose_outline` (prerequisite or the objective's own topic
+    /// alike — see `ProposedOutlineNode`'s doc comment), either way the id of
+    /// the item it's subordinate to. `None` for every top-level item: every
+    /// prerequisite root and the objective's own root, chained to each other
+    /// in sequence by `api::cold_start::materialize_outline_tree`. This field
+    /// decides SHAPE only (sidebar tree nesting, inline
     /// splice point) — whether an item gates anything is `prerequisites`'
     /// job alone: a question-spawned child carries none of its own (never
     /// gates its parent), while a prerequisite-tree child's id is placed in
@@ -238,119 +241,77 @@ pub async fn propose_search_subject(ai: &Ai, topic: &str) -> Result<String, Engi
     Ok(text.trim().trim_matches('"').to_string())
 }
 
-/// Generates the initial outline from the topic, anchored on the confirmed
-/// objective (§6, §6.1, §S4). Light tier (planning).
-pub async fn generate_outline(
-    ai: &Ai,
-    topic: &str,
-    objective: &str,
-) -> Result<Outline, EngineError> {
-    let text = collect(ai, Tier::Fast, prompt::outline(topic, objective)).await?;
-    let titles =
-        parse::outline(&text).ok_or_else(|| EngineError::Parse("empty outline".to_string()))?;
-    Ok(Outline {
-        topic: topic.to_string(),
-        items: linear_items(titles),
-    })
-}
-
-/// Builds a linear prerequisite chain from titles (§S5): each item's sole
-/// prerequisite is the previous item's freshly minted id, the first item has
-/// none. Shared by `generate_outline` and an approved `plan` proposal
-/// (`api::decide_plan_proposal`) — both today only ever produce a flat,
-/// diamond-free outline.
-pub fn linear_items(titles: Vec<String>) -> Vec<OutlineItem> {
-    let mut items = Vec::with_capacity(titles.len());
-    let mut prev_id: Option<String> = None;
-    for title in titles {
-        let id = new_id();
-        items.push(OutlineItem {
-            id: id.clone(),
-            title,
-            prerequisites: prev_id.into_iter().collect(),
-            parent_id: None,
-            mode: NodeMode::Learn,
-        });
-        prev_id = Some(id);
-    }
-    items
-}
-
-/// Rebuilds a linear main-line chain from ids+titles already minted and
-/// shown to the learner by `propose_prerequisites` (§S16 outline preview) —
-/// same chaining as [`linear_items`], but reusing the given ids instead of
-/// minting fresh ones, so what `create_document` persists is identical to
-/// what the learner already confirmed on the cold-start screen.
-pub fn linear_items_from_confirmed(pairs: Vec<(String, String)>) -> Vec<OutlineItem> {
-    let mut items = Vec::with_capacity(pairs.len());
-    let mut prev_id: Option<String> = None;
-    for (id, title) in pairs {
-        items.push(OutlineItem {
-            id: id.clone(),
-            title,
-            prerequisites: prev_id.into_iter().collect(),
-            parent_id: None,
-            mode: NodeMode::Learn,
-        });
-        prev_id = Some(id);
-    }
-    items
-}
-
-/// One node of the prerequisite tree an objective presupposes (§S15) —
-/// titles only, no ids: `api::cold_start` mints those once the tree is
-/// resolved against existing documents, so the client has something stable
-/// to toggle and confirm against, and materialization decides gating
-/// (`OutlineItem::prerequisites`) from tree structure, not from anything
-/// carried here. Most concepts have no children; a concept only gets them
-/// when it's genuinely a bundle of separable sub-skills that must each be
-/// demonstrated on their own (the same granularity judgement `outline()`
-/// already applies at the top level, recursive here at every level).
+/// One node of the FULL outline tree an objective needs (§S15/§S16, unified
+/// 2026-08-19): titles only, no ids — `api::cold_start` mints those once the
+/// tree is resolved against existing documents, so the client has something
+/// stable to toggle and confirm against, and materialization decides gating
+/// (`OutlineItem::prerequisites`) and nesting (`OutlineItem::parent_id`) from
+/// tree structure, not from anything carried here.
+///
+/// The array this appears in is always read as ONE ordered sequence:
+/// every element except the LAST is a prerequisite the objective presupposes
+/// (background, most basic first); the LAST element is the objective's own
+/// topic. This replaces what used to be two independent calls
+/// (`generate_outline` for the objective's own flat breakdown,
+/// `propose_prerequisites` for a separately-generated forest) glued together
+/// afterward by `api::cold_start::materialize_prereq_tree` assigning
+/// `parent_id` — that graft was the actual bug (live report 2026-08-19,
+/// "Funções Recursivas": independently-generated prerequisites "C data
+/// types"/"C functions" were nested under the unrelated main-line item "What
+/// is recursion in C" because the graft code had nothing better to attach
+/// them to). A single call that plans the whole sequence at once can place
+/// prerequisites as siblings in the right order and give the objective its
+/// own titled container the same way any other bundle of separable
+/// sub-skills gets one — see `prompt::propose_outline` for the exact
+/// contract.
+///
+/// A node gets `children` only when it's genuinely a bundle of separable
+/// sub-skills that must each be demonstrated on their own — this test
+/// applies recursively at every level and to prerequisite and objective
+/// nodes alike, there is no structural difference between them beyond
+/// position in the top-level array.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrereqNode {
+pub struct ProposedOutlineNode {
     pub title: String,
     #[serde(default)]
-    pub children: Vec<PrereqNode>,
+    pub children: Vec<ProposedOutlineNode>,
 }
 
-/// Proposes the tree of prerequisite concepts an objective presupposes
-/// (§S15) — a second, separate call from [`generate_outline`], with its own,
-/// more generous discipline: `outline()`'s "eager generation" guard exists
-/// to stop a direct answer to the learner's question from ballooning into an
-/// unrelated curriculum, but a genuine prerequisite (limits/derivatives on
-/// the way to integration) might need real decomposition of its own. The
-/// confirmation screen this feeds — a whole tree, visible and podable branch
-/// by branch before a single token of content gets generated — is the real
-/// backstop against runaway breadth, not prompt restraint (§S15 "como isto
-/// não vira Principia Mathematica"). An empty result (`[]`) is a normal,
-/// common answer — most objectives need no prerequisites beyond common
-/// knowledge — not a parse failure.
+/// Proposes the FULL structure of the initial outline in one call (§S15,
+/// §S16, unified 2026-08-19): prerequisite background the objective
+/// presupposes, then the objective's own content, as one ordered sequence —
+/// see [`ProposedOutlineNode`]'s doc comment for the array contract this
+/// returns. An empty result is never valid (the objective's own node is
+/// always at least one element); a parse failure is a hard error, same as
+/// the old `generate_outline` — this is the actual content being confirmed
+/// before generation, not something with a safe silent default the way an
+/// empty prerequisite list used to be.
 ///
-/// Robust tier, deliberately, though this is a titles-only call that would
-/// otherwise look like "frequent cheap task" (§12.1 Fast territory): confirmed
-/// live (2026-08-17) that the configured Fast-tier model — a free reasoning
-/// model — reliably answered "no prerequisites" for exactly the example
-/// from S15's own spec ("integração" → algebra/limites/derivadas), 0-for-6
-/// across raw non-streamed provider calls and the app's own code path,
-/// while the Robust-tier model produced the correct decomposition 2-for-2 on
-/// the identical prompt. This is a one-time call per cold start (not
-/// per-block like exercise generation), so the cost tradeoff favors
-/// correctness: a wrong answer here isn't graded and corrected later like a
-/// bad exercise — it silently skips the whole toggle-list confirmation step
-/// this session was called in to fix in the first place.
-pub async fn propose_prerequisites(
+/// Robust tier, deliberately: the two calls this replaces already needed
+/// different tiers for the same underlying reason (confirmed live,
+/// 2026-08-17 — the configured Fast-tier model reliably missed real
+/// prerequisites, e.g. answering "no prerequisites" for S15's own spec
+/// example, "integração" → algebra/limites/derivadas, 0-for-6, while Robust
+/// got it right 2-for-2 on the identical prompt) and the unified call now
+/// carries strictly more structural judgment per response, not less. This is
+/// a one-time call per cold start (not per-block like exercise generation),
+/// so the cost tradeoff favors correctness: a wrong answer here isn't graded
+/// and corrected later like a bad exercise — it silently ships a wrong
+/// curriculum shape.
+pub async fn propose_outline(
     ai: &Ai,
     topic: &str,
     objective: &str,
-) -> Result<Vec<PrereqNode>, EngineError> {
-    let text = collect(
-        ai,
-        Tier::Robust,
-        prompt::propose_prerequisites(topic, objective),
-    )
-    .await?;
-    parse::prereq_tree(&text)
-        .ok_or_else(|| EngineError::Parse("could not read prerequisite tree".to_string()))
+) -> Result<Vec<ProposedOutlineNode>, EngineError> {
+    let text = collect(ai, Tier::Robust, prompt::propose_outline(topic, objective)).await?;
+    let nodes = parse::outline_tree(&text)
+        .ok_or_else(|| EngineError::Parse("could not read outline tree".to_string()))?;
+    if nodes.is_empty() {
+        return Err(EngineError::Parse(
+            "outline tree had no objective node".to_string(),
+        ));
+    }
+    Ok(nodes)
 }
 
 /// Grades an answer against the locked rubric (§8). Light tier.
@@ -782,12 +743,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_outline_json_and_fallback() {
-        let items = parse::outline(r#"["Intro", "Limits", "Derivatives"]"#).unwrap();
-        assert_eq!(items, vec!["Intro", "Limits", "Derivatives"]);
+    fn parse_outline_tree_json() {
+        let nodes = parse::outline_tree(
+            r#"[{"title":"Limits","children":[]},{"title":"Derivatives","children":[]}]"#,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].title, "Limits");
+        assert_eq!(nodes[1].title, "Derivatives");
 
-        let items = parse::outline("- Intro\n- Limits\n2. Derivatives").unwrap();
-        assert_eq!(items, vec!["Intro", "Limits", "Derivatives"]);
+        assert!(parse::outline_tree("not json").is_none());
     }
 
     #[test]
@@ -1051,11 +1016,27 @@ mod tests {
         )
     }
 
-    /// Live quality-iteration harness for `prompt::outline` — not a
-    /// correctness test (nothing to assert against), a print-and-eyeball
-    /// loop for tuning the prompt against the REAL configured Fast-tier
-    /// provider (the model outline generation actually runs on). Ignored by
-    /// default: spends real tokens. Run with `cargo test -p learnive \
+    fn print_outline_tree(nodes: &[ProposedOutlineNode], depth: usize, is_top: bool) {
+        for (i, n) in nodes.iter().enumerate() {
+            let tag = if is_top && i == nodes.len() - 1 {
+                " [objective]"
+            } else {
+                ""
+            };
+            eprintln!("{}- {}{tag}", "  ".repeat(depth + 1), n.title);
+            print_outline_tree(&n.children, depth + 1, false);
+        }
+    }
+
+    /// Live quality-iteration harness for `prompt::propose_outline` (§S15/
+    /// §S16, unified 2026-08-19) — not a correctness test (nothing to assert
+    /// against), a print-and-eyeball loop for tuning the prompt against the
+    /// REAL configured Robust-tier provider this call runs on. Merges the
+    /// case lists the two separate probes this replaced used to carry
+    /// (`outline_quality_probe` for the objective's own decomposition,
+    /// `prerequisites_quality_probe` for prerequisite judgment) since one
+    /// call now does both jobs at once. Ignored by default: spends real
+    /// tokens. Run with `cargo test -p learnive \
     /// engine::tests::outline_quality_probe -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
@@ -1064,6 +1045,10 @@ mod tests {
 
         let cases: &[(&str, &str)] = &[
             (
+                // Narrow/self-contained: single objective node, no real
+                // decomposition — but per the 2026-08-18 calibration, NOT an
+                // empty prerequisite list either (array/vector indexing is
+                // domain-specific, not universal literacy).
                 "como funciona busca binária",
                 "Entender como a busca binária encontra um valor em um vetor ordenado e implementá-la corretamente",
             ),
@@ -1072,88 +1057,19 @@ mod tests {
                 "Aprender a adicionar e remover elementos de uma lista em Python usando seus métodos principais",
             ),
             (
-                // Deliberately NOT the same wording as `prompt::outline`'s
-                // own calculus few-shot example — a near-duplicate here
-                // would just show memorization, not generalization.
-                "integrais",
-                "Entender o que é uma integral e calcular integrais de funções polinomiais simples",
+                // §S15's own spec example — should propose something like
+                // álgebra/limites/derivadas as prerequisites, then decompose
+                // "Integração" itself into antiderivadas/substituição/etc.
+                "integração",
+                "Aprender a calcular integrais de funções polinomiais e trigonométricas simples",
             ),
             (
                 "termodinâmica para engenharia",
                 "Compreender as leis da termodinâmica e aplicá-las a ciclos e sistemas de engenharia",
             ),
             (
-                "derivada de x ao quadrado",
-                "Calcular a derivada de uma função de potência usando a regra do poder",
-            ),
-            (
-                // A different broad, textbook-chapter-scale domain, to check
-                // the fix generalizes beyond physics/engineering topics.
                 "genética básica",
                 "Entender os princípios da herança genética: genes, alelos, dominância, e as leis de Mendel",
-            ),
-            (
-                // Live report (2026-08-18, QA generation run, doc au1wfnmxnk):
-                // collapsed to a single main-line node with the whole topic
-                // pushed nowhere — should decompose into several main-line
-                // steps (what Big-O is -> common complexity classes ->
-                // best/worst/average case -> comparing growth), same
-                // textbook-chapter scale as thermodynamics/genetics above.
-                "Big-O notation and algorithm complexity",
-                "Quantify algorithm complexity using Big-O notation.",
-            ),
-        ];
-
-        for (topic, objective) in cases {
-            let outline = generate_outline(&ai, topic, objective).await;
-            eprintln!("\n=== topic: {topic}\n    objective: {objective}");
-            match outline {
-                Ok(o) => {
-                    for item in &o.items {
-                        eprintln!("  - {}", item.title);
-                    }
-                }
-                Err(e) => eprintln!("  ERROR: {e:?}"),
-            }
-        }
-    }
-
-    fn print_prereq_tree(nodes: &[PrereqNode], depth: usize) {
-        for n in nodes {
-            eprintln!("{}- {}", "  ".repeat(depth + 1), n.title);
-            print_prereq_tree(&n.children, depth + 1);
-        }
-    }
-
-    /// Live quality-iteration harness for `prompt::propose_prerequisites`
-    /// (§S15) — same print-and-eyeball shape as `outline_quality_probe`,
-    /// against the REAL configured Robust-tier provider this call actually
-    /// runs on (deliberately Robust, not Fast — see the doc comment on
-    /// `propose_prerequisites` for why). Run with `cargo test -p learnive \
-    /// engine::tests::prerequisites_quality_probe -- --ignored --nocapture`.
-    #[tokio::test]
-    #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
-    async fn prerequisites_quality_probe() {
-        let ai = live_ai_from_env();
-
-        let cases: &[(&str, &str)] = &[
-            (
-                // §S15's own spec example — should propose something like
-                // álgebra/limites/derivadas.
-                "integração",
-                "Aprender a calcular integrais de funções polinomiais e trigonométricas simples",
-            ),
-            (
-                // Not the alphabetization/numeracy floor (§S15 calibration,
-                // 2026-08-18): array/vector indexing is domain-specific, not
-                // universal literacy, so this should now propose it (or a
-                // "programming logic" node covering it) rather than an empty
-                // tree — the old "self-contained question -> empty tree"
-                // assumption was the model guessing at learner familiarity,
-                // which the calibration session moved out of this prompt's
-                // job entirely.
-                "como funciona busca binária",
-                "Entender como a busca binária encontra um valor em um vetor ordenado e implementá-la corretamente",
             ),
             (
                 "aprendizado de máquina supervisionado",
@@ -1164,92 +1080,81 @@ mod tests {
                 // azfnqbvwym): the model proposed "knowledge of the French
                 // Revolution as a historical event" as a PREREQUISITE of a
                 // document whose entire topic is the French Revolution —
-                // exactly the self-as-prerequisite failure the rewritten
-                // prompt now explicitly forbids. Should come back empty or
-                // with genuine background (e.g. Ancien Régime social/political
-                // structure as of the 1780s), never the topic itself.
+                // exactly the self-as-prerequisite failure the prompt
+                // explicitly forbids. Should come back with genuine
+                // background (e.g. Ancien Régime social/political structure
+                // as of the 1780s) or none, never the topic itself.
                 "the causes of the French Revolution",
                 "Analyze the interdependent conditions that led to the French Revolution",
             ),
             (
-                // Same doc as the outline probe's Big-O case — checking the
-                // two calls now divide labor correctly: outline should carry
-                // Big-O's own content (complexity classes, best/worst case),
-                // this call should propose real background (basic math
-                // functions/growth rates, or "programming logic" per the
-                // 2026-08-18 calibration) without also trying to re-teach
-                // Big-O itself.
+                // Live report (2026-08-18, QA generation run, doc
+                // au1wfnmxnk): collapsed to a single node with the whole
+                // topic pushed nowhere — the objective's own node should
+                // decompose into several steps (what Big-O is -> common
+                // complexity classes -> best/worst/average case -> comparing
+                // growth), same textbook-chapter scale as the other broad
+                // domains above, plus real prerequisite background (basic
+                // math functions/growth rates, or "programming logic").
                 "Big-O notation and algorithm complexity",
                 "Quantify algorithm complexity using Big-O notation.",
             ),
         ];
 
         for (topic, objective) in cases {
-            let tree = propose_prerequisites(&ai, topic, objective).await;
+            let tree = propose_outline(&ai, topic, objective).await;
             eprintln!("\n=== topic: {topic}\n    objective: {objective}");
             match tree {
-                Ok(nodes) if nodes.is_empty() => eprintln!("  (empty tree)"),
-                Ok(nodes) => print_prereq_tree(&nodes, 0),
+                Ok(nodes) => print_outline_tree(&nodes, 0, true),
                 Err(e) => eprintln!("  ERROR: {e:?}"),
             }
         }
     }
 
     #[tokio::test]
-    async fn generate_outline_via_mock() {
-        let ai = mock_ai(r#"["Introduction", "Sets", "Functions"]"#);
-        let outline = generate_outline(&ai, "mathematics", "Learn discrete math basics")
-            .await
-            .unwrap();
-        assert_eq!(outline.topic, "mathematics");
-        assert_eq!(outline.items.len(), 3);
-        assert_eq!(outline.items[1].title, "Sets");
-
-        // §S5: a linear chain, no diamonds — each item's sole prerequisite is
-        // the previous item's id, ids are unique, the first item is free.
-        assert!(outline.items[0].prerequisites.is_empty());
-        assert_eq!(
-            outline.items[1].prerequisites,
-            vec![outline.items[0].id.clone()]
-        );
-        assert_eq!(
-            outline.items[2].prerequisites,
-            vec![outline.items[1].id.clone()]
-        );
-        let ids: std::collections::HashSet<_> = outline.items.iter().map(|i| &i.id).collect();
-        assert_eq!(ids.len(), 3, "every item gets a distinct id");
-    }
-
-    #[tokio::test]
-    async fn propose_prerequisites_via_mock() {
+    async fn propose_outline_via_mock() {
         let ai = mock_ai(
             r#"[{"title":"Algebra basics","children":[]},
-               {"title":"Derivatives","children":[
-                   {"title":"Product rule","children":[]},
-                   {"title":"Chain rule","children":[]}
+               {"title":"Integration","children":[
+                   {"title":"Antiderivatives","children":[]},
+                   {"title":"Definite integrals","children":[]}
                ]}]"#,
         );
-        let forest = propose_prerequisites(&ai, "calculus", "Learn integration")
+        let nodes = propose_outline(&ai, "calculus", "Learn integration")
             .await
             .unwrap();
-        assert_eq!(forest.len(), 2);
-        assert_eq!(forest[0].title, "Algebra basics");
-        assert!(forest[0].children.is_empty());
-        assert_eq!(forest[1].title, "Derivatives");
-        assert_eq!(forest[1].children.len(), 2);
-        assert_eq!(forest[1].children[0].title, "Product rule");
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].title, "Algebra basics");
+        assert!(nodes[0].children.is_empty());
+        // The last element is the objective's own topic, decomposed.
+        assert_eq!(nodes[1].title, "Integration");
+        assert_eq!(nodes[1].children.len(), 2);
+        assert_eq!(nodes[1].children[0].title, "Antiderivatives");
     }
 
-    /// §S15: an explicit empty array is a normal, common answer (most
-    /// objectives need no prerequisites) — must not be treated as a parse
-    /// failure.
+    /// A self-contained objective with no prerequisites is still a
+    /// single-element array (just the objective's own node) — never empty.
     #[tokio::test]
-    async fn propose_prerequisites_empty_tree_is_not_an_error() {
-        let ai = mock_ai("[]");
-        let forest = propose_prerequisites(&ai, "greetings", "Say hello in French")
+    async fn propose_outline_no_prerequisites_is_just_the_objective() {
+        let ai = mock_ai(r#"[{"title":"Say hello in French","children":[]}]"#);
+        let nodes = propose_outline(&ai, "greetings", "Say hello in French")
             .await
             .unwrap();
-        assert!(forest.is_empty());
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].title, "Say hello in French");
+    }
+
+    /// Unlike the old prerequisite-only forest, an empty array is never a
+    /// valid answer here — the objective's own node is always at least one
+    /// element, so an empty response can only mean the model got the
+    /// contract wrong.
+    #[tokio::test]
+    async fn propose_outline_empty_array_is_a_parse_error() {
+        let ai = mock_ai("[]");
+        let err = propose_outline(&ai, "greetings", "Say hello in French")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Parse(_)));
     }
 
     #[tokio::test]

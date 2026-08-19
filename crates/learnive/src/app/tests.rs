@@ -255,10 +255,15 @@ async fn documents_are_listed_resumable_and_renameable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.trim(), "[]");
 
+    // Explicit, already-confirmed nodes (as the real client always sends
+    // after the outline-confirmation screen) — a single top-level item, so
+    // `resume_node_id` (main-line-only, §S15) has something to track without
+    // this test also needing to demonstrate a whole decomposition just to
+    // clear its gate.
     let (_, body) = call(authed(
         "POST",
         "/api/documents",
-        r#"{"topic":"fractions","name":"Fractions 101"}"#,
+        r#"{"topic":"fractions","name":"Fractions 101","objective_text":"Learn fractions","nodes":[{"id":"n1","title":"Fractions","action":"learn","children":[]}]}"#,
     ))
     .await;
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -935,19 +940,14 @@ async fn interactive_island_never_leaks_raw_script_but_is_served_sandboxed() {
 }
 
 #[tokio::test]
-async fn prerequisite_proposal_degrades_to_empty_tree_on_unparseable_model_output() {
-    // §S15: `engine::collect` now requests a non-streamed completion
-    // (`Ai::complete`), which fixed the original live-confirmed failure
-    // mode here (a reasoning-heavy model routing its entire output through
-    // the streaming `reasoning` delta and never reaching `content`). This
-    // test covers the residual case that fix doesn't reach: the model
-    // answers with prose instead of JSON despite the contract.
-    // `propose_prerequisites`'s own contract already treats a well-formed
-    // `[]` as a normal, common answer; a parse failure must degrade to the
-    // same empty tree rather than surface a 502, since the two are
-    // indistinguishable in effect and the caller (the cold-start toggle
-    // screen) already has a defined, safe behavior for "no prerequisites"
-    // — skip straight to `createLivingDocument`.
+async fn outline_proposal_is_a_hard_error_on_unparseable_model_output() {
+    // §S15/§S16 (unified 2026-08-19): `propose_outline` replaced the old
+    // prerequisite-only forest (where a bare `[]` was a normal, common
+    // answer a parse failure could safely degrade to) with a single tree
+    // whose LAST element — the objective's own node — is never optional.
+    // There is no longer a safe empty default to degrade to, so a model
+    // that answers with prose instead of JSON despite the contract must
+    // surface as a hard error instead of silently becoming an empty tree.
     use crate::ai::{Ai, MockProvider, Models, Provider};
 
     let scripted = Provider::Mock(MockProvider::scripted(|req| {
@@ -957,29 +957,26 @@ async fn prerequisite_proposal_degrades_to_empty_tree_on_unparseable_model_outpu
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        if text.contains("TREE of prerequisite concepts") {
+        if text.contains("FULL structure of a living curriculum") {
             // No JSON at all — the same shape as a stream whose only
-            // content was reasoning prose, never a final `[]`/tree.
-            "I don't think this objective needs any prerequisites.".to_string()
+            // content was reasoning prose, never a final tree.
+            "I don't think this objective needs any structure.".to_string()
         } else {
             crate::api::demo_responder(req)
         }
     }));
-    let ai = Ai::new(scripted, Models::single("prereq-parse-failure-demo"));
+    let ai = Ai::new(scripted, Models::single("outline-parse-failure-demo"));
     let state = test_state_with_ai(ai);
 
     let resp = build_router(state)
         .oneshot(authed(
             "POST",
-            "/api/prerequisites/propose",
+            "/api/outline/propose",
             r#"{"topic":"o que é epistemologia?","objective_text":"Clarify the conditions that differentiate knowledge from belief."}"#,
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["tree"], serde_json::json!([]));
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]
@@ -1244,11 +1241,15 @@ async fn objective_and_plan_endpoints_work_in_demo_mode() {
     let proposal: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(!proposal["text"].as_str().unwrap().is_empty());
 
-    // 2. Confirm — locks objective version 1.
+    // 2. Confirm — locks objective version 1. Explicit, already-confirmed
+    // nodes (as the real client always sends), a single flat top-level item
+    // with no children — this test's `plan/decide` step below asserts an
+    // exact title list, which a decomposed node's preserved sub-items would
+    // otherwise pad out.
     let (status, body) = call(authed(
         "POST",
         "/api/documents",
-        r#"{"topic":"fractions","objective_text":"Learn to add and subtract fractions"}"#,
+        r#"{"topic":"fractions","objective_text":"Learn to add and subtract fractions","nodes":[{"id":"n0","title":"Fractions","action":"learn","children":[]}]}"#,
     ))
     .await;
     assert_eq!(status, StatusCode::OK);

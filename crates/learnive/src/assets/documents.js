@@ -3,22 +3,22 @@
 
 // --- Cold start (§6.1/§S4) ---------------------------------------------
 // One topic submission chains two internal calls — propose_objective (the
-// objective anchors every later move, §5) then propose_prerequisites — with
-// no up-front editing screen in between: the objective stays revisable
-// later, from within the document (§5), not gated at cold start. The
-// learner sees at most one confirmation before generation starts: the
-// prerequisite tree (§S15), and only when it's non-empty.
+// objective anchors every later move, §5) then propose_outline — with no
+// up-front editing screen in between: the objective stays revisable later,
+// from within the document (§5), not gated at cold start. The learner sees
+// exactly one confirmation before generation starts: the outline tree
+// (§S15/§S16, unified 2026-08-19) — every prerequisite root chained before
+// the requested topic's own root, which comes last.
 let pendingTopic = null;
 // Document name proposed alongside the objective (§S12), carried to
 // `POST /api/documents`; the learner renames it from the sidebar.
 let pendingName = "";
 let pendingObjectiveText = "";
-let pendingPrereqTree = [];
-// §S16: the objective's own main-line outline, minted by
-// propose_prerequisites and shown read-only (toggle locked to "learn")
-// alongside the prerequisite tree, then round-tripped verbatim to
-// create_document so the confirmed structure and the generated one match.
-let pendingMainline = [];
+// §S15/§S16: ONE ordered tree from `propose_outline` — every element but
+// the last is a prerequisite root, the last is the requested topic's own
+// decomposition. Round-tripped verbatim (as `nodes`) to `create_document`
+// so the confirmed structure and the generated one match.
+let pendingOutlineTree = [];
 
 el("startForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -35,21 +35,16 @@ el("startForm").addEventListener("submit", async (e) => {
     pendingObjectiveText = objData.text;
 
     el("startStatus").textContent = t("status.curriculum");
-    const prereqResp = await postJson("/api/prerequisites/propose", {
+    const outlineResp = await postJson("/api/outline/propose", {
       topic: pendingTopic,
       objective_text: pendingObjectiveText,
     });
-    if (!prereqResp.ok) throw new Error(await prereqResp.text());
-    const prereqData = await prereqResp.json();
+    if (!outlineResp.ok) throw new Error(await outlineResp.text());
+    const outlineData = await outlineResp.json();
     el("startStatus").textContent = "";
-    // §S16: always show the confirmation screen now, even with an empty
-    // prerequisite tree — it's also the only place the main-line outline
-    // itself is shown before generation starts.
-    pendingPrereqTree = prereqData.tree || [];
-    pendingMainline = prereqData.mainline || [];
-    initPrereqActions(pendingPrereqTree);
-    renderMainline();
-    renderPrereqTree();
+    pendingOutlineTree = outlineData.nodes || [];
+    initPrereqActions(pendingOutlineTree);
+    renderOutlineTree();
     el("prereqConfirm").hidden = false;
   } catch (err) {
     el("startForm").hidden = false;
@@ -64,58 +59,16 @@ el("prereqBackBtn").addEventListener("click", () => {
 });
 
 el("prereqConfirmBtn").addEventListener("click", async () => {
-  await createLivingDocument(pendingObjectiveText, pendingPrereqTree, pendingMainline);
+  await createLivingDocument(pendingObjectiveText, pendingOutlineTree);
 });
-
-// §S16: the main-line outline, rendered read-only in the same tree-row
-// shape as a prerequisite node (`.prereq-row`/`.prereq-toggle`) so the two
-// sections read as one continuous structure, but every toggle segment is
-// disabled and locked to "learn" — these nodes ARE the requested topic, so
-// unlike a prerequisite they can't be skipped or downgraded to a review.
-function renderMainlineNode(node) {
-  const segments = ["skip", "review", "learn"]
-    .map(
-      (a) =>
-        '<button type="button" class="prereq-toggle-seg' +
-        (a === "learn" ? " active" : "") +
-        '" data-action="' +
-        a +
-        '" aria-pressed="' +
-        (a === "learn") +
-        '" disabled>' +
-        t("prereq.action." + a) +
-        "</button>",
-    )
-    .join("");
-  return (
-    '<li data-id="' +
-    node.id +
-    '">' +
-    '<div class="prereq-row">' +
-    '<span class="prereq-title">' +
-    escapeHtml(node.title) +
-    "</span>" +
-    '<div class="prereq-toggle" data-id="' +
-    node.id +
-    '" role="group">' +
-    segments +
-    "</div>" +
-    "</div>" +
-    "</li>"
-  );
-}
-
-function renderMainline() {
-  el("mainlineTree").innerHTML = pendingMainline
-    .map((n) => renderMainlineNode(n))
-    .join("");
-}
 
 // §S15 toggle tree: every node defaults to what the server suggested
 // (`learn` — never seen anywhere; `review` — already `Demonstrated` in
 // another document) and is freely re-toggleable afterwards, even inside a
 // branch that just got cascaded (§S15 co-design: the parent click only
-// sets the branch's default, it doesn't lock the children).
+// sets the branch's default, it doesn't lock the children). The last
+// top-level node (the requested topic's own root) is forced to "learn" at
+// render time regardless of what this sets, since it's locked.
 function initPrereqActions(nodes) {
   for (const n of nodes) {
     n.action = n.suggested;
@@ -137,23 +90,26 @@ function findPrereqNode(nodes, id) {
   return null;
 }
 
-// `lockedBySkip`: true when an ancestor is (or was just cascaded to) `skip`
-// — a whole skipped branch is "not taught", so its descendants can't be
-// independently re-toggled without first un-skipping the branch. Forcing
-// `node.action = "skip"` here (not just visually) keeps the data model in
-// sync even for a node whose own `suggested` value came back non-skip from
-// cross-document matching before any cascade touched it.
-function renderPrereqNode(node, lockedBySkip) {
-  if (lockedBySkip) node.action = "skip";
+// `lockedAction`: "learn" for the requested topic's own root and everything
+// under it (it's what was asked for, so it can't be skipped/reviewed), or
+// "skip" for any node under an ancestor that is (or was just cascaded to)
+// `skip` — a whole skipped branch is "not taught", so its descendants can't
+// be independently re-toggled without first un-skipping the branch. `null`
+// means freely toggleable. Forcing `node.action` here (not just visually)
+// keeps the data model in sync even for a node whose own `suggested` value
+// came back different from cross-document matching before any lock/cascade
+// touched it.
+function renderOutlineNode(node, lockedAction) {
+  if (lockedAction) node.action = lockedAction;
   const knownNote = node.known
     ? ' <span class="muted">(' +
       escapeHtml(t("prereq.knownIn", node.known.doc_name)) +
       ")</span>"
     : "";
-  const childLocked = lockedBySkip || node.action === "skip";
+  const childLocked = lockedAction || (node.action === "skip" ? "skip" : null);
   const childrenHtml = (node.children || []).length
     ? "<ul>" +
-      node.children.map((c) => renderPrereqNode(c, childLocked)).join("") +
+      node.children.map((c) => renderOutlineNode(c, childLocked)).join("") +
       "</ul>"
     : "";
   const segments = ["skip", "review", "learn"]
@@ -166,7 +122,7 @@ function renderPrereqNode(node, lockedBySkip) {
         '" aria-pressed="' +
         (node.action === a) +
         '"' +
-        (lockedBySkip ? " disabled" : "") +
+        (lockedAction ? " disabled" : "") +
         ">" +
         t("prereq.action." + a) +
         "</button>",
@@ -177,7 +133,7 @@ function renderPrereqNode(node, lockedBySkip) {
     node.id +
     '">' +
     '<div class="prereq-row' +
-    (lockedBySkip ? " prereq-locked" : "") +
+    (lockedAction ? " prereq-locked" : "") +
     '">' +
     '<span class="prereq-title">' +
     escapeHtml(node.title) +
@@ -194,32 +150,30 @@ function renderPrereqNode(node, lockedBySkip) {
   );
 }
 
-function renderPrereqTree() {
-  el("prereqSection").hidden = pendingPrereqTree.length === 0;
-  el("prereqTree").innerHTML = pendingPrereqTree
-    .map((n) => renderPrereqNode(n, false))
+function renderOutlineTree() {
+  el("outlineTree").innerHTML = pendingOutlineTree
+    .map((n, i) => renderOutlineNode(n, i === pendingOutlineTree.length - 1 ? "learn" : null))
     .join("");
-  el("prereqTree")
+  el("outlineTree")
     .querySelectorAll(".prereq-toggle-seg")
     .forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = btn.closest(".prereq-toggle").dataset.id;
-        const node = findPrereqNode(pendingPrereqTree, id);
+        const node = findPrereqNode(pendingOutlineTree, id);
         if (node) cascadePrereqAction(node, btn.dataset.action);
-        renderPrereqTree();
+        renderOutlineTree();
       });
     });
 }
 
-async function createLivingDocument(objective_text, prerequisites, mainline) {
+async function createLivingDocument(objective_text, nodes) {
   el("startStatus").textContent = t("status.curriculum");
   try {
     const resp = await postJson("/api/documents", {
       topic: pendingTopic,
       objective_text,
       name: pendingName,
-      prerequisites,
-      mainline: mainline || [],
+      nodes,
     });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();

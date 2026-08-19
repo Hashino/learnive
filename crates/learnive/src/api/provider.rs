@@ -117,12 +117,16 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         // engine::prompt::propose_objective (§6.1/§S4) contract.
         return r#"{"text":"Learn the essentials of the requested topic, well enough to explain and apply it","title":"Demo document"}"#.to_string();
     }
-    if text.contains("TREE of prerequisite concepts") {
-        // engine::prompt::propose_prerequisites (§S15) contract — a small,
-        // deterministic tree so demo mode exercises the toggle-confirmation
-        // screen too, instead of always skipping straight to document
-        // creation like an empty-tree response would.
-        return r#"[{"title":"Demo prerequisite","children":[{"title":"Demo sub-skill","children":[]}]}]"#.to_string();
+    if text.contains("FULL structure of a living curriculum") {
+        // engine::prompt::propose_outline (§S15/§S16, unified 2026-08-19)
+        // contract — a small, deterministic tree ending in the objective's
+        // own node, decomposed into two sub-items, so demo mode exercises
+        // the toggle-confirmation screen (the leading prerequisite branch)
+        // AND still yields a multi-item, sequentially-gated outline via the
+        // direct-API fallback (`create_document` auto-confirms only this
+        // last element, dropping the unreviewed prerequisite — see its
+        // doc comment), which tests rely on to have a locked item to probe.
+        return r#"[{"title":"Demo prerequisite","children":[{"title":"Demo sub-skill","children":[]}]},{"title":"Demo document","children":[{"title":"Demo document intro","children":[]},{"title":"Demo document core","children":[]}]}]"#.to_string();
     }
     if text.contains("choosing the next move") {
         // movement::decide_move (L1/L2) contract.

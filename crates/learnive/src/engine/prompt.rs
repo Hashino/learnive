@@ -181,144 +181,149 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
     ]
 }
 
-/// Runs on `Tier::Fast` (`engine::generate_outline`) — a less capable model
-/// than the tutoring calls, and one this session's live probe
-/// (`engine::tests::outline_quality_probe`, 2026-08-17) caught badly
-/// under-planning broad, textbook-chapter-scale objectives: "termodinâmica
-/// para engenharia" (understand the laws AND apply them to engineering
-/// cycles/systems) collapsed to a single node, "Leis da Termodinâmica" — the
-/// old prompt's "two, maybe three nodes is already a lot" cap actively
-/// forbade the decomposition that objective needed. The few-shot examples
-/// below are the fix a smaller model responds to better than more prose
-/// (confirmed by the same probe): one demonstrating the narrow-question
-/// floor stays low (don't pad, don't scaffold), one a genuine small bundle,
-/// one a broad subject decomposed the way a textbook's own table of
-/// contents would, moderately compressed.
+/// Runs on `Tier::Robust` (`engine::propose_outline`) — plans the FULL
+/// outline in one call: prerequisite background the objective presupposes,
+/// then the objective's own content, as ONE ordered JSON array (see
+/// `engine::ProposedOutlineNode`'s doc comment for the exact contract: every
+/// element but the last is a prerequisite, the last is the objective
+/// itself). Unifies what used to be two separate calls (`outline` for the
+/// objective's own flat breakdown, `propose_prerequisites` for a
+/// separately-generated forest) whose independently-generated results then
+/// had to be glued together in Rust — that graft was the actual bug behind
+/// a live report (2026-08-19, "Funções Recursivas"): prerequisites nested
+/// under an unrelated main-line item because the graft code had nothing
+/// better to attach them to. A single call can place prerequisites as
+/// siblings in the right order and give the objective its own titled
+/// container the same way any other bundle of separable sub-skills gets
+/// one, so the structure is correct by construction instead of reassembled
+/// after the fact.
+///
+/// Carries the hard-won lessons of both prompts it replaces:
+/// - Scope discipline for the objective's own decomposition (confirmed live,
+///   2026-08-17: "termodinâmica para engenharia" collapsed to a single node
+///   under an over-terse prompt) — judge scope from the objective, not a
+///   fixed count.
+/// - Inclusion bias for prerequisites (confirmed live, 2026-08-18: the old
+///   "don't scaffold prerequisites the question already assumes the learner
+///   has" guidance produced both a whole document's own topic — "the French
+///   Revolution" — proposed as a prerequisite of ITSELF, and a topic that
+///   should have decomposed — Big-O notation — collapsing to one node with
+///   nothing pushed to prerequisites either) — the confirmation screen
+///   (learn/review/skip, one click per item, prior mastery detected and
+///   pre-filled) is the real backstop against runaway breadth, not prompt
+///   restraint, so this asks for honest, inclusion-biased prerequisites
+///   rather than terseness.
 ///
 /// The first example is deliberately in English while the request will
 /// often be Portuguese (this session's live testing so far skews pt-BR) —
 /// the explicit "regardless of the language" instruction below exists
-/// because the first probe run WITHOUT it leaked English into a Portuguese
-/// request's output ("como funciona busca binária" answered "Binary search
-/// over a sorted array"), the model matching the nearest example's language
+/// because an early probe run WITHOUT it leaked English into a Portuguese
+/// request's output, the model matching the nearest example's language
 /// instead of the live request's.
-pub fn outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
+pub fn propose_outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
     let request = |t: &str, o: &str| format!("Topic: {t}\nCurriculum objective: {o}");
     vec![
         ChatMessage::system(
-            "You plan the opening outline of a living curriculum, at the \
-             granularity a good textbook's own table of contents would use \
-             for this topic — not the whole field, just the chapter or \
-             section this specific topic and objective cover. Judge the \
-             SCOPE from the objective, not a fixed node count: a narrow, \
-             self-contained question is the size of a single textbook \
-             section and gets ONE node — do not pad it with background \
-             sections its own phrasing doesn't ask for. A broader subject — \
-             the kind that fills a whole textbook chapter or course unit — \
-             gets multiple nodes, one per genuinely distinct sub-topic a \
-             table of contents would list as its own section, most basic \
-             first, each a transitive step toward the objective; \
-             under-planning a broad objective down to one or two nodes is \
-             as much a mistake as over-planning a narrow one. Compress a \
-             little more than a real textbook would, though: this app's \
-             real depth grows from the learner's own follow-up questions \
-             and the `plan` move that revises the outline as they read \
-             (§9), so this initial plan does not need to enumerate every \
-             sub-case, formula variant, or worked-example category — those \
-             emerge later, from questions, not from you now. Do NOT decide \
-             what background the learner already has, and do NOT leave it \
-             out of the curriculum on that assumption — a separate step \
-             proposes prerequisite background as its own reviewable tree, \
-             which the learner then confirms or skips one item at a time; \
-             your only job here is the topic's own content, at the size the \
-             objective actually asks for. Write the titles in the SAME \
-             language as the request below, regardless of what language the \
-             examples in this conversation happen to use. Respond ONLY with \
-             a JSON array of strings — the concept titles, most basic \
-             first, each a transitive prerequisite of the objective. No \
-             comments, no markdown.",
+            "You plan the FULL structure of a living curriculum for one \
+             objective, as ONE tree: background prerequisites the learner \
+             needs first, then the objective's own content — in that order, \
+             in a single JSON array, most basic first. The LAST element of \
+             the array is always the objective itself; every element before \
+             it is a prerequisite the objective presupposes.\n\n\
+             PREREQUISITES (every element except the last): background the \
+             learner needs before the objective itself makes sense, never \
+             the objective's own content. Err toward INCLUDING a \
+             prerequisite whenever you are unsure whether the learner \
+             already has it: this tree is a proposal, not a commitment — \
+             the learner reviews it themselves and marks each item \
+             skip/review/learn with one click before anything is generated, \
+             and any item they already demonstrated elsewhere is shown to \
+             them pre-filled and disabled. Assuming familiarity instead of \
+             listing it costs the learner nothing to fix if you are wrong \
+             the other way — silently leaving it out is the mistake, \
+             because a gap the learner cannot see and cannot click away is \
+             a gap that stays. The ONLY time there are NO prerequisites at \
+             all (the array has just the one final element) is an \
+             objective that presupposes nothing beyond basic \
+             literacy/numeracy and everyday reasoning — that floor is low \
+             and should be rare to actually hit; do not treat \"someone \
+             asking this probably already knows X\" as a reason to omit X. \
+             Never restate the objective's own topic as a prerequisite of \
+             itself.\n\n\
+             THE OBJECTIVE (the last element): titled for the topic itself, \
+             at the granularity a good textbook's own table of contents \
+             would use for it — a chapter or section, not the whole field. \
+             Judge the SCOPE from the objective, not a fixed count: a \
+             narrow, self-contained question needs no decomposition at all \
+             (empty children) — do not pad it with sections its own \
+             phrasing doesn't ask for. A broader subject gets one child per \
+             genuinely distinct sub-topic a table of contents would list as \
+             its own section, most basic first; under-planning a broad \
+             objective down to no decomposition is as much a mistake as \
+             over-planning a narrow one. Compress a little more than a real \
+             textbook would, though: this app's real depth grows from the \
+             learner's own follow-up questions and the outline-revision \
+             move that fires as they read, so this initial plan does not \
+             need to enumerate every sub-case, formula variant, or \
+             worked-example category — those emerge later, from questions, \
+             not from you now.\n\n\
+             DECOMPOSITION (applies to any node, prerequisite or objective, \
+             at any depth): give a node its own children only when it is \
+             genuinely a bundle of separable sub-skills that each need to \
+             be demonstrated on their own — apply this same test \
+             recursively at every level. A node that is already atomic gets \
+             no children (an empty array, not omitted).\n\n\
+             Write every title in the SAME language as the request below, \
+             regardless of what language these instructions or the \
+             examples use. Respond ONLY with a JSON array, each element \
+             shaped {\"title\":\"...\",\"children\":[...]} (children is the \
+             same shape, recursively, may be an empty array). No comments, \
+             no markdown, no prose outside the JSON.",
         ),
         ChatMessage::user(request(
             "how does binary search work",
             "Understand how binary search finds a target in a sorted array and implement it correctly",
         )),
-        ChatMessage::assistant(r#"["Binary search over a sorted array"]"#),
-        ChatMessage::user(request(
-            "adicionar e remover itens de uma lista em python",
-            "Aprender a adicionar e remover elementos de uma lista em Python usando seus métodos principais",
-        )),
-        ChatMessage::assistant(
-            r#"["Adicionando elementos a uma lista em Python", "Removendo elementos de uma lista em Python"]"#,
-        ),
+        ChatMessage::assistant(r#"[{"title":"Binary search over a sorted array","children":[]}]"#),
         ChatMessage::user(request(
             "cálculo integral",
             "Aprender os fundamentos de cálculo integral: integrais indefinidas, definidas e o teorema fundamental do cálculo",
         )),
         ChatMessage::assistant(
-            r#"["Antiderivadas e a integral indefinida", "Técnicas de integração: substituição", "Técnicas de integração: integração por partes", "Somas de Riemann e a integral definida", "O teorema fundamental do cálculo", "Aplicações da integral: área entre curvas e volume de sólidos de revolução"]"#,
+            r#"[{"title":"Álgebra básica","children":[]},
+                {"title":"Limites","children":[]},
+                {"title":"Derivadas","children":[]},
+                {"title":"Integração","children":[
+                    {"title":"Antiderivadas e a integral indefinida","children":[]},
+                    {"title":"Técnicas de integração: substituição","children":[]},
+                    {"title":"Técnicas de integração: integração por partes","children":[]},
+                    {"title":"Somas de Riemann e a integral definida","children":[]},
+                    {"title":"O teorema fundamental do cálculo","children":[]},
+                    {"title":"Aplicações da integral: área entre curvas e volume de sólidos de revolução","children":[]}
+                ]}]"#,
+        ),
+        ChatMessage::user(request(
+            "recursion in C",
+            "Understand how recursive functions work in C and be able to write them correctly",
+        )),
+        ChatMessage::assistant(
+            r#"[{"title":"C data types and variables","children":[]},
+                {"title":"C functions","children":[
+                    {"title":"Function definition and prototype","children":[]},
+                    {"title":"Parameters and return values","children":[]},
+                    {"title":"Calling functions","children":[]},
+                    {"title":"Local vs global scope","children":[]}
+                ]},
+                {"title":"Recursion in C","children":[
+                    {"title":"What is recursion in C","children":[]},
+                    {"title":"The base case in recursive functions","children":[]},
+                    {"title":"The recursive case in C functions","children":[]},
+                    {"title":"The call stack and how recursion executes","children":[]},
+                    {"title":"Syntax for recursive functions in C","children":[]},
+                    {"title":"Common recursive patterns and pitfalls","children":[]}
+                ]}]"#,
         ),
         ChatMessage::user(request(topic, objective)),
-    ]
-}
-
-/// Prerequisite tree proposal (§S15) — a separate call from [`outline`],
-/// deliberately more generous: `outline`'s job is the topic's own content at
-/// the size the objective asks for, never a guess at what background to
-/// silently withhold. That guess used to live in `outline`'s own prompt
-/// ("don't scaffold prerequisites the question already assumes the learner
-/// has") — moved out entirely (2026-08-18) after a live report of exactly
-/// the failure mode a model making that judgment call predictably produces:
-/// a whole document's own topic ("the French Revolution") proposed as a
-/// PREREQUISITE of itself, and separately, a topic that should have
-/// decomposed into several main-line steps (Big-O notation) collapsed into
-/// one node with nothing pushed to prerequisites either — the guess failed
-/// in both directions on real data. The confirmation tree the caller shows
-/// before generating anything (learn/review/skip, one click per item, prior
-/// mastery detected and pre-filled) is the actual backstop against runaway
-/// breadth here, not prompt restraint — so this prompt asks for honest,
-/// inclusion-biased decomposition rather than terseness: a model this size
-/// guessing "the learner probably already knows X" is not reliable judgment
-/// to build on, and the asymmetry favors listing X — the learner dismisses
-/// an unwanted item in one click, but a gap silently omitted is invisible
-/// and gets no click to fix it.
-pub fn propose_prerequisites(topic: &str, objective: &str) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::system(
-            "You propose the TREE of prerequisite concepts a curriculum \
-             objective presupposes — background the learner needs before the \
-             objective itself makes sense, not the objective's own content. \
-             Err toward INCLUDING a prerequisite whenever you are unsure \
-             whether the learner already has it: this tree is a proposal, \
-             not a commitment — the learner reviews it themselves and marks \
-             each item skip/review/learn with one click before anything is \
-             generated, and any item they already demonstrated elsewhere is \
-             shown to them pre-filled and disabled. Assuming familiarity \
-             instead of listing it costs the learner nothing to fix if you \
-             are wrong the other way — silently leaving it out is the \
-             mistake, because a gap the learner cannot see and cannot click \
-             away is a gap that stays. The ONLY thing that should produce an \
-             empty tree is an objective that presupposes nothing beyond \
-             basic literacy/numeracy and everyday reasoning — that floor is \
-             low and should be rare to actually hit; do not treat \"someone \
-             asking this probably already knows X\" as a reason to omit X. \
-             Never include the objective's own topic or a restatement of it \
-             as a prerequisite of itself — a prerequisite is always \
-             something the learner needs BEFORE this objective makes sense, \
-             never the objective's own subject matter. When prerequisites \
-             are needed, give each one a title, and give a prerequisite its \
-             OWN children only when it is genuinely a bundle of separable \
-             sub-skills that each need to be demonstrated on their own — \
-             apply this same test recursively at every level, exactly like \
-             planning a normal outline; do not decompose a concept just \
-             because you could. A prerequisite that is already atomic gets \
-             no children. Order matters within a list: most basic first. \
-             Respond ONLY with a JSON array (empty array `[]` only for that \
-             literacy/numeracy floor), each element shaped \
-             {\"title\":\"...\",\"children\":[...]} (children is the same \
-             shape, recursively, and may be an empty array). No comments, no \
-             markdown, no prose outside the JSON.",
-        ),
-        ChatMessage::user(format!("Topic: {topic}\nCurriculum objective: {objective}")),
     ]
 }
 

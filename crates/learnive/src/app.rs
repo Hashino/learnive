@@ -135,14 +135,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/setup", get(api::setup_status).post(api::save_setup))
         // Curriculum loop (§6, §8, §S4). All POST — mutations never on GET (§3.1).
         .route("/api/objective/propose", post(api::propose_objective))
-        // §S15: proposes the prerequisite tree for a topic/objective,
-        // resolved against existing documents — stateless, like
-        // `objective/propose`, brackets `create_document` which receives
-        // the learner's confirmed choices back.
-        .route(
-            "/api/prerequisites/propose",
-            post(api::propose_prerequisites),
-        )
+        // §S15/§S16: proposes the WHOLE outline tree (prerequisites and the
+        // objective's own decomposition, unified into one ordered array) for
+        // a topic/objective, resolved against existing documents —
+        // stateless, like `objective/propose`, brackets `create_document`
+        // which receives the learner's confirmed choices back.
+        .route("/api/outline/propose", post(api::propose_outline))
         // GET lists the existing living documents so the app can reopen where
         // the last session left off (§S12); POST creates a new one.
         .route(
