@@ -785,6 +785,34 @@ mod tests {
     }
 
     #[test]
+    fn html_comment_in_content_survives_round_trip() {
+        // learnive's build-version stamp (crates/learnive/src/engine.rs's
+        // `wrap_article`) is a leading HTML comment inside the content
+        // section, not a new field of the data contract — it must be inert
+        // to every existing selector here and survive parse/`to_html`
+        // unchanged, exactly like the rest of the frozen content layer.
+        let src = r#"<article data-node-id="n1" data-doc-id="d1">
+  <section data-layer="content">
+  <!--learnive-build: abc1234-->
+    <p data-block-id="b1">Hello.</p>
+  </section>
+  <section data-layer="interaction"></section>
+</article>"#;
+        let node = Node::parse(src).unwrap();
+        assert!(node.content.html.contains("<!--learnive-build: abc1234-->"));
+        assert_eq!(node.content.blocks.len(), 1);
+
+        let reparsed = Node::parse(&node.to_html()).unwrap();
+        assert!(
+            reparsed
+                .content
+                .html
+                .contains("<!--learnive-build: abc1234-->")
+        );
+        assert_eq!(reparsed.content.blocks, node.content.blocks);
+    }
+
+    #[test]
     fn version_chain_pointer_survives() {
         let src = r#"<article data-node-id="n2" data-doc-id="d1" data-prev-version="n1">
   <section data-layer="content"><p data-block-id="b1">v2</p></section>

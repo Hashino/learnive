@@ -15,6 +15,17 @@ use learnive_core::{Node, ObjectiveType, ensure_block_ids, render_math};
 
 use crate::ai::{Ai, ChatMessage, ProviderError, Tier};
 
+/// Short git commit hash of the running build (embedded at compile time by
+/// `build.rs`, never a runtime `git` shell-out — the binary must know its own
+/// build commit even run from elsewhere, or with no `.git` present at all, in
+/// which case this falls back to `"unknown"`). QA/debugging traceability
+/// only: stamped onto every generated node (`wrap_article`) and document
+/// (`api::cold_start::create_document`), never shown to the user or exposed
+/// via any API response. Deliberately a single string, not a struct — meant
+/// to be extensible to a richer version scheme later without callers caring
+/// what shape that takes.
+pub const APP_VERSION: &str = env!("LEARNIVE_BUILD_SHA");
+
 /// Per-objective grade (§8): not pass/fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -520,9 +531,23 @@ fn wrap_article(
     node_id: &str,
     content_section_inner: &str,
 ) -> Result<Node, EngineError> {
+    // QA/debugging traceability (not a data-contract field): the build's
+    // short git SHA, as a leading HTML comment inside the content section —
+    // in the spirit of the codebase's existing `<!--tactics: ...-->`
+    // sentinel, but never stripped, since it isn't a model output the
+    // client needs scrubbed. `ContentLayer::html` is `inner_html()`
+    // verbatim, and none of `parse_content`'s selectors
+    // (`[data-block-id]`/`span[data-objective-id]`/`cite`/
+    // `form[data-exercise-id]`) can match a comment node, so this is inert
+    // for blocks/objectives/citations/exercise and survives the
+    // parse/`to_html` round-trip unchanged (see `node.rs`'s
+    // `stamps_the_build_version_and_survives_round_trip`). `wrap_article` is
+    // the single door every node — content-only, partial, or finalized —
+    // passes through (`assemble_content_node`, `assemble_partial_node`,
+    // `finalize_node`), so this stamps once, here, rather than at each caller.
     let article = format!(
         "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
-         <section data-layer=\"content\">\n{content_section_inner}\n  </section>\n  \
+         <section data-layer=\"content\">\n  <!--learnive-build: {APP_VERSION}-->\n{content_section_inner}\n  </section>\n  \
          <section data-layer=\"interaction\"></section>\n</article>"
     );
     Node::parse(&article).map_err(|e| EngineError::Parse(e.to_string()))

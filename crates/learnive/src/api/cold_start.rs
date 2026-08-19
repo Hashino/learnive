@@ -43,13 +43,24 @@ pub async fn propose_objective(
     }))
 }
 
-/// The document's own metadata sidecar (§S12) — just its display name today.
-/// Separate from `outline.json`: renaming a document is not a curriculum
-/// change and must not read-modify-write the outline the `plan` move and
-/// sub-node spawning both mutate (`Store::update_outline_file`).
+/// The document's own metadata sidecar (§S12) — its display name, plus
+/// (added for QA/debugging traceability) the build's short git SHA at the
+/// moment the document was *created*. Separate from `outline.json`:
+/// renaming a document is not a curriculum change and must not
+/// read-modify-write the outline the `plan` move and sub-node spawning both
+/// mutate (`Store::update_outline_file`).
+///
+/// `built_with` is deliberately distinct from each node's own stamp
+/// (`engine::wrap_article`): a document's nodes are generated incrementally
+/// over time, possibly across several app versions, while the document
+/// itself is created exactly once — this field records that one moment, not
+/// a running "current version." Optional/defaulted so a document created
+/// before this field existed still deserializes cleanly.
 #[derive(Serialize, Deserialize)]
 struct DocumentMeta {
     name: String,
+    #[serde(default)]
+    built_with: Option<String>,
 }
 
 /// The document's display name, with the fallbacks a missing/blank sidecar
@@ -661,7 +672,11 @@ pub async fn create_document(
     state.store.write_doc_file(
         &doc_id,
         "document.json",
-        &serde_json::to_string(&DocumentMeta { name: name.clone() }).unwrap_or_default(),
+        &serde_json::to_string(&DocumentMeta {
+            name: name.clone(),
+            built_with: Some(engine::APP_VERSION.to_string()),
+        })
+        .unwrap_or_default(),
     )?;
     // Acquire a grounding source in the background (§11/§14): the outline returns
     // immediately and content starts streaming ungrounded; citations appear once
@@ -703,11 +718,20 @@ pub async fn rename_document(
     // Reject a rename of something that is not a document (no outline) —
     // otherwise this would happily mint a `document.json` inside `corpus/`.
     state.store.read_doc_file(&doc_id, "outline.json")?;
+    // Read-modify-write, not a fresh `DocumentMeta`: a rename must not erase
+    // the `built_with` stamp `create_document` set at creation time.
+    let built_with = state
+        .store
+        .read_doc_file(&doc_id, "document.json")
+        .ok()
+        .and_then(|json| serde_json::from_str::<DocumentMeta>(&json).ok())
+        .and_then(|meta| meta.built_with);
     state.store.write_doc_file(
         &doc_id,
         "document.json",
         &serde_json::to_string(&DocumentMeta {
             name: name.to_string(),
+            built_with,
         })
         .unwrap_or_default(),
     )?;
