@@ -107,13 +107,34 @@ pub async fn generate_node(
         let mut graded: Option<(String, GeneratedMove)> = None;
 
         for i in 0..MAX_MOVES_PER_NODE {
+            // §14: on L1/L2, `decide_and_generate` folds the decide round
+            // trip into the front of the content call itself for a
+            // `MoveRender::Streamed` pick — when it does, the stream is
+            // already open here and the `MoveRender::Streamed` branch below
+            // reuses it instead of opening a fresh one (`movement.rs`
+            // module docs, "merged decide+generate").
+            let mut pregenerated_stream: Option<crate::ai::TokenStream> = None;
             let move_type = if i == MAX_MOVES_PER_NODE - 1 {
                 // Cost guard exhausted without a graded check — force one so
                 // the node still closes (every node ends in a check, §6).
                 MoveType::Test
-            } else {
-                match movement::decide_move(&ai, policy, &ctx).await {
+            } else if policy == AgentPolicy::L0 {
+                // L0 has no round trip to merge — it never called the AI to
+                // decide in the first place.
+                match movement::l0_next_move(&ctx.prior_moves) {
                     Ok(mt) => mt,
+                    Err(e) => {
+                        yield Ok(sse_frame("error", &e.to_string()));
+                        return;
+                    }
+                }
+            } else {
+                match movement::decide_and_generate(&ai, policy, &ctx).await {
+                    Ok(movement::DecidedMove::Streamed { move_type, stream }) => {
+                        pregenerated_stream = Some(stream);
+                        move_type
+                    }
+                    Ok(movement::DecidedMove::Structured { move_type }) => move_type,
                     Err(e) => {
                         yield Ok(sse_frame("error", &e.to_string()));
                         return;
@@ -172,12 +193,15 @@ pub async fn generate_node(
 
             let generated = match move_type.render() {
                 MoveRender::Streamed => {
-                    let mut tokens = match movement::generate_move_stream(&ai, move_type, &ctx).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            yield Ok(sse_frame("error", &e.to_string()));
-                            return;
-                        }
+                    let mut tokens = match pregenerated_stream {
+                        Some(s) => s,
+                        None => match movement::generate_move_stream(&ai, move_type, &ctx).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                yield Ok(sse_frame("error", &e.to_string()));
+                                return;
+                            }
+                        },
                     };
                     // §S11: gate an interactive island's raw HTML out of the
                     // `token` frames — the client only ever sees its empty

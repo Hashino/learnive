@@ -1,4 +1,4 @@
-use super::{AgentPolicy, MoveContext, MoveRecord, MoveType};
+use super::{AgentPolicy, MoveContext, MoveRecord, MoveRender, MoveType};
 use crate::ai::ChatMessage;
 use crate::engine::prompt::{
     CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
@@ -86,19 +86,33 @@ fn describe_prior(prior: &[MoveRecord]) -> String {
 /// "Nenhuma hipótese aberta foi listada… nenhuma investigação será gerada."
 /// as the learner's opening prose. So the option is withheld instead of
 /// restraint being requested.
-fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
-    let mut types = if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
-        "explain, ask, test, profile, confront, integrate, revisit, plan".to_string()
-    } else {
-        "explain, ask, test, confront, integrate, revisit, plan".to_string()
-    };
+fn candidate_types(ctx: &MoveContext) -> Vec<MoveType> {
+    let mut types = vec![MoveType::Explain, MoveType::Ask, MoveType::Test];
+    if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
+        types.push(MoveType::Profile);
+    }
+    types.extend([
+        MoveType::Confront,
+        MoveType::Integrate,
+        MoveType::Revisit,
+        MoveType::Plan,
+    ]);
     // Offered only when there is genuinely nothing to ground on — same
     // withhold-don't-ask-restraint pattern as `profile` above (a model told
     // "research is available" when grounding already exists has no reason
     // not to pick it "just in case", spending a whole move on nothing).
     if !ctx.research_attempted && ctx.grounding.trim().is_empty() {
-        types.push_str(", research");
+        types.push(MoveType::Research);
     }
+    types
+}
+
+fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
+    let types = candidate_types(ctx)
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     match policy {
         AgentPolicy::L1 => format!(
             "Choose the NEXT move from EXACTLY this closed menu: {types}. \
@@ -134,6 +148,74 @@ pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
             non_empty(&ctx.profile),
             describe_prior(&ctx.prior_moves),
             non_empty(tail_chars(&ctx.node_tail, 1500)),
+        )),
+    ]
+}
+
+/// Prompt for the merged decide+generate call (§14 latency,
+/// `decide_and_generate`, L1/L2 only) — see the module docs' "merged
+/// decide+generate" note. Asks for a leading `<!--move: type-->` marker
+/// (mirrors the existing trailing `<!--tactics: ...-->` sentinel, just
+/// leading); if the chosen type renders streamed, the model keeps writing
+/// that move's full content in the SAME response, under the same contract as
+/// `generate_move_streamed`. If it renders structured, the model is told to
+/// write NOTHING else — the caller makes a real `generate_move` call for
+/// that content (see the module docs for why this call never asks a
+/// structured type to stream its own JSON).
+pub fn decide_and_generate(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
+    let candidates = candidate_types(ctx);
+    let streamed_purposes = candidates
+        .iter()
+        .filter(|t| t.render() == MoveRender::Streamed)
+        .map(|t| format!("- \"{t}\": {}", purpose(*t, ctx)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let structured_names = candidates
+        .iter()
+        .filter(|t| t.render() == MoveRender::Structured)
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cite = cite_addendum(&ctx.grounding);
+
+    vec![
+        ChatMessage::system(format!(
+            "You are a personal tutor deciding what to do next in a living \
+             document, and — for most outcomes — generating it in the SAME \
+             response. {}\n\n\
+             STEP 1: on the very first line, write EXACTLY one HTML comment \
+             naming your choice: <!--move: type-->. No text before it.\n\n\
+             STEP 2: what comes after depends on which type you chose:\n\
+             - If you chose one of: {structured_names} — write NOTHING else. \
+             Stop immediately after the marker; that move's content is \
+             generated in a separate call.\n\
+             - If you chose one of the other types, continue in the SAME \
+             response with that move's full content, following the guidance \
+             for whichever you picked:\n{streamed_purposes}\n\n\
+             {}\n\n{}\n\n{PROSE_HTML_CONTRACT}\n\n{ISLAND_CONTRACT}\n\n{cite}\n\n\
+             If you continued with content, after your HTML, on its own line, \
+             append an HTML comment listing the tactic self-labels you used \
+             (e.g. \"analogy\", \"worked-example\", \"interactive-visual\", \
+             \"formal-first\"): <!--tactics: label-one, label-two-->. This \
+             comment is invisible when rendered and is stripped before \
+             storage — it is bookkeeping, not content.",
+            menu(policy, ctx),
+            continuity_note(),
+            topic_scope_note(),
+        )),
+        ChatMessage::user(format!(
+            "Overall topic: {}\nConcept of this node: {}\n\
+             Context of what has been taught so far: {}\n\
+             Curriculum objective: {}\nLearner profile: {}\n\
+             Moves already in this node: {}{}{}",
+            ctx.topic,
+            ctx.item_title,
+            non_empty(&ctx.outline_context),
+            non_empty(&ctx.objective),
+            non_empty(&ctx.profile),
+            describe_prior(&ctx.prior_moves),
+            sources_block(&ctx.grounding),
+            node_so_far_line(ctx),
         )),
     ]
 }

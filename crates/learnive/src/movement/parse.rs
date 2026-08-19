@@ -18,6 +18,14 @@ pub fn move_type(text: &str) -> Result<MoveType, EngineError> {
     Ok(raw.move_type)
 }
 
+/// Parses a bare type name (e.g. `explain`, not a JSON object) off the
+/// leading `<!--move: type-->` marker (see [`super::decide_and_generate`]),
+/// by reusing [`MoveType`]'s existing `snake_case` [`Deserialize`] impl.
+pub fn move_type_name(name: &str) -> Result<MoveType, EngineError> {
+    let quoted = format!("\"{}\"", name.trim());
+    serde_json::from_str(&quoted).map_err(|e| EngineError::Parse(e.to_string()))
+}
+
 /// Strips a trailing `<!--tactics: a, b-->` sentinel (see the module
 /// docs on the streamed path) from streamed move output. A missing or
 /// malformed sentinel just means no tactics recorded — the streamed
