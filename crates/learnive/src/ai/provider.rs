@@ -275,11 +275,18 @@ impl OpenAiCompat {
         for attempt in 0..=TRANSIENT_RETRIES {
             match self.complete_once(&req).await {
                 Ok(text) => return Ok(text),
-                // Api errors carry a real status the provider chose to
-                // return (auth, bad request, ...) — repeating the exact
-                // same request won't change that, so only Http (transport)
-                // failures are worth another attempt.
-                Err(e @ ProviderError::Api { .. }) => return Err(e),
+                // Most Api errors carry a real status the provider chose to
+                // return (auth, bad request, ...) — repeating the exact same
+                // request won't change that. But 5xx/429 are the provider
+                // reporting its OWN transient trouble (live QA 2026-08-19 hit
+                // a bare 500 "Internal server error" from the free-tier
+                // provider on an otherwise-valid grading request) — worth the
+                // same retry as a transport failure.
+                Err(e @ ProviderError::Api { status, .. })
+                    if status != 429 && !(500..600).contains(&status) =>
+                {
+                    return Err(e);
+                }
                 Err(e) => {
                     last_err = Some(e);
                     if attempt < TRANSIENT_RETRIES {
@@ -341,7 +348,7 @@ impl OpenAiCompat {
             return Err(ProviderError::Api { status, body });
         }
 
-        let body: Resp = tokio::time::timeout(BODY_READ_TIMEOUT, resp.json())
+        let text = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
             .await
             .map_err(|_| {
                 ProviderError::Http(format!(
@@ -349,6 +356,18 @@ impl OpenAiCompat {
                 ))
             })?
             .map_err(|e| ProviderError::Http(e.to_string()))?;
+        // `.json()` alone only reports "error decoding response body" with no
+        // way to see what actually came back — live QA (2026-08-19) hit this
+        // repeatedly against the free-tier default provider with no way to
+        // tell a genuine malformed/truncated body from a shape this struct
+        // doesn't expect. A snippet of the real text is worth the extra
+        // allocation on the (hopefully rare) failure path.
+        let body: Resp = serde_json::from_str(&text).map_err(|e| {
+            let snippet: String = text.chars().take(300).collect();
+            ProviderError::Http(format!(
+                "decoding response body: {e} — body was: {snippet:?}"
+            ))
+        })?;
         Ok(body
             .choices
             .into_iter()
