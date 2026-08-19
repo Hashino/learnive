@@ -455,6 +455,14 @@ async fn locked_node_refuses_generation_and_skip() {
         items.len() > 1,
         "demo outline always has more than one item"
     );
+    // §S16: a caller that skips the confirmation screen (no `nodes` in the
+    // body) never approved the proposed prerequisites, so `create_document`'s
+    // fallback must drop them rather than silently committing to them —
+    // pin that here, since no other test asserts it.
+    assert!(
+        !items.iter().any(|it| it["title"] == "Demo prerequisite"),
+        "unconfirmed prerequisites must be dropped by the create_document fallback"
+    );
     let locked_id = items[1]["id"].as_str().unwrap().to_string();
 
     // Generation on the locked node ends the SSE stream with an error,
