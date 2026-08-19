@@ -609,6 +609,10 @@ pub(super) async fn prepare(
         .read_doc_file(doc_id, "outline.json")
         .map_err(|e| e.to_string())?;
     let outline: Outline = serde_json::from_str(&outline_json).map_err(|e| e.to_string())?;
+    // §S15: this is also what refuses a confirmed prereq-tree `skip` — its
+    // id was never materialized into `outline.items` at all
+    // (`cold_start::materialize_prereq_node`), so it can only ever land
+    // here as "unknown outline item", never reach the gate checks below.
     let idx = outline
         .items
         .iter()

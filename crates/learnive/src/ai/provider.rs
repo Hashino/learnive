@@ -45,6 +45,20 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(45);
 const TRANSIENT_RETRIES: u32 = 2;
 const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 
+/// Wall-clock ceiling on `complete()`'s whole retry loop, independent of how
+/// many attempts it takes. Retrying 5xx/429 (added 2026-08-19, see
+/// `TRANSIENT_RETRIES`'s doc comment) compounds against the *per-attempt*
+/// 120s send + 45s body-read budget: three attempts that each stall near
+/// their cap before finally erroring is ~500s, which showed up live as a
+/// downstream caller (the QA driver's own 200s HTTP timeout on `/answer`)
+/// timing out on what looked like a hung server. `complete()` is only ever
+/// used for short structured calls (test/profile/outline/rubric/grading,
+/// see its doc comment) that normally finish in single-digit seconds even
+/// on a slow model, so 60s is a generous ceiling for the legitimate case
+/// while keeping the pathological retry-storm case bounded to something a
+/// synchronous caller can budget around.
+const COMPLETE_BUDGET: Duration = Duration::from_secs(60);
+
 /// Stream of text deltas (§14 — token-by-token streaming for low TTFT).
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> + Send>>;
 
@@ -271,9 +285,18 @@ impl OpenAiCompat {
     /// own `message.reasoning` vs. `message.content`) that the streaming
     /// path doesn't reliably deliver for every request.
     async fn complete(&self, req: ChatRequest) -> Result<String, ProviderError> {
+        match tokio::time::timeout(COMPLETE_BUDGET, self.complete_retrying(&req)).await {
+            Ok(result) => result,
+            Err(_) => Err(ProviderError::Http(format!(
+                "gave up after retrying for {COMPLETE_BUDGET:?} without a successful response"
+            ))),
+        }
+    }
+
+    async fn complete_retrying(&self, req: &ChatRequest) -> Result<String, ProviderError> {
         let mut last_err = None;
         for attempt in 0..=TRANSIENT_RETRIES {
-            match self.complete_once(&req).await {
+            match self.complete_once(req).await {
                 Ok(text) => return Ok(text),
                 // Most Api errors carry a real status the provider chose to
                 // return (auth, bad request, ...) — repeating the exact same

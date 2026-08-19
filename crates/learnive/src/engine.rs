@@ -68,9 +68,23 @@ pub struct OutlineItem {
     /// definition-only pass plus a couple of exercises, chosen by the
     /// learner for a prerequisite they believe they already know. Either way
     /// the gate is the same `Demonstrated` grade any node needs — `Review`
-    /// only shrinks the volume of exposure, never the evidence bar. A
-    /// `skip`ped item needs no mode of its own: it is never generated at
-    /// all, recorded instead as a `NodeSkipped` event (§S5).
+    /// only shrinks the volume of exposure, never the evidence bar.
+    ///
+    /// A `skip`ped item needs no mode of its own and is never materialized
+    /// as an `OutlineItem` at all — `api::cold_start::materialize_prereq_node`
+    /// discards it and its whole subtree, recording only a `NodeSkipped`
+    /// event per id (§S5) so a parent gated on it can still unlock. This is
+    /// deliberately stricter than "tag it and hide it in the UI": an id that
+    /// never enters `outline.items` can never be looked up by
+    /// `api::reading::prepare` or offered by any "next available" search in
+    /// the first place, so there is no state to get confused with the
+    /// unrelated mid-document "skip this node, revisit later" gesture
+    /// (`NodeState::Skipped`, which deliberately stays `"available"` for the
+    /// revisit scheduler). An earlier version of this used `mode: Learn` +
+    /// only the event to keep a skip node from generating, which the event's
+    /// shared "available" semantics defeated in practice (confirmed live,
+    /// 2026-08-18: a "recursão em C" document generated content for several
+    /// nodes the learner had explicitly marked skip).
     #[serde(default)]
     pub mode: NodeMode,
 }
@@ -250,6 +264,27 @@ pub fn linear_items(titles: Vec<String>) -> Vec<OutlineItem> {
     let mut prev_id: Option<String> = None;
     for title in titles {
         let id = new_id();
+        items.push(OutlineItem {
+            id: id.clone(),
+            title,
+            prerequisites: prev_id.into_iter().collect(),
+            parent_id: None,
+            mode: NodeMode::Learn,
+        });
+        prev_id = Some(id);
+    }
+    items
+}
+
+/// Rebuilds a linear main-line chain from ids+titles already minted and
+/// shown to the learner by `propose_prerequisites` (§S16 outline preview) —
+/// same chaining as [`linear_items`], but reusing the given ids instead of
+/// minting fresh ones, so what `create_document` persists is identical to
+/// what the learner already confirmed on the cold-start screen.
+pub fn linear_items_from_confirmed(pairs: Vec<(String, String)>) -> Vec<OutlineItem> {
+    let mut items = Vec::with_capacity(pairs.len());
+    let mut prev_id: Option<String> = None;
+    for (id, title) in pairs {
         items.push(OutlineItem {
             id: id.clone(),
             title,

@@ -90,6 +90,23 @@ pub struct CreateReq {
     /// graceful-degradation convention as `objective_text`/`name`.
     #[serde(default)]
     prerequisites: Vec<ConfirmedPrereqNode>,
+    /// The main-line outline `propose_prerequisites` minted and the client
+    /// showed on the confirmation screen (§S16), round-tripped verbatim so
+    /// `create_document` persists the exact structure the learner saw
+    /// rather than generating a second, possibly-different one. Empty for a
+    /// caller that skipped that screen (e.g. a direct API call) — degrades
+    /// to generating a fresh outline here, same convention as the other
+    /// optional fields above.
+    #[serde(default)]
+    mainline: Vec<ConfirmedMainlineNode>,
+}
+
+/// Round-trips one `MainlineNode` id+title back from the confirmation
+/// screen (§S16) — see `CreateReq::mainline`.
+#[derive(Deserialize, Clone)]
+pub struct ConfirmedMainlineNode {
+    id: String,
+    title: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,15 +157,40 @@ pub struct ProposedPrereqNode {
     children: Vec<ProposedPrereqNode>,
 }
 
+/// One item of the confirmed-objective's own main-line outline (§S16),
+/// minted here and round-tripped back verbatim by `create_document` via
+/// `ConfirmedMainlineNode` — the same "mint once, reuse the id" convention
+/// `ProposedPrereqNode` already uses for the prerequisite tree, so what's
+/// shown on the cold-start confirmation screen is guaranteed identical to
+/// what actually gets created (never regenerated fresh a second time).
+#[derive(Serialize, Clone)]
+pub struct MainlineNode {
+    id: String,
+    title: String,
+}
+
 #[derive(Serialize)]
 pub struct ProposePrereqResp {
     tree: Vec<ProposedPrereqNode>,
+    /// The objective's own main-line outline (§S16) — shown alongside the
+    /// prerequisite tree so the confirmation screen displays the REAL full
+    /// structure of what will be generated, not just the prerequisites.
+    /// These items can't be skipped/reviewed (they ARE the requested
+    /// topic), so the client shows them with their toggle locked to
+    /// "learn" rather than omitting them from the toggle list entirely.
+    mainline: Vec<MainlineNode>,
 }
 
-/// Proposes the prerequisite tree for a (possibly not-yet-created)
-/// objective (§S15) — stateless, like `propose_objective`; nothing is
-/// persisted until `create_document` receives the learner's confirmed
-/// choices back.
+/// Proposes the prerequisite tree AND the main-line outline for a
+/// (possibly not-yet-created) objective (§S15/§S16) — stateless, like
+/// `propose_objective`; nothing is persisted until `create_document`
+/// receives the learner's confirmed choices back. The two generations run
+/// concurrently (§14: independent calls, no reason to pay their latency
+/// twice in a row) — `create_document` used to call `generate_outline`
+/// itself, strictly after this endpoint returned, which is why the
+/// main-line structure was never visible before confirmation; it now
+/// reuses the exact items minted here instead of generating a second,
+/// possibly-different outline.
 pub async fn propose_prerequisites(
     State(state): State<AppState>,
     Json(body): Json<ProposePrereqReq>,
@@ -162,6 +204,10 @@ pub async fn propose_prerequisites(
         body.objective_text.clone()
     };
     let ai = state.ai.load_full();
+    let (forest_result, outline_result) = tokio::join!(
+        engine::propose_prerequisites(&ai, &body.topic, &objective),
+        engine::generate_outline(&ai, &body.topic, &objective),
+    );
     // A parse failure degrades to an empty tree rather than a 502. The
     // original motivating case for this (a reasoning-heavy fast-tier model
     // routing its entire output through the streaming `reasoning` delta and
@@ -179,7 +225,7 @@ pub async fn propose_prerequisites(
     // (`EngineError::Provider`) still surfaces: it means the `Ai` this call
     // shares with `generate_outline` is unusable, and that failure will
     // resurface moments later regardless.
-    let forest = match engine::propose_prerequisites(&ai, &body.topic, &objective).await {
+    let forest = match forest_result {
         Ok(forest) => forest,
         Err(crate::engine::EngineError::Parse(msg)) => {
             eprintln!(
@@ -190,9 +236,21 @@ pub async fn propose_prerequisites(
         }
         Err(e) => return Err(e.into()),
     };
+    // Unlike the prerequisite tree, the main-line outline has no safe empty
+    // default — it's the actual content being confirmed, so a failure here
+    // is a hard error rather than a silent degradation.
+    let outline = outline_result?;
+    let mainline = outline
+        .items
+        .into_iter()
+        .map(|item| MainlineNode {
+            id: item.id,
+            title: item.title,
+        })
+        .collect();
     let known = known_concepts(&state)?;
     let tree = resolve_prereq_forest(&state, &forest, &known).await;
-    Ok(Json(ProposePrereqResp { tree }))
+    Ok(Json(ProposePrereqResp { tree, mainline }))
 }
 
 /// One `Demonstrated` concept already in some document — the candidate pool
@@ -341,9 +399,15 @@ pub enum PrereqAction {
 /// (§S15) — mirrors the toggle screen's own cascade rules:
 ///
 /// - `skip` cascades to the WHOLE branch: the node and every descendant are
-///   materialized but marked for a `NodeSkipped` event each (pushed onto
-///   `to_skip`, appended by the caller once the document/event log exist) —
-///   nothing is ever generated for any of them (§S5's existing mechanism).
+///   DISCARDED, never materialized as an `OutlineItem` at all — only queued
+///   for a `NodeSkipped` event each (pushed onto `to_skip`, appended by the
+///   caller once the document/event log exist), so a node gated on this id
+///   can still unlock. Nothing about a skipped branch is ever shown or
+///   generated (§S5) — an id that never enters `outline.items` can't be
+///   looked up by `api::reading::prepare` or offered by a "next available"
+///   search in the first place, deliberately stronger than tagging-and-
+///   hiding (see `OutlineItem::mode`'s doc comment for why that weaker form
+///   was tried and failed live, 2026-08-18).
 /// - `review` also cascades, the opposite way: descendants are NOT
 ///   materialized at all — only this node, in `NodeMode::Review`. Its own
 ///   short pass is meant to cover the whole branch, so there is nothing left
@@ -356,7 +420,8 @@ pub enum PrereqAction {
 ///
 /// Returns this level's minted ids, for the caller to wire as the
 /// PARENT's `prerequisites` (top-level call: the objective's own first
-/// main-line item).
+/// main-line item) — a discarded `skip` node's id is still returned here,
+/// so its parent still gates on it even though it has no `OutlineItem`.
 fn materialize_prereq_tree(
     nodes: &[ConfirmedPrereqNode],
     parent_id: Option<&str>,
@@ -378,14 +443,7 @@ fn materialize_prereq_node(
     match node.action {
         PrereqAction::Skip => {
             to_skip.push(node.id.clone());
-            materialize_skip_subtree(&node.children, Some(node.id.as_str()), items, to_skip);
-            items.push(OutlineItem {
-                id: node.id.clone(),
-                title: node.title.clone(),
-                prerequisites: Vec::new(),
-                parent_id: parent_id.map(String::from),
-                mode: NodeMode::Learn,
-            });
+            queue_skip_subtree(&node.children, to_skip);
         }
         PrereqAction::Review => {
             items.push(OutlineItem {
@@ -414,23 +472,13 @@ fn materialize_prereq_node(
 /// Every descendant of a `skip`ped node is skipped too, unconditionally —
 /// `action` on a descendant is ignored once an ancestor is skipped, the
 /// literal "um clique, nada daquele subnodo ou dos seus próprios filhos é
-/// gerado" from the co-design.
-fn materialize_skip_subtree(
-    nodes: &[ConfirmedPrereqNode],
-    parent_id: Option<&str>,
-    items: &mut Vec<OutlineItem>,
-    to_skip: &mut Vec<String>,
-) {
+/// gerado" from the co-design. Only queues `NodeSkipped` events; no
+/// `OutlineItem` is ever created for any of them (see `materialize_prereq_node`'s
+/// `Skip` arm).
+fn queue_skip_subtree(nodes: &[ConfirmedPrereqNode], to_skip: &mut Vec<String>) {
     for node in nodes {
         to_skip.push(node.id.clone());
-        materialize_skip_subtree(&node.children, Some(node.id.as_str()), items, to_skip);
-        items.push(OutlineItem {
-            id: node.id.clone(),
-            title: node.title.clone(),
-            prerequisites: Vec::new(),
-            parent_id: parent_id.map(String::from),
-            mode: NodeMode::Learn,
-        });
+        queue_skip_subtree(&node.children, to_skip);
     }
 }
 
@@ -438,7 +486,9 @@ fn materialize_skip_subtree(
 /// `state` is `"locked"` (a prerequisite isn't `Demonstrated` yet and the
 /// item was never touched), `"available"` (prerequisites met, or already
 /// attempted/skipped — i.e. still worth showing as reachable), or
-/// `"demonstrated"`.
+/// `"demonstrated"`. A §S15 prereq-tree `skip` has no state here at all: it
+/// is never materialized as an `OutlineItem` (`materialize_prereq_node`),
+/// so it never reaches this view in the first place.
 #[derive(Serialize)]
 pub struct OutlineItemView {
     pub(super) id: String,
@@ -557,26 +607,55 @@ pub async fn create_document(
         body.objective_text.clone()
     };
 
-    let ai = state.ai.load_full();
-    let mut outline = engine::generate_outline(&ai, &body.topic, &objective_text).await?;
+    // §S16: reuse the exact main-line items already minted and shown by
+    // `propose_prerequisites` rather than generating a second, possibly
+    // different outline — only a caller that skipped that screen entirely
+    // (e.g. a direct API call) falls back to generating fresh here.
+    let mut outline = if body.mainline.is_empty() {
+        let ai = state.ai.load_full();
+        engine::generate_outline(&ai, &body.topic, &objective_text).await?
+    } else {
+        engine::Outline {
+            topic: body.topic.clone(),
+            items: engine::linear_items_from_confirmed(
+                body.mainline
+                    .iter()
+                    .map(|m| (m.id.clone(), m.title.clone()))
+                    .collect(),
+            ),
+        }
+    };
 
-    // §S15: graft the learner's confirmed prerequisite tree onto the main
-    // line's own first item — it only becomes available once every root of
-    // the tree is `Demonstrated` (or `Skipped`, `prepare`'s gate check), and
-    // the roots nest under it in the sidebar (`parent_id`), the same
-    // "subordinate, doesn't gate on its own" pointer §S8 already uses for a
-    // question-spawned elaboration.
-    let main_first_id = outline.items.first().map(|i| i.id.clone());
+    // §S15 (revised 2026-08-19): the confirmed prerequisite tree's ROOTS are
+    // the learner's own prior topics (e.g. "C data types" -> "C functions"
+    // before "Recursion in C" itself) — a sequence of gating siblings, not
+    // sub-parts of the main-line topic they gate. The original design nested
+    // them under the main line's first item via `parent_id`, which rendered
+    // in the sidebar as false decomposition (bug report 2026-08-19, "Funções
+    // Recursivas": "C data types"/"C functions" showed as subitems of "What
+    // is recursion in C", an unrelated main-line item). Roots are therefore
+    // materialized at the TOP level (`parent_id: None`, siblings of the main
+    // line) and chained to each other in forest order — each root also
+    // requires the previous root's id, and only the LAST root gates the main
+    // line's first item. A root's OWN children (its internal decomposition —
+    // e.g. "C functions" -> its four subtopics) are untouched by this: that
+    // nesting is genuine decomposition, not gating, and still comes from
+    // `materialize_prereq_tree` exactly as before.
     let mut prereq_items = Vec::new();
     let mut to_skip = Vec::new();
-    let prereq_root_ids = materialize_prereq_tree(
-        &body.prerequisites,
-        main_first_id.as_deref(),
-        &mut prereq_items,
-        &mut to_skip,
-    );
-    if let Some(first) = outline.items.first_mut() {
-        first.prerequisites = prereq_root_ids;
+    let prereq_root_ids =
+        materialize_prereq_tree(&body.prerequisites, None, &mut prereq_items, &mut to_skip);
+    let mut prev_root_id: Option<String> = None;
+    for root_id in &prereq_root_ids {
+        if let Some(prev) = &prev_root_id
+            && let Some(item) = prereq_items.iter_mut().find(|i| &i.id == root_id)
+        {
+            item.prerequisites.push(prev.clone());
+        }
+        prev_root_id = Some(root_id.clone());
+    }
+    if let (Some(first), Some(last_root)) = (outline.items.first_mut(), prev_root_id) {
+        first.prerequisites = vec![last_root];
     }
     outline.items.extend(prereq_items);
 
@@ -1079,10 +1158,13 @@ mod tests {
         }
     }
 
-    /// §S15: `skip` cascades to the whole branch — every descendant is
-    /// materialized (so the sidebar can show it struck through) but queued
-    /// for a `NodeSkipped` event, regardless of what action it was
-    /// individually given.
+    /// §S15: `skip` cascades to the whole branch — the node and every
+    /// descendant are DISCARDED (never materialized as an `OutlineItem`, so
+    /// the sidebar can't show nor generate them) and only queued for a
+    /// `NodeSkipped` event each, regardless of what action they were
+    /// individually given. The parent still gates on the discarded id
+    /// (`materialize_prereq_tree` returns it), so a node behind this one can
+    /// still unlock once the event is appended.
     #[test]
     fn skip_cascades_to_the_whole_branch() {
         let tree = vec![ConfirmedPrereqNode {
@@ -1093,8 +1175,11 @@ mod tests {
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
-        materialize_prereq_tree(&tree, None, &mut items, &mut to_skip);
-        assert_eq!(items.len(), 2);
+        let roots = materialize_prereq_tree(&tree, None, &mut items, &mut to_skip);
+        // nothing is materialized — the whole branch is discarded
+        assert_eq!(items.len(), 0);
+        // but the parent still gates on the (now absent) id
+        assert_eq!(roots, vec!["p1".to_string()]);
         let mut skipped = to_skip.clone();
         skipped.sort();
         assert_eq!(skipped, vec!["c1".to_string(), "p1".to_string()]);

@@ -25,6 +25,8 @@ const I18N = {
     "coldstart.title": "What are we learning?",
     "start.button": "Start",
     "coldstart.back": "Back",
+    // Main-line outline preview (§S16), shown above the prerequisite tree
+    "outline.mainlineTitle": "What you'll learn",
     // Prerequisite tree confirmation (§S15)
     "prereq.title": "Before we start",
     "prereq.hint":
@@ -115,6 +117,7 @@ const I18N = {
     "coldstart.title": "O que vamos aprender?",
     "start.button": "Começar",
     "coldstart.back": "Voltar",
+    "outline.mainlineTitle": "O que você vai aprender",
     "prereq.title": "Antes de começar",
     "prereq.hint":
       "Estes parecem ser pré-requisitos para o que você pediu. Marque o que já sabe como revisar ou pular — o resto é ensinado por completo.",

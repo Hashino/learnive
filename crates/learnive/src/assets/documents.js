@@ -14,6 +14,11 @@ let pendingTopic = null;
 let pendingName = "";
 let pendingObjectiveText = "";
 let pendingPrereqTree = [];
+// §S16: the objective's own main-line outline, minted by
+// propose_prerequisites and shown read-only (toggle locked to "learn")
+// alongside the prerequisite tree, then round-tripped verbatim to
+// create_document so the confirmed structure and the generated one match.
+let pendingMainline = [];
 
 el("startForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -37,12 +42,13 @@ el("startForm").addEventListener("submit", async (e) => {
     if (!prereqResp.ok) throw new Error(await prereqResp.text());
     const prereqData = await prereqResp.json();
     el("startStatus").textContent = "";
-    if (!prereqData.tree || prereqData.tree.length === 0) {
-      await createLivingDocument(pendingObjectiveText, []);
-      return;
-    }
-    pendingPrereqTree = prereqData.tree;
+    // §S16: always show the confirmation screen now, even with an empty
+    // prerequisite tree — it's also the only place the main-line outline
+    // itself is shown before generation starts.
+    pendingPrereqTree = prereqData.tree || [];
+    pendingMainline = prereqData.mainline || [];
     initPrereqActions(pendingPrereqTree);
+    renderMainline();
     renderPrereqTree();
     el("prereqConfirm").hidden = false;
   } catch (err) {
@@ -58,8 +64,52 @@ el("prereqBackBtn").addEventListener("click", () => {
 });
 
 el("prereqConfirmBtn").addEventListener("click", async () => {
-  await createLivingDocument(pendingObjectiveText, pendingPrereqTree);
+  await createLivingDocument(pendingObjectiveText, pendingPrereqTree, pendingMainline);
 });
+
+// §S16: the main-line outline, rendered read-only in the same tree-row
+// shape as a prerequisite node (`.prereq-row`/`.prereq-toggle`) so the two
+// sections read as one continuous structure, but every toggle segment is
+// disabled and locked to "learn" — these nodes ARE the requested topic, so
+// unlike a prerequisite they can't be skipped or downgraded to a review.
+function renderMainlineNode(node) {
+  const segments = ["skip", "review", "learn"]
+    .map(
+      (a) =>
+        '<button type="button" class="prereq-toggle-seg' +
+        (a === "learn" ? " active" : "") +
+        '" data-action="' +
+        a +
+        '" aria-pressed="' +
+        (a === "learn") +
+        '" disabled>' +
+        t("prereq.action." + a) +
+        "</button>",
+    )
+    .join("");
+  return (
+    '<li data-id="' +
+    node.id +
+    '">' +
+    '<div class="prereq-row">' +
+    '<span class="prereq-title">' +
+    escapeHtml(node.title) +
+    "</span>" +
+    '<div class="prereq-toggle" data-id="' +
+    node.id +
+    '" role="group">' +
+    segments +
+    "</div>" +
+    "</div>" +
+    "</li>"
+  );
+}
+
+function renderMainline() {
+  el("mainlineTree").innerHTML = pendingMainline
+    .map((n) => renderMainlineNode(n))
+    .join("");
+}
 
 // §S15 toggle tree: every node defaults to what the server suggested
 // (`learn` — never seen anywhere; `review` — already `Demonstrated` in
@@ -145,6 +195,7 @@ function renderPrereqNode(node, lockedBySkip) {
 }
 
 function renderPrereqTree() {
+  el("prereqSection").hidden = pendingPrereqTree.length === 0;
   el("prereqTree").innerHTML = pendingPrereqTree
     .map((n) => renderPrereqNode(n, false))
     .join("");
@@ -160,7 +211,7 @@ function renderPrereqTree() {
     });
 }
 
-async function createLivingDocument(objective_text, prerequisites) {
+async function createLivingDocument(objective_text, prerequisites, mainline) {
   el("startStatus").textContent = t("status.curriculum");
   try {
     const resp = await postJson("/api/documents", {
@@ -168,6 +219,7 @@ async function createLivingDocument(objective_text, prerequisites) {
       objective_text,
       name: pendingName,
       prerequisites,
+      mainline: mainline || [],
     });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
