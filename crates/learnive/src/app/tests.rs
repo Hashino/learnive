@@ -683,6 +683,89 @@ async fn a_partial_node_from_an_interrupted_generation_may_be_retried() {
     assert!(body.contains("already generated"));
 }
 
+/// §14 resilience (PLAN.md "Geração de nó não é resiliente a provider
+/// lento"): a node whose `explain` move succeeded and persisted, but whose
+/// FOLLOWING move then failed (e.g. `test` exceeding `COMPLETE_BUDGET`), must
+/// resume from the persisted `explain` on retry — not regenerate (and
+/// re-pay for) it. This simulates exactly that shape: one `MoveGenerated`
+/// event logged for `explain`, matching progressively-persisted content on
+/// disk, and nothing else — the state `generate_node` itself would have
+/// left behind right after `explain` settles and right before a failed
+/// `test` call returns (a failed generation call never reaches the event
+/// append at all, `resumed_ungraded_moves`'s doc comment).
+#[tokio::test]
+async fn node_generation_resumes_after_an_interrupted_move() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    // The exact persistence shape `generate_node`'s loop leaves after
+    // `explain` (move index 0) settles: tagged, wrapped, written.
+    const MARKER: &str = "PRIOR EXPLAIN CONTENT marker-9f2";
+    let tagged = crate::engine::tag_move_html(&node0, 0, &format!("<p>{MARKER}</p>"));
+    let partial = crate::engine::assemble_partial_node(&doc_id, &node0, &tagged).unwrap();
+    state.store.write_node_content(&partial).unwrap();
+
+    let event_log = state.store.event_log(&doc_id).unwrap();
+    event_log
+        .append(
+            Some(&node0),
+            crate::events::EventKind::MoveGenerated {
+                move_id: crate::engine::new_id(),
+                move_type: "explain".to_string(),
+                tactics: vec![],
+                rung: "L0".to_string(),
+            },
+        )
+        .unwrap();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("event: error"), "unexpected error:\n{body}");
+    assert!(body.contains("event: exercise"));
+    assert!(body.contains("event: done"));
+
+    // Only ONE `explain` was ever logged — L0's move sequence is exactly
+    // [explain, test] (`movement::l0_next_move`), so a resumed retry that
+    // reused the persisted `explain` goes straight to `test`; one that
+    // regenerated from scratch would log a second `explain`.
+    let explain_moves = event_log
+        .iter()
+        .unwrap()
+        .filter(|e| {
+            matches!(&e.kind, crate::events::EventKind::MoveGenerated { move_type, .. }
+                if move_type == "explain")
+        })
+        .count();
+    assert_eq!(explain_moves, 1, "explain was regenerated, not resumed");
+
+    // The persisted `explain` prose survived verbatim into the finalized
+    // node — proof its content, not just its event, was carried forward.
+    let reloaded = state.store.read_node(&doc_id, &node0).unwrap();
+    assert!(
+        reloaded.content.html.contains(MARKER),
+        "resumed explain content missing from finalized node:\n{}",
+        reloaded.content.html
+    );
+}
+
 #[tokio::test]
 async fn asking_works_against_a_node_still_mid_generation() {
     // §S6 follow-up, the actual point of the whole feature: `/ask` must

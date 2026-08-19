@@ -547,10 +547,30 @@ fn wrap_article(
     // `finalize_node`), so this stamps once, here, rather than at each caller.
     let article = format!(
         "<article data-node-id=\"{node_id}\" data-doc-id=\"{doc_id}\">\n  \
-         <section data-layer=\"content\">\n  <!--learnive-build: {APP_VERSION}-->\n{content_section_inner}\n  </section>\n  \
+         <section data-layer=\"content\">\n  {BUILD_MARKER_PREFIX}{APP_VERSION}-->\n{content_section_inner}\n  </section>\n  \
          <section data-layer=\"interaction\"></section>\n</article>"
     );
     Node::parse(&article).map_err(|e| EngineError::Parse(e.to_string()))
+}
+
+const BUILD_MARKER_PREFIX: &str = "<!--learnive-build: ";
+
+/// Strips a leading build-version marker [`wrap_article`] already stamped,
+/// so resuming a node's content across a fresh `wrap_article` call (§14
+/// resilience — `api::reading::prepare` reseeding a move loop's
+/// `content_html` from a prior, interrupted attempt's progressively
+/// persisted partial node, `node_generation_resumes_after_an_interrupted_move`)
+/// stamps exactly one marker, not one nested inside the leftover from last
+/// time. A no-op on content with no marker (a node's first-ever attempt).
+pub(crate) fn strip_build_marker(content_section_inner: &str) -> &str {
+    let trimmed = content_section_inner.trim_start();
+    let Some(rest) = trimmed.strip_prefix(BUILD_MARKER_PREFIX) else {
+        return content_section_inner;
+    };
+    match rest.find("-->") {
+        Some(end) => rest[end + 3..].trim_start_matches('\n'),
+        None => content_section_inner,
+    }
 }
 
 /// Assembles a dialect node from the generated prose and the exercise (§4.2/§4.3)
@@ -765,6 +785,25 @@ mod tests {
             Provider::Mock(MockProvider::new(reply)),
             Models::single("mock"),
         )
+    }
+
+    #[test]
+    fn strip_build_marker_removes_a_leading_stamp_only() {
+        let stamped = "  <!--learnive-build: abc1234-->\n<p data-block-id=\"b1\">Hello.</p>";
+        assert_eq!(
+            strip_build_marker(stamped),
+            "<p data-block-id=\"b1\">Hello.</p>"
+        );
+
+        // No marker present: unchanged.
+        let unstamped = "<p data-block-id=\"b1\">Hello.</p>";
+        assert_eq!(strip_build_marker(unstamped), unstamped);
+
+        // A marker-shaped comment elsewhere in the content (not leading) is
+        // left alone — this only ever strips the one `wrap_article` itself
+        // stamps at the very front.
+        let mid = "<p>text</p><!--learnive-build: abc1234-->";
+        assert_eq!(strip_build_marker(mid), mid);
     }
 
     #[test]

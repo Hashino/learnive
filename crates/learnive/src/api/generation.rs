@@ -91,6 +91,17 @@ pub async fn generate_node(
         // used, not a stale global value.
         let policy = rung_for(&state, &doc_id, config_prior);
 
+        // §14 resilience: a prior, interrupted attempt at this same node may
+        // have already completed and persisted some ungraded moves
+        // (`prepare`'s `resumed_moves`/`resumed_content_html`) — seed the
+        // move loop's state from them so it picks up after the last
+        // successful move instead of regenerating (and re-paying for) it.
+        let mut content_html = prep.resumed_content_html.clone();
+        let resumed_tail = if content_html.is_empty() {
+            String::new()
+        } else {
+            tail_chars(&content_html, NODE_TAIL_BUDGET)
+        };
         let mut ctx = MoveContext {
             topic: prep.topic.clone(),
             item_title: prep.title.clone(),
@@ -101,12 +112,24 @@ pub async fn generate_node(
             children_titles: prep.children_titles.clone(),
             review_mode: prep.review_mode,
             parent_title: prep.parent_title.clone(),
+            prior_moves: prep.resumed_moves.clone(),
+            node_tail: resumed_tail,
             ..Default::default()
         };
-        let mut content_html = String::new();
         let mut graded: Option<(String, GeneratedMove)> = None;
 
-        for i in 0..MAX_MOVES_PER_NODE {
+        // Clamped so a resumed attempt always retries at least the final,
+        // forced-`Test` iteration rather than erroring out with no graded
+        // check at all — reachable only if every one of `MAX_MOVES_PER_NODE`
+        // moves, including that forced `Test`, was already logged by a prior
+        // attempt whose graded move then failed to `finalize` (a narrower,
+        // separate failure mode from the reported one, where `Test`'s own
+        // generation call times out and is never logged at all). `Test`'s
+        // content is never in `resumed_content_html` regardless — a graded
+        // move's success breaks the loop before the progressive-persistence
+        // block runs — so reusing that index here can't collide.
+        let start = prep.resumed_move_index.min(MAX_MOVES_PER_NODE - 1);
+        for i in start..MAX_MOVES_PER_NODE {
             // §14: on L1/L2, `decide_and_generate` folds the decide round
             // trip into the front of the content call itself for a
             // `MoveRender::Streamed` pick — when it does, the stream is

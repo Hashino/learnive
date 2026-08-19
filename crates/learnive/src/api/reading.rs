@@ -564,6 +564,75 @@ pub(super) struct NodePrep {
     /// Rust" review sub-node ended up teaching recursion's base case/
     /// recursive step, the parent node's own concept).
     pub(super) parent_title: Option<String>,
+    /// §14 resilience: moves already generated, persisted, and logged by a
+    /// prior, interrupted `generate_node` attempt for this same node (empty
+    /// on a node's first-ever attempt) — seeds `generate_node`'s
+    /// `ctx.prior_moves` and its move-loop start index, so a retry after a
+    /// mid-node failure (e.g. a later move exceeding `COMPLETE_BUDGET`,
+    /// PLAN.md's "Geração de nó não é resiliente") picks up after the last
+    /// successful move instead of regenerating (and re-paying for) it.
+    pub(super) resumed_moves: Vec<MoveRecord>,
+    /// The content HTML already progressively persisted for those moves
+    /// (`engine::strip_build_marker`-cleaned so re-wrapping doesn't stack a
+    /// second build marker on top) — empty exactly when `resumed_moves` is.
+    pub(super) resumed_content_html: String,
+    /// The move-loop's resume index (`resumed_move_index`) — total moves
+    /// already logged, including `research`, unlike `resumed_moves` which
+    /// excludes it. See `resumed_move_index`'s doc comment for why these two
+    /// counts differ and why the loop must start at this one, not
+    /// `resumed_moves.len()`.
+    pub(super) resumed_move_index: usize,
+}
+
+/// §14 resilience: reconstructs the ungraded moves a prior, interrupted
+/// `generate_node` attempt already completed for `node_id`, from the
+/// `MoveGenerated` events it logged (`generation.rs` only appends one after
+/// a move's content call actually succeeds, so a move recorded here was
+/// real and already progressively persisted via `write_node_content` — a
+/// move whose generation call itself failed, like the QA-observed
+/// `COMPLETE_BUDGET` timeout, never reaches that append at all, leaving no
+/// trace to reconstruct, which is exactly what we want: retrying naturally
+/// re-attempts only the move that actually failed).
+///
+/// Excludes `research` on purpose: it's a real logged move (`generation.rs`'s
+/// `MoveType::Research` branch appends one) but never reaches
+/// `ctx.prior_moves.push` in a live single-request run either — it `continue`s
+/// the loop before that point — so a resumed reconstruction that included it
+/// would disagree with what a live run's own `prior_moves` ever contains.
+fn resumed_ungraded_moves(
+    events: impl Iterator<Item = crate::events::Event>,
+    node_id: &str,
+) -> Vec<MoveRecord> {
+    events
+        .filter(|e| e.node_id.as_deref() == Some(node_id))
+        .filter_map(|e| match e.kind {
+            EventKind::MoveGenerated { move_type, .. } => {
+                movement::parse::move_type_name(&move_type).ok()
+            }
+            _ => None,
+        })
+        .filter(|mt| *mt != MoveType::Research)
+        .map(|move_type| MoveRecord {
+            move_type,
+            graded: false,
+        })
+        .collect()
+}
+
+/// §14 resilience: total moves a prior, interrupted `generate_node` attempt
+/// already logged for `node_id`, INCLUDING `research` — every one of them,
+/// research included, consumed one iteration of the move loop's `i`, which
+/// `engine::tag_move_html` bakes into that move's block-id prefix. This,
+/// not `resumed_moves.len()`, is the correct index for a resumed attempt's
+/// loop to start at: starting at the (research-excluding) `resumed_moves`
+/// count instead would reuse an index a prior iteration already tagged
+/// content with, colliding block ids between the resumed content already on
+/// disk and the next freshly generated move's.
+fn resumed_move_index(events: impl Iterator<Item = crate::events::Event>, node_id: &str) -> usize {
+    events
+        .filter(|e| e.node_id.as_deref() == Some(node_id))
+        .filter(|e| matches!(e.kind, EventKind::MoveGenerated { .. }))
+        .count()
 }
 
 /// Loads the outline, resolves the requested item by its stable id, and
@@ -590,15 +659,17 @@ pub(super) struct NodePrep {
 /// now persists progressively, one move at a time (§S6 follow-up — see
 /// `EventKind::NodeGenerated`'s doc comment), so an on-disk file can be a
 /// node that's still mid-generation, or one abandoned mid-stream by a
-/// dropped connection or a page reload. Retrying such a node is allowed to
-/// proceed and simply overwrite the partial file as it re-generates from
-/// move 1 — no attempt at resuming from where the interrupted attempt left
-/// off, which would need move-level state (tactics history, `ctx.prior_moves`)
-/// this function never persisted. `write_node_content` (store.rs) is what
-/// keeps this safe for the interaction layer specifically: any interaction
-/// appended against the partial node (a mid-stream `/ask`, now possible —
-/// the whole point) survives the retry's overwrite, carried forward rather
-/// than clobbered.
+/// dropped connection, a page reload, or a later move exceeding
+/// `COMPLETE_BUDGET` (PLAN.md's "Geração de nó não é resiliente"). Retrying
+/// such a node now **resumes**: `resumed_moves`/`resumed_content_html` (§14
+/// resilience, `resumed_ungraded_moves`) reconstruct the tactics history and
+/// already-persisted prose from the prior attempt's `MoveGenerated` events
+/// and partial node file, so `generate_node` picks up its move loop after
+/// the last successful move instead of re-paying for it. `write_node_content`
+/// (store.rs) is what keeps this safe for the interaction layer specifically:
+/// any interaction appended against the partial node (a mid-stream `/ask`,
+/// now possible — the whole point) survives the retry's overwrite, carried
+/// forward rather than clobbered.
 pub(super) async fn prepare(
     state: &AppState,
     doc_id: &str,
@@ -666,6 +737,19 @@ pub(super) async fn prepare(
             .find(|i| i.id == pid)
             .map(|i| i.title.clone())
     });
+    let resumed_moves =
+        resumed_ungraded_moves(event_log.iter().map_err(|e| e.to_string())?, &item.id);
+    let resumed_move_index =
+        resumed_move_index(event_log.iter().map_err(|e| e.to_string())?, &item.id);
+    let resumed_content_html = if resumed_moves.is_empty() {
+        String::new()
+    } else {
+        state
+            .store
+            .read_node(doc_id, &item.id)
+            .map(|node| engine::strip_build_marker(&node.content.html).to_string())
+            .unwrap_or_default()
+    };
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -678,6 +762,9 @@ pub(super) async fn prepare(
         children_titles,
         review_mode,
         parent_title,
+        resumed_moves,
+        resumed_content_html,
+        resumed_move_index,
     })
 }
 
