@@ -264,6 +264,20 @@ fn integration_addendum(children_titles: &[String]) -> String {
 /// §S15 learn/review/skip: the learner marked this node as a review, not
 /// first-time learning — every move purpose gets told to shrink its scope
 /// accordingly, never to lower the evidence bar (`Test` still must grade).
+///
+/// Fixed 2026-08-20: "compact definition-level refresher" alone let the
+/// model read "review" as license to skip the node's own definition
+/// entirely and open directly on how the overall topic extends it —
+/// observed live on a "Binary search over a sorted array" review node in a
+/// "first/last occurrence" document, which never once explained the
+/// compare-to-middle/halve-the-interval mechanism and opened straight on
+/// the first/last-occurrence variant. A sibling review node in the same
+/// document ("Arrays and indexing") did state its own definition first,
+/// showing the gap is content-dependent, not universal: the closer a
+/// review node's own concept sits to the document's target topic, the
+/// more likely "compact" gets read as "skip to what's relevant now." Same
+/// family of bug as `topic_scope_note`'s fix (`18b2934`) — "compact"
+/// must mean brief, not omitted.
 fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
     if !review_mode {
         return "";
@@ -272,13 +286,18 @@ fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
         MoveType::Test => {
             " The learner marked this as a REVIEW of something they already \
              believe they know: keep the check to just one or two short \
-             exercises, not a full battery."
+             exercises, not a full battery — but it must still probe THIS \
+             node's own concept (\"Concept of this node\"), not skip \
+             straight to how the overall topic extends or applies it."
         }
         _ => {
             " The learner marked this as a REVIEW of something they already \
              believe they know, not first-time learning: keep this to a \
              compact definition-level refresher, a few sentences, not a full \
-             lesson."
+             lesson — but it must still state THIS node's own definition. \
+             \"Compact\" means brief, not skipped: do not open directly on \
+             how the overall topic extends or applies this concept without \
+             ever stating the concept itself."
         }
     }
 }
@@ -538,10 +557,12 @@ mod tests {
         let explain_sys = &generate_move_streamed(MoveType::Explain, &review)[0].content;
         assert!(explain_sys.contains("REVIEW"));
         assert!(explain_sys.contains("compact"));
+        assert!(explain_sys.contains("own definition"));
 
         let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &review)[0].content;
         assert!(test_sys.contains("REVIEW"));
         assert!(test_sys.contains("MUST be graded"));
+        assert!(test_sys.contains("own concept"));
 
         let bare = MoveContext::default();
         let bare_explain = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
