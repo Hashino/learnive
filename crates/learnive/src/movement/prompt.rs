@@ -44,11 +44,25 @@ fn continuity_note() -> &'static str {
 /// names a concrete parent when this node is a prerequisite sub-node; this
 /// note is the general form, present on every move regardless of tree
 /// shape, so the same drift can't happen on a node with no parent at all.
+///
+/// Fixed 2026-08-18: the original wording ("which aspects of THIS node's
+/// own concept... to emphasize or frame") itself licensed narrowing a
+/// prerequisite down to only the slice the overall topic needs — observed
+/// live on top-level prerequisite roots ("Arrays", "Linked lists" in a
+/// hash-map-collisions document), which have no `parent_title` and so
+/// never get `scope_addendum`'s stronger warning below. The node's own
+/// concept must be taught in full, general, standalone form regardless of
+/// tree position; "overall topic" may motivate or pick examples, never
+/// decide what gets left out.
 fn topic_scope_note() -> &'static str {
-    "\"Overall topic\" below is background context ONLY — it tells you \
-     which aspects of THIS node's own concept (\"Concept of this node\") \
-     to emphasize or frame. It is NOT itself something to teach here: \
-     teach the node's own concept, not the document's overall subject."
+    "\"Overall topic\" below is background/motivational context ONLY — \
+     never a lens that narrows which aspects of THIS node's own concept \
+     (\"Concept of this node\") get taught. Teach \"Concept of this \
+     node\" in full: as a self-contained, general concept a reader could \
+     learn and reuse on its own, regardless of the overall topic — not \
+     just the slice of it the overall topic happens to need. You may use \
+     \"Overall topic\" to motivate why the concept matters or to pick an \
+     illustrative example, but never to decide what to omit."
 }
 
 fn node_so_far_line(ctx: &MoveContext) -> String {
@@ -567,13 +581,13 @@ mod tests {
     fn topic_is_framed_as_emphasis_guidance_not_content_to_teach() {
         let ctx = MoveContext::default();
         let explain_sys = &generate_move_streamed(MoveType::Explain, &ctx)[0].content;
-        assert!(explain_sys.contains("background context ONLY"));
+        assert!(explain_sys.contains("background/motivational context ONLY"));
 
         let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &ctx)[0].content;
-        assert!(test_sys.contains("background context ONLY"));
+        assert!(test_sys.contains("background/motivational context ONLY"));
 
         let plan_sys = &generate_move_streamed(MoveType::Plan, &ctx)[0].content;
-        assert!(!plan_sys.contains("background context ONLY"));
+        assert!(!plan_sys.contains("background/motivational context ONLY"));
     }
 
     /// Live report (2026-08-17, `hidc0ayawb`): a `profile` move wrote a full
