@@ -4,6 +4,18 @@
 
 > Documento vivo. Este plano **pode e deve** mudar conforme o desenvolvimento avança — especialmente porque quase todo o risco do projeto é de *calibração* (qualidade de avaliação, fidelidade do perfil, sensibilidade de cross-ref), coisa que só se aprende usando. As referências `§N` apontam para as seções do `SPEC.md` (especificação autoritativa).
 
+## Índice
+
+- [Princípio de faseamento](#princípio-de-faseamento)
+- [Evolução do núcleo: loop agêntico](#evolução-do-núcleo-loop-agêntico-co-desenhado-2026-08-02) — o design co-desenhado que orienta tudo abaixo
+- [Fatias de build](#fatias-de-build-cada-uma-compilatesta-antes-da-próxima) — [entregues (S1–S14)](#entregues) · [planejadas (S15–S18)](#planejadas)
+- [Investigações](#investigações) — [latência percebida](#latência-percebida-o-documento-é-escrito-mais-devagar-do-que-se-lê-investigado-2026-08-20) · [instrumentação de LLM](#instrumentação-de-llm--medir-cada-chamada-ao-modelo-analisado-2026-08-17)
+- [Fase 1 — loop completo mínimo](#fase-1--loop-completo-mínimo-fatia-vertical)
+- [Fase 2 — aplicação completa, documento vivo único](#fase-2--aplicação-completa-documento-vivo-único)
+- [Fase 3 — múltiplos documentos + cross-referência](#fase-3--múltiplos-documentos-vivos--cross-referência-segundo-cérebro-10)
+- [Riscos transversais](#riscos-transversais-valem-para-todas-as-fases)
+- [TODO futuros](#todo-futuros-sem-fase-atribuída)
+
 ## Princípio de faseamento
 
 A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro, profundidade depois**. A Fase 1 exercita a tese central ponta-a-ponta com o mínimo de profundidade; a Fase 2 aprofunda cada subsistema até a qualidade da spec, ainda com **um único documento vivo**; a Fase 3 adiciona o grafo entre múltiplos documentos. Cada fase é usável de verdade ao terminar.
@@ -52,7 +64,14 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 
 **Fontes (adição à visão):** import da **biblioteca própria do usuário** (pasta de PDFs) + **arXiv** como backends do `Source` — a ambição de aquisição segue o que o **conteúdo** exige (introdutório → OER; fronteira → arXiv/PDFs próprios), não uma persona.
 
-**Fatias de build (cada uma compila+testa antes da próxima):**
+---
+
+## Fatias de build (cada uma compila+testa antes da próxima)
+
+> Ordem numérica, separadas por estado. O S14 fica entre as entregues apesar de ter sido feito depois do S13 — a numeração é de registro, a ordem de execução está na data de cada entrada.
+
+### Entregues
+
 - [x] **S1 — Substrato de eventos:** módulo `events` (`<doc>/events.jsonl`, tipos de evento, agregados em Rust). 0 tokens, não quebra nada.
 - [x] **S2 — Movimento no `engine`:** `MoveType`+flags+táticas, `AgentPolicy` (L0 = função Rust ≙ loop atual), `decide_move`/`generate_move` + parse/validação/repair, roteamento de tier. Testado com mock (`movement.rs`, ainda não ligado ao `api.rs` — isso é a S3).
 - [x] **S3 — Endpoint dirigido a movimentos:** `generate_node` virou um loop decidir→gerar→streamar (`MAX_MOVES_PER_NODE=4`, guarda de custo §12.2 — força `test` na última iteração se nada foi avaliado ainda); rota streamed/structured por `MoveType::render`; loop encerra no primeiro movimento avaliado, qualquer tipo (não só `test` — confirmado ao vivo: L1 encerrou um nó em `profile`). `AgentPolicy` deriva de `build_ai` (nunca de `config` isolado — evita dessincronia com override por env var); demo = L0. `move_id` atribuído na geração, carregado no `RubricSidecar`, junta `MoveGenerated`↔`MoveGraded` no log. Remediação (§8.2) permanece no caminho antigo (`engine::remediate`), fora do `decide_move`. `assemble_node`/camada de conteúdo (§4.3) inalterados — grafo ainda linear, gate preservado. Validado ao vivo contra provider real (OpenRouter free-tier), não só mock.
@@ -196,6 +215,12 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 
   Testes: `cargo test --workspace` sem regressão (129/132 `learnive`, 29/29 `learnive-core`). `clippy --all-targets` e `fmt --check` limpos. Validado manualmente: servidor local + `curl` no endpoint novo (404 pra id inexistente, JSON correto pra uma fonte plantada no corpus) e os assets servidos carregam o JS/CSS novos.
 
+- [x] **S14 — `non_goals` removido do objetivo (2026-08-15, decisão do usuário).** Princípio: o que não está explicitamente listado como objetivo já é, por construção, fora de escopo — um campo separado de exclusões era redundante com o próprio texto do objetivo, não uma garantia adicional. Removido de ponta a ponta, não só escondido na UI: `ObjectiveProposal`/`ObjectiveVersion` perderam o campo; `objective::ObjectiveLog::push` perdeu o parâmetro; `objective::summarize` (só existia pra formatar "(explicitly NOT: ...)") foi deletado e o único call site (`api::reading::objective_for`) passou a ler `.text` direto; o prompt de `propose_objective` (`engine/prompt.rs`) trocou a instrução de listar non-goals por uma frase pedindo escopo preciso no próprio texto do objetivo ("anything the objective does not explicitly name is implicitly out of scope"); `ProposeObjectiveResp`/`CreateReq`/`ReviseObjectiveReq`/`ObjectiveResp` (`api/cold_start.rs`) perderam o campo; a UI de cold start (`index.html`/`documents.js`) perdeu o textarea "Non-goals". Sem mudança de comportamento pro resto do loop — `MoveContext.objective` já era só o texto (agora sem o sufixo de exclusões, que na prática quase nunca aparecia formatado de um jeito o modelo aproveitasse melhor que a própria frase do objetivo). `cargo test --workspace`: `learnive` 128/131 (3 pre-existentes ignorados, um teste a menos porque `summarize_includes_non_goals_only_when_present` deixou de existir por não ter mais o que testar), `learnive-core` 29/29. `clippy --all-targets` e `fmt --check` limpos. Validado ao vivo: `propose_objective`/`create_document` num servidor local real, resposta sem o campo, outline gerado normalmente.
+
+### Planejadas
+
+> Dependência registrada no S18: **S16 → S17 → S18**. O S15 é independente das três.
+
 - [ ] **S15 — Pré-requisitos com toggle learn/review/skip + nó compartilhado entre documentos (co-desenhado 2026-08-17, construir S15a+S15b juntos por decisão do usuário — não fatiar).** Checkbox deliberadamente NÃO marcado apesar do parágrafo "Implementado" abaixo: o que está pronto é só S15a (o toggle tree + review local abreviado); S15b (nó compartilhado de verdade) e S15c (fim de documento) faltam — ver o parágrafo de corte de escopo mais abaixo antes de considerar isto "feito". Motivação do usuário: hoje o outline sempre pula direto pro que foi pedido (guard deliberado do S4/S5 contra geração "eager" — ver `outline()` em `engine/prompt.rs`), mas isso significa que pedir "integração" nunca passa por limites/derivadas/álgebra, e o aluno chega ao exercício sem base. A correção não é afrouxar aquele guard (ele continua certo pro que protege — as respostas diretas à pergunta do usuário) — é adicionar uma **segunda chamada, com disciplina própria**, que propõe pré-requisitos e nunca gera nada sem confirmação explícita do usuário.
 
   **Correção do usuário sobre a forma (2026-08-17): não é uma cadeia linear, é uma árvore — decisão que substitui o parágrafo original de "proibir decomposição recursiva".** Qualquer nó de conhecimento pode ter N subnodos, e cada subnodo pode ter os seus próprios subnodos recursivamente — "derivadas" e "limite" não ficam como um item átomo, cada um decompõe em quantos subnodos o conceito genuinamente exigir. Cada subnodo tem seu próprio exercício; ao fim de todos os subnodos de um nó, os exercícios do próprio nó pai **integram** o que os filhos ensinaram, em vez de testar cada filho isolado de novo.
@@ -291,7 +316,102 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 
   **Ordem e dependências:** S16 → S17 → S18. S16 é a correção de chave (destrava §7 e, por tabela, a calibração de abstração do §6.2 que depende dela); S17 multiplica o volume de evidência que entra nessa tabela; S18 é a mudança de forma e só vale a pena depois das duas — sem elas, o `ObservationFrame` observa muito e não tem onde creditar. **Pré-requisito de frontend já satisfeito:** a rearquitetura que o S8 adiou e o S15 construiu (contêiner de exercício por nó — `rec.exercise`/`rec.exerciseFrame`, `assets/node.js:500-504`, em vez do `#exercise` singleton global) é justamente a que um loop pausado entre movimentos exige; S18 não precisa refazê-la. O que S18 ainda toca no cliente é o ciclo de vida do stream (reabrir a requisição por movimento) e a coleta do `ObservationFrame`, não a estrutura do DOM.
 
-- [x] **S14 — `non_goals` removido do objetivo (2026-08-15, decisão do usuário).** Princípio: o que não está explicitamente listado como objetivo já é, por construção, fora de escopo — um campo separado de exclusões era redundante com o próprio texto do objetivo, não uma garantia adicional. Removido de ponta a ponta, não só escondido na UI: `ObjectiveProposal`/`ObjectiveVersion` perderam o campo; `objective::ObjectiveLog::push` perdeu o parâmetro; `objective::summarize` (só existia pra formatar "(explicitly NOT: ...)") foi deletado e o único call site (`api::reading::objective_for`) passou a ler `.text` direto; o prompt de `propose_objective` (`engine/prompt.rs`) trocou a instrução de listar non-goals por uma frase pedindo escopo preciso no próprio texto do objetivo ("anything the objective does not explicitly name is implicitly out of scope"); `ProposeObjectiveResp`/`CreateReq`/`ReviseObjectiveReq`/`ObjectiveResp` (`api/cold_start.rs`) perderam o campo; a UI de cold start (`index.html`/`documents.js`) perdeu o textarea "Non-goals". Sem mudança de comportamento pro resto do loop — `MoveContext.objective` já era só o texto (agora sem o sufixo de exclusões, que na prática quase nunca aparecia formatado de um jeito o modelo aproveitasse melhor que a própria frase do objetivo). `cargo test --workspace`: `learnive` 128/131 (3 pre-existentes ignorados, um teste a menos porque `summarize_includes_non_goals_only_when_present` deixou de existir por não ter mais o que testar), `learnive-core` 29/29. `clippy --all-targets` e `fmt --check` limpos. Validado ao vivo: `propose_objective`/`create_document` num servidor local real, resposta sem o campo, outline gerado normalmente.
+---
+
+## Investigações
+
+> Análises que não são fatias de build: diagnosticam um problema transversal e produzem uma lista de alavancas, cada uma podendo virar (ou não) uma fatia depois. Ficam aqui, e não em "TODO futuros", porque têm evidência coletada e conclusão — não são ideias soltas.
+
+### Latência percebida: o documento é escrito mais devagar do que se lê (investigado 2026-08-20)
+
+**Pedido do usuário:** "muito tempo é gasto esperando geração e respostas do LLM, o que tira o usuário da sessão de aprendizado focada". Investigação sem nenhuma mudança de código.
+
+**Medição, não estimativa.** Os números abaixo vêm do próprio `learnive-data/*/events.jsonl` deste repo (provider ativo no `.env` na época: OpenCode Zen, `nemotron-3.5-lightning-free` / `hy3-free` — os dois free tier):
+
+- **Intervalo movimento→movimento**, 40 amostras em 21 nós (intervalos entre sessões descartados): min 22s · **p50 92s** · média 123s · p90 229s · max 642s.
+- **Taxa de entrega**, só nós que fecharam: **7579 palavras / 2432s = 187 palavras por minuto** agregado, com faixa enorme por nó (42 · 45 · 75 · … · 661 · 1424 ppm). Velocidade de leitura adulta: 200–300 ppm.
+- ~**165 palavras por movimento**, 3–4 movimentos por nó → **~4–6 min de geração por nó**.
+- **6 de 21 nós multi-movimento foram abandonados** sem nunca chegar a uma checagem avaliada (têm `MoveGenerated`, nenhum `NodeGenerated`). `hidc0ayawb/ypfedoi8ye` foi reiniciado em quatro sessões diferentes e abandonado nas quatro — abre com um movimento `profile`, então depois de ~90s a primeira coisa na tela é uma pergunta feita ao aluno, sem nada pra ler.
+
+**O reenquadramento que esses números forçam:** o problema não é "às vezes aparece um spinner". É que **o documento é escrito mais devagar do que é lido**. O streaming token-a-token (§14) resolve TTFT e está feito, mas não ajuda quando o próprio stream corre a ~187 ppm contra uma leitura de 200–300 ppm. O aprendiz não está esperando *pelo* texto; está assistindo o texto sair em câmera lenta — pior pra foco, porque nunca há um momento limpo pra desviar o olhar nem um momento em que a leitura flua.
+
+**Limitação da medição — e ela mesma é um achado.** `MoveGenerated` só é apendado na **conclusão** do movimento (`api/generation.rs:278`). Não existe, em lugar nenhum, timestamp de início de requisição nem de primeiro token. Consequência: só deu pra computar deltas movimento→movimento, então **o primeiro movimento de cada nó — a espera mais longa, com a tela ainda vazia — está fora de toda estatística acima**, e a taxa real é menor que 187 ppm. Latência de correção idem: não há evento de submissão, só `MoveGraded` na conclusão. Ver "Instrumentação de LLM" logo abaixo — é o pré-requisito desta investigação, não um TODO paralelo.
+
+**Mapa de espera por ação** (chamadas de LLM seriais e bloqueantes por interação do usuário):
+
+| ação | chamadas seriais | streamado? | o que o usuário vê |
+|---|---|---|---|
+| cold start | 2 (objetivo→Fast, outline→**Robust**) | não | `thinking about the objective…` |
+| gerar nó | 3–4 (decide+gera fundidos; `test` final structured) | prosa sim, `test` não | `gerando…`, escrito **uma vez** e nunca atualizado |
+| `/ask` | 2 (classificar→Fast, responder→**Robust**) | **não** | `pensando…` |
+| `/answer` acerto | 1 (corrigir) | não | `avaliando…` |
+| `/answer` erro | **3 seriais** (corrigir → remediar → novo exercício) | **não** | `avaliando…` durante as três |
+
+No p50 medido (92s/chamada), o caminho de erro é **~4,5 min de uma única string estática**, chegando exatamente no momento em que o aprendiz já está travado. E `/ask` — que o §7 chama de *o input de maior sinal do sistema* — são ~3 min com nada na tela.
+
+**Alavancas, em ordem de (impacto × independência do modelo escolhido).** Nenhuma foi implementada; são o produto desta investigação, não fatias aprovadas.
+
+- [ ] **1. Escolha de modelo/provider é o maior multiplicador, e hoje contraria a §14.** A config ativa é free tier nos dois tiers, e o pairing recomendado embutido (`config.rs:107`) oferece **`nvidia/nemotron-3-ultra-550b-a55b:free` como tier Robust** pra todo usuário novo em intent Free — um 550B em fila gratuita é perto do pior caso possível pra um app de leitura sensível a latência. A pergunta de intent (§12.1) troca custo por **capacidade** e ignora latência inteiramente, mesmo com a §14 declarando latência como *o* problema de UX. Duas lacunas concretas no request, ambas em `ai/provider.rs`:
+  - **Sem `max_tokens` e sem controle de raciocínio.** Os corpos de request (`:195-202` no stream, `:326-332` no complete) carregam só `model`/`messages`/`stream`/`temperature`. A família Nemotron-3 é de raciocínio híbrido; nesses modelos toda chamada queima um orçamento de pensamento invisível antes do primeiro token de conteúdo. `reasoning_effort` / `reasoning: {effort}` + um teto de `max_tokens` é mudança pequena com efeito grande em TTFT e em tempo total.
+  - **Deltas de raciocínio são descartados em silêncio.** O struct `Delta` de `parse_sse_line` (`:476-478`) só lê `content`. Durante toda a fase de pensamento o stream SSE pro browser não emite **nada** — sem token, sem sinal, sem indicador. O código já sabe disso (comentário em `movement.rs:362`, que usa o fato pra justificar o `MOVE_MARKER_BUFFER_CAP`); o que não está tratado é a consequência pro usuário.
+
+- [ ] **2. Instrumentar antes de otimizar.** Ver a seção abaixo. Sem timestamp de início/primeiro token, escolher entre modelos é impressão, e nenhuma das alavancas aqui pode ser avaliada depois de aplicada.
+
+- [ ] **3. Streamar a prosa que hoje não streama** — a alavanca mais limpa, e a única totalmente independente de modelo. Três caminhos produzem prosa explicativa tier Robust pelo `collect` bloqueante:
+  - `engine::remediate` (`engine.rs:363`) — a explicação trabalhada do §8.2
+  - `engine::answer_question` (`engine.rs:399`)
+  - `engine::generate_subnode_prose` (`engine.rs:467`)
+
+  Os três são prosa pra um humano ler — exatamente o que `MoveRender::Streamed` existe pra atender. A máquina de SSE-on-POST e o `readSse` do cliente já existem. Converter transforma ~90s de `pensando…` em ~2s até a primeira palavra; o maior ganho é no `/ask`. **Sobreposição com o S17:** o S17 já manda `/ask` e remediação passarem por `movement::generate_move*`, o que entrega isto de graça — se o S17 vier primeiro, esta alavanca desaparece dentro dele; se não vier, ela vale sozinha.
+
+- [ ] **4. Colapsar os round trips seriais.**
+  - **`/ask`**: `decide_ask_response` roda inteiro antes de qualquer coisa aparecer, só pra escolher inline-vs-spawn, e pode custar uma segunda chamada numa rodada de repair. É a mesma forma que `decide_and_generate` (`movement.rs:414`) já resolveu pros movimentos, e `read_move_marker` é reaproveitável direto. Fundir as duas derruba a espera visível pra perto de zero.
+  - **`/answer` no erro**: `generate_remediation_exercise` depende só de (título, exercício falhado, tentativa, grounding) — **não** da explicação. Está serializado atrás de `remediate` sem nenhuma razão de dado; um `tokio::join!` tira uma chamada inteira do pior caminho do app.
+  - **`/answer` em geral**: a nota é o que o aprendiz mais quer saber, e é retida até as três chamadas terminarem. Tornar `/answer` um endpoint SSE como o `/generate` deixa a nota pousar imediata e a remediação streamar atrás.
+
+- [ ] **5. Tornar a espera legível.** `rec.controls` recebe `gerando…` uma única vez (`assets/node.js:367`) e nunca mais é atualizado pelo resto do nó — inclusive durante a chamada `test` final, que é bloqueante. O evento `research` (S13) prova que o canal de progresso já existe e ninguém mais o usa. Expor deltas de raciocínio como indicador de "pensando" (não como conteúdo) e nomear o movimento em curso já tornaria a espera interpretável. Nota: hoje a saída de emergência é tão lenta quanto aquilo de que se foge — `setReadingToolsEnabled(true)` dispara a cada movimento assentado, então o aprendiz **pode** perguntar enquanto os próximos movimentos geram, mas `/ask` é ele mesmo uma espera bloqueante de duas chamadas. As alavancas 3 e 4 são o que torna esta aqui real.
+
+**Duas questões estruturais que são decisão do usuário, não achado técnico:**
+
+- **Granularidade de movimento × latência.** Os nós medidos têm ~165 palavras por movimento em 3–4 movimentos. O §6 (ciclo aprendizado→feedback o mais curto possível) empurra pra movimentos atômicos, mas **cada movimento é um round trip inteiro**: no p50 medido, um quarto movimento custa ~90s de atenção pra somar ~165 palavras. Se 4×165 ganha de 2×330 no mesmo princípio pedagógico é um trade-off real, hoje decidido implicitamente por `MAX_MOVES_PER_NODE` e pelo menu do L1/L2. O risco já estava registrado em "Riscos transversais" ("custo/latência dos nós atômicos"); a medição acima é o primeiro dado concreto sobre ele.
+- **Prefetch — descartado, e NÃO reintroduzido aqui.** O descarte é de 2026-08-03, decisão do usuário (linha riscada na Fase 1). Registrado só o que a medição mudou na premissa: o descarte argumentou que o próximo nó não é previsível, e num momento específico ele é — `advanceAfterGrading` (`assets/node.js:684`) já escolhe o próximo nó de forma determinística no cliente (`state.allItems.find(available)`), e a chamada de correção é uma janela de ~90s em que o usuário está ocioso e essa escolha já é computável. Uma versão mínima — só o **primeiro movimento do próximo nó**, em paralelo com a correção, desperdiçando um movimento se a resposta errar — é materialmente mais estreita que a proposta descartada (um movimento, não múltiplos nós; determinado, não especulado). Continua gastando dinheiro sob BYOK sem medidor, então honestamente vem **depois** do §12.2, se vier. **Não implementar sem decisão explícita do usuário.**
+- A metade não-controversa que o próprio descarte deixou aberta (prefetch **de recuperação**, zero tokens de modelo) segue válida e barata: `prepare` roda `grounding_for` (embedding + busca no índice) dentro do caminho crítico, em `api/reading.rs:719`.
+
+**Se só três coisas forem feitas:** (1) trocar os modelos e adicionar `max_tokens` + controle de raciocínio; (2) instrumentar TTFT pra que (1) seja medição e não discussão; (3) streamar `remediate`/`answer_question`/`generate_subnode_prose` e fundir a chamada de classificação do `/ask`. Isso ataca as duas metades do problema: a taxa de entrega abaixo da leitura, e os três caminhos totalmente cegos que nenhuma escolha de modelo conserta.
+
+### Instrumentação de LLM — medir cada chamada ao modelo (analisado 2026-08-17)
+
+> **Status mudou em 2026-08-20:** esta análise estava em "TODO futuros (sem fase atribuída)". A investigação de latência acima a promoveu a **pré-requisito** — sem timestamp de início/primeiro token não há como escolher entre modelos nem avaliar nenhuma das alavancas propostas lá. O conteúdo abaixo é o de 2026-08-17, inalterado.
+
+**Estado atual: zero.** `Ai::stream` (`ai/mod.rs:72-84`) monta o request, chama o provider e devolve o `TokenStream` — não conta tokens, não cronometra, não registra qual subtarefa pediu. E o parser SSE **descarta o dado que o provider já manda de graça**: `parse_sse_line` (`ai/provider.rs:232-256`) desserializa só `choices[].delta.content`, então o campo `usage` do último chunk (OpenRouter/OpenAI mandam) é jogado fora por serde antes de qualquer consumidor poder olhar.
+
+**A forma:** um `EventKind` novo no substrato que já existe (`events.jsonl`, §7.1) — nada de arquivo/DB novo, mesmo padrão de todo agregado do projeto:
+
+```rust
+LlmCall {
+    purpose: String,        // "decide_move" | "generate_move:explain" | "grade" | "distill" | "outline" | ...
+    tier: String,           // Fast | Robust
+    model: String,          // o nome real — uma troca de modelo pode explicar uma mudança de qualidade
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    ttft_ms: u32,           // até o PRIMEIRO token: a métrica que o §14 nomeia como alvo
+    total_ms: u32,
+    ok: bool,
+}
+```
+
+Três pontos de captura, todos pequenos: (1) `parse_sse_line` para de descartar `usage` (campo novo no `Chunk`, um `SseEvent::Usage`); (2) `Ai::stream` embrulha o stream devolvido pra marcar o instante do primeiro `yield` (TTFT) e o do fim, acumulando os tokens — `Instant::now()`, nada além; (3) `purpose` vem do chamador (um `stream_labeled` ou parâmetro em `Ai::stream`), porque a camada `ai` não sabe — e não deve saber — se está servindo um `decide_move` ou uma destilação de perfil. `MockProvider` reporta zeros, então o modo demo não inventa números.
+
+**Por que vale:** cada decisão de calibração pendente está bloqueada pela mesma coisa — não há como saber se piorou.
+- **§12.2 (teto de gasto)** descreve degradação em três estágios (avisar → forçar tier Fast → pausar); nenhum é implementável sem o gasto corrente, que hoje não existe nem aproximado.
+- **§14 (TTFT ~1s)** é o alvo declarado do projeto e ninguém o mede. Se o round trip serial do `decide_move` custa 200ms ou 3s é hoje desconhecido — o único lugar que chega perto é o teste ignorado `live_time_to_first_token`, medição manual de uma amostra quando alguém lembra de rodar.
+- **Piso do retriever** (`retrieval/index.rs:187` passa `0.01`) está nos riscos transversais com o motivo explícito de não ter sido tunado: falta telemetria pra julgar o efeito.
+- **§16 (telemetria de falha de avaliador)** pede isto explicitamente; `calibrate_rung` hoje só enxerga violação de schema e colapso de diversidade — latência/custo por degrau seria o terceiro sinal.
+- **S16** muda o que a tabela de evidência mede; sem instrumentação, avaliar se melhorou é impressão subjetiva.
+
+**O primeiro número que eu olharia:** `should_distill` (`profile.rs:66-68`) dispara em TODO fechamento de nó (`node_closed ||`), então o fallback de 30 eventos praticamente nunca vale — o S7 já registrou isso ("um nó fecha a cada ~3 eventos"). É uma chamada de LLM por nó fechado, em background, cujo custo agregado ninguém nunca viu. Pode ser irrelevante ou pode ser fração significativa da conta num documento longo; vira pergunta trivial no minuto em que o evento existir.
+
+**O que NÃO é:** o teto de gasto do §12.2 em si (isso é a política que consome o dado, decisão separada) nem custo em dinheiro (exigiria tabela de preços por modelo; tokens por modelo respondem quase tudo e não envelhecem).
 
 ---
 
@@ -399,7 +519,7 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 
 **Fora de escopo nesta fase:** múltiplos documentos vivos; resumos/links/sidepanel entre documentos; controle de sensibilidade de cross-referência.
 
-**Critério de pronto:** um único documento vivo funciona em toda a profundidade da spec — fontes reais do LibGen, revisão versionada, avaliação rica, perfil que sobrevive a uso prolongado.
+**Critério de pronto:** um único documento vivo funciona em toda a profundidade da spec — fontes OER/arXiv reais (o texto original dizia "LibGen", resquício anterior ao descarte de 2026 — ver memória `acquisition-oer-not-libgen`; corrigido 2026-08-20), revisão versionada, avaliação rica, perfil que sobrevive a uso prolongado.
 
 ---
 
@@ -423,45 +543,13 @@ A ordem não é "um subsistema completo por vez", e sim **loop completo primeiro
 - **Custo/latência dos nós atômicos** — ciclo curto multiplica chamadas de LLM. BYOK joga o custo pro usuário, mas a latência por nó é UX. Monitorar a tensão atômico ↔ número de rodadas.
 - **Fidelidade do grounding** — extração de texto varia por formato; o LLM ainda pode se afastar da fonte. Citação + fonte visível auditam, não previnem. O piso de relevância do retriever (`min_score: 0.01`, `retrieval/index.rs`) é essencialmente inexistente — não ajustado ainda por falta de telemetria pra medir o efeito (S13 adicionou só uma instrução defensiva no prompt, não mudou o retriever); primeiro dado concreto sobre falha de avaliação (§16) veio do bug do S13, mas a causa raiz ali acabou sendo desincronia cliente↔servidor, não grounding — o risco de contaminação continua em aberto, sem incidente confirmado que o prove ainda.
 - **Calibração da compactação de perfil** (§7.1) — decidir o que esquecer é julgamento, não algoritmo fechado. Log imutável torna erros recuperáveis; perfil inspecionável torna-os corrigíveis.
-- **Geração de nó não é resiliente a provider lento — achado de QA em batch (2026-08-19), reproduzido.** Sequência real: `explain` (tier Robust) completou via stream em ~65s; o `test` seguinte (tier Fast, mesma geração de nó) estourou `COMPLETE_BUDGET` (60s, `ai/provider.rs`) contra um provider free-tier com latência de raciocínio alta (até 65s por chamada só de `decide_move`/`test`). O stream SSE termina em `event: error`, o nó volta pra `"available"`/`"complete": false` — e a prosa do `explain` já gerada **não fica persistida em lugar nenhum recuperável**, então um retry regera tudo do zero antes de arriscar de novo a chamada da exercise. Todo documento com >1 nó multiplica essa chance de falha por chamada. Isso é uma questão de resiliência, não é a mesma coisa que "por que a geração é lenta" (investigação de latência em andamento, separada) — mesmo que a causa da lentidão não tenha correção, o app ainda precisa não perder trabalho já pago quando um provider estoura o orçamento de tempo. Correção mínima: persistir a prosa do `explain` assim que `move_settled` antes de tentar o `test`, e/ou não descartar o progresso do nó ao estourar `COMPLETE_BUDGET` (permitir retomar do ponto onde parou em vez de do zero).
+- **Geração de nó não é resiliente a provider lento — achado de QA em batch (2026-08-19), reproduzido.** Sequência real: `explain` (tier Robust) completou via stream em ~65s; o `test` seguinte (tier Fast, mesma geração de nó) estourou `COMPLETE_BUDGET` (60s, `ai/provider.rs`) contra um provider free-tier com latência de raciocínio alta (até 65s por chamada só de `decide_move`/`test`). O stream SSE termina em `event: error`, o nó volta pra `"available"`/`"complete": false` — e a prosa do `explain` já gerada **não fica persistida em lugar nenhum recuperável**, então um retry regera tudo do zero antes de arriscar de novo a chamada da exercise. Todo documento com >1 nó multiplica essa chance de falha por chamada. Isso é uma questão de resiliência, não é a mesma coisa que "por que a geração é lenta" (investigação concluída em 2026-08-20 — ver "Latência percebida" em Investigações) — mesmo que a causa da lentidão não tenha correção, o app ainda precisa não perder trabalho já pago quando um provider estoura o orçamento de tempo. Correção mínima: persistir a prosa do `explain` assim que `move_settled` antes de tentar o `test`, e/ou não descartar o progresso do nó ao estourar `COMPLETE_BUDGET` (permitir retomar do ponto onde parou em vez de do zero).
 
 ---
 
 ## TODO futuros (sem fase atribuída)
 
 > Ideias registradas para não se perderem, **fora** do plano de fases acima. Nenhuma delas é pré-requisito de uma fatia atual; entram numa fase quando houver motivo, não por ordem de anotação.
-
-### Instrumentação de LLM — medir cada chamada ao modelo (analisado 2026-08-17)
-
-**Estado atual: zero.** `Ai::stream` (`ai/mod.rs:72-84`) monta o request, chama o provider e devolve o `TokenStream` — não conta tokens, não cronometra, não registra qual subtarefa pediu. E o parser SSE **descarta o dado que o provider já manda de graça**: `parse_sse_line` (`ai/provider.rs:232-256`) desserializa só `choices[].delta.content`, então o campo `usage` do último chunk (OpenRouter/OpenAI mandam) é jogado fora por serde antes de qualquer consumidor poder olhar.
-
-**A forma:** um `EventKind` novo no substrato que já existe (`events.jsonl`, §7.1) — nada de arquivo/DB novo, mesmo padrão de todo agregado do projeto:
-
-```rust
-LlmCall {
-    purpose: String,        // "decide_move" | "generate_move:explain" | "grade" | "distill" | "outline" | ...
-    tier: String,           // Fast | Robust
-    model: String,          // o nome real — uma troca de modelo pode explicar uma mudança de qualidade
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    ttft_ms: u32,           // até o PRIMEIRO token: a métrica que o §14 nomeia como alvo
-    total_ms: u32,
-    ok: bool,
-}
-```
-
-Três pontos de captura, todos pequenos: (1) `parse_sse_line` para de descartar `usage` (campo novo no `Chunk`, um `SseEvent::Usage`); (2) `Ai::stream` embrulha o stream devolvido pra marcar o instante do primeiro `yield` (TTFT) e o do fim, acumulando os tokens — `Instant::now()`, nada além; (3) `purpose` vem do chamador (um `stream_labeled` ou parâmetro em `Ai::stream`), porque a camada `ai` não sabe — e não deve saber — se está servindo um `decide_move` ou uma destilação de perfil. `MockProvider` reporta zeros, então o modo demo não inventa números.
-
-**Por que vale:** cada decisão de calibração pendente está bloqueada pela mesma coisa — não há como saber se piorou.
-- **§12.2 (teto de gasto)** descreve degradação em três estágios (avisar → forçar tier Fast → pausar); nenhum é implementável sem o gasto corrente, que hoje não existe nem aproximado.
-- **§14 (TTFT ~1s)** é o alvo declarado do projeto e ninguém o mede. Se o round trip serial do `decide_move` custa 200ms ou 3s é hoje desconhecido — o único lugar que chega perto é o teste ignorado `live_time_to_first_token`, medição manual de uma amostra quando alguém lembra de rodar.
-- **Piso do retriever** (`retrieval/index.rs:187` passa `0.01`) está nos riscos transversais com o motivo explícito de não ter sido tunado: falta telemetria pra julgar o efeito.
-- **§16 (telemetria de falha de avaliador)** pede isto explicitamente; `calibrate_rung` hoje só enxerga violação de schema e colapso de diversidade — latência/custo por degrau seria o terceiro sinal.
-- **S16** muda o que a tabela de evidência mede; sem instrumentação, avaliar se melhorou é impressão subjetiva.
-
-**O primeiro número que eu olharia:** `should_distill` (`profile.rs:66-68`) dispara em TODO fechamento de nó (`node_closed ||`), então o fallback de 30 eventos praticamente nunca vale — o S7 já registrou isso ("um nó fecha a cada ~3 eventos"). É uma chamada de LLM por nó fechado, em background, cujo custo agregado ninguém nunca viu. Pode ser irrelevante ou pode ser fração significativa da conta num documento longo; vira pergunta trivial no minuto em que o evento existir.
-
-**O que NÃO é:** o teto de gasto do §12.2 em si (isso é a política que consome o dado, decisão separada) nem custo em dinheiro (exigiria tabela de preços por modelo; tokens por modelo respondem quase tudo e não envelhecem).
 
 ### "O que vamos aprender agora?" — continuação no fim do documento (decisão revisada 2026-08-18)
 
