@@ -45,6 +45,15 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(45);
 const TRANSIENT_RETRIES: u32 = 2;
 const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 
+/// Upper bound on a single `retry-after`-driven sleep, independent of what
+/// the header claims. `complete()` already wraps its whole retry loop in
+/// `COMPLETE_BUDGET`, so an oversized value there just gets cut off — but
+/// `stream()`'s retry loop (below) has no outer budget of its own, so an
+/// unclamped header value could stall a live SSE connect indefinitely on a
+/// misbehaving or malicious provider. Groq's own observed reset window
+/// (2026-08-20 probes) was 13-55s, comfortably inside this.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// Wall-clock ceiling on `complete()`'s whole retry loop, independent of how
 /// many attempts it takes. This is a *hard* `tokio::time::timeout` around
 /// the entire loop, so raising it does not reopen the retry-storm risk
@@ -77,17 +86,37 @@ pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> 
 pub enum ProviderError {
     /// HTTP transport failure.
     Http(String),
-    /// The API responded with an error status.
-    Api { status: u16, body: String },
+    /// The API responded with an error status. `retry_after` carries a
+    /// parsed `Retry-After` header (seconds) when the response had one —
+    /// only ever populated on a 429, since that's the only status a caller
+    /// acts on it for.
+    Api {
+        status: u16,
+        body: String,
+        retry_after: Option<Duration>,
+    },
 }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::Http(e) => write!(f, "HTTP error: {e}"),
-            ProviderError::Api { status, body } => write!(f, "API error ({status}): {body}"),
+            ProviderError::Api { status, body, .. } => {
+                write!(f, "API error ({status}): {body}")
+            }
         }
     }
+}
+
+/// Parses a `Retry-After` header value as whole seconds (the only form the
+/// providers this app targets — Groq, OpenCode Zen, OpenRouter — are known
+/// to send; the HTTP-date form is not handled since none of them use it).
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 impl std::error::Error for ProviderError {}
@@ -220,7 +249,7 @@ impl OpenAiCompat {
             temperature: Option<f32>,
         }
 
-        let mut last_err = String::new();
+        let mut last_err: Option<ProviderError> = None;
         let mut sent = None;
         for attempt in 0..=TRANSIENT_RETRIES {
             let mut builder = self
@@ -236,29 +265,50 @@ impl OpenAiCompat {
                 builder = builder.bearer_auth(key);
             }
             match builder.send().await {
-                Ok(resp) => {
+                Ok(resp) if resp.status().is_success() => {
                     sent = Some(resp);
                     break;
                 }
+                // A non-2xx status arrives before any body chunk is read —
+                // still "initial connect" territory, same as a transport
+                // failure below: retrying here can never duplicate/race
+                // content already on its way to a live SSE client, since
+                // nothing has been yielded yet.
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    let body = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
+                    let retryable = status == 429 || (500..600).contains(&status);
+                    let err = ProviderError::Api {
+                        status,
+                        body,
+                        retry_after,
+                    };
+                    if retryable && attempt < TRANSIENT_RETRIES {
+                        let backoff = retry_after
+                            .map(|d| d.min(MAX_RETRY_AFTER))
+                            .unwrap_or(RETRY_BACKOFF);
+                        last_err = Some(err);
+                        tokio::time::sleep(backoff).await;
+                    } else {
+                        return Err(err);
+                    }
+                }
                 Err(e) => {
-                    last_err = e.to_string();
+                    last_err = Some(ProviderError::Http(e.to_string()));
                     if attempt < TRANSIENT_RETRIES {
                         tokio::time::sleep(RETRY_BACKOFF).await;
                     }
                 }
             }
         }
-        let resp = sent.ok_or(ProviderError::Http(last_err))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default();
-            return Err(ProviderError::Api { status, body });
-        }
+        let resp = sent.ok_or_else(|| {
+            last_err.unwrap_or_else(|| ProviderError::Http("no attempt was made".to_string()))
+        })?;
 
         let byte_stream = resp.bytes_stream();
         let stream = async_stream::stream! {
@@ -330,9 +380,23 @@ impl OpenAiCompat {
                     return Err(e);
                 }
                 Err(e) => {
+                    // A 429's `Retry-After` is the provider telling us
+                    // exactly how long its own limiter window is — use it
+                    // over the fixed backoff when present, clamped so one
+                    // huge/bogus header value can't eat the whole
+                    // `COMPLETE_BUDGET` in a single sleep.
+                    let backoff = if let ProviderError::Api {
+                        retry_after: Some(d),
+                        ..
+                    } = &e
+                    {
+                        (*d).min(MAX_RETRY_AFTER)
+                    } else {
+                        RETRY_BACKOFF
+                    };
                     last_err = Some(e);
                     if attempt < TRANSIENT_RETRIES {
-                        tokio::time::sleep(RETRY_BACKOFF).await;
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
@@ -382,12 +446,17 @@ impl OpenAiCompat {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let retry_after = retry_after_from_headers(resp.headers());
             let body = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
                 .await
                 .ok()
                 .and_then(|r| r.ok())
                 .unwrap_or_default();
-            return Err(ProviderError::Api { status, body });
+            return Err(ProviderError::Api {
+                status,
+                body,
+                retry_after,
+            });
         }
 
         let text = tokio::time::timeout(BODY_READ_TIMEOUT, resp.text())
@@ -528,6 +597,26 @@ mod tests {
         assert!(matches!(parse_sse_line(": keep-alive"), SseEvent::Ignore));
         assert!(matches!(parse_sse_line("data:"), SseEvent::Ignore));
         assert!(matches!(parse_sse_line("data: not-json"), SseEvent::Ignore));
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_and_ignores_garbage_or_missing() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "13".parse().unwrap());
+        assert_eq!(
+            retry_after_from_headers(&headers),
+            Some(Duration::from_secs(13))
+        );
+
+        let empty = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after_from_headers(&empty), None);
+
+        let mut malformed = reqwest::header::HeaderMap::new();
+        malformed.insert(
+            "retry-after",
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_from_headers(&malformed), None);
     }
 
     #[tokio::test]

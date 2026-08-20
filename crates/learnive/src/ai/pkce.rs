@@ -87,7 +87,11 @@ pub async fn exchange_code(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(ProviderError::Api { status, body });
+        return Err(ProviderError::Api {
+            status,
+            body,
+            retry_after: None,
+        });
     }
 
     let parsed: KeyResp = resp
