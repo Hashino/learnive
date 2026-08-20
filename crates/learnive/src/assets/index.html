@@ -34,11 +34,13 @@
 
     <!-- Left sidebar (§S12): the document's name and its outline, revealed by
          reaching the left edge. Two panes — the outline, and the list of all
-         living documents behind the ← button. There is no top bar: the theme
-         toggle it held sits in this panel's footer, so the reading column
-         gets the whole window and nothing permanent frames the text.
-         Provider setup (§12) is reachable at /setup — deliberately not
-         linked from here; it is a once-per-install page, not chrome. -->
+         living documents behind the ← button. There is no top bar: the
+         settings button it held sits in this panel's footer, so the reading
+         column gets the whole window and nothing permanent frames the text.
+         Settings (theme, language, BYOK provider §12) opens as a centered
+         floating dialog (`#settingsModal`, wired in settings.js) rather than
+         a separate page, so it can auto-open — straight to the BYOK section —
+         the moment no working provider is configured, without a navigation. -->
     <aside id="sidebar" aria-label="Document navigation">
       <div class="sidebar-head">
         <button
@@ -69,26 +71,19 @@
         <button type="button" id="newDocBtn" data-i18n="doc.new">+ New document</button>
       </div>
 
-      <!-- Footer: pushed to the bottom by the panes above it. The theme
-            toggle and the language switcher — nothing else earns permanent
-            space next to the document. -->
+      <!-- Footer: pushed to the bottom by the panes above it. The settings
+            button — nothing else earns permanent space next to the
+            document; theme and language live inside the dialog it opens. -->
       <div class="sidebar-foot">
         <button
-          id="themeToggle"
+          id="settingsBtn"
           class="icon-btn"
           type="button"
-          data-i18n-aria="theme.toggle"
-          data-i18n-title="theme.toggle"
-          aria-label="Toggle light/dark theme"
-          title="Toggle light/dark theme"
-        ></button>
-        <button
-          id="langToggle"
-          class="icon-btn"
-          type="button"
-          aria-label="Language"
-          title="Language"
-        >EN</button>
+          data-i18n-aria="settings.open"
+          data-i18n-title="settings.open"
+          aria-label="Settings"
+          title="Settings"
+        >⚙</button>
       </div>
     </aside>
     <!-- Invisible hover target along the left edge that reveals the sidebar. -->
@@ -207,11 +202,141 @@
       </div>
     </form>
 
+    <!-- Settings (§12): a centered floating dialog, not a separate page, so
+         it can auto-open on boot when no working provider is configured yet
+         (`settings.js`, `#settingsModal.showModal()`) without a navigation
+         away from wherever the learner already was. Common settings-window
+         layout: a left nav rail (`.settings-nav`) picks the section, the
+         right panel (`.settings-panel`) shows it — Appearance (theme +
+         language, moved out of the sidebar footer) and Provider (BYOK — a
+         provider preset + key field; the app derives both model tiers, with
+         an Advanced toggle for typing model names by hand). Confirming
+         Provider validates it against the real endpoint before anything is
+         written to disk (`POST /api/setup`). -->
+    <dialog id="settingsModal" aria-label="Settings">
+      <div class="settings-head">
+        <h1 data-i18n="settings.title">Settings</h1>
+        <button
+          type="button"
+          id="settingsCloseBtn"
+          class="icon-btn"
+          data-i18n-aria="settings.close"
+          aria-label="Close"
+        >×</button>
+      </div>
+
+      <div class="settings-body">
+        <nav class="settings-nav" aria-label="Settings sections">
+          <button
+            type="button"
+            class="settings-nav-item"
+            data-target="appearanceSection"
+            data-i18n="settings.appearance"
+          >Appearance</button>
+          <button
+            type="button"
+            class="settings-nav-item"
+            data-target="byokSection"
+            data-i18n="provider.legend"
+          >Provider</button>
+        </nav>
+
+        <div class="settings-panel">
+          <section id="appearanceSection" class="settings-section">
+            <h2 data-i18n="settings.appearance">Appearance</h2>
+            <div class="settings-row">
+              <label class="theme-switch">
+                <input
+                  type="checkbox"
+                  id="themeToggle"
+                  data-i18n-aria="theme.toggle"
+                  data-i18n-title="theme.toggle"
+                  aria-label="Toggle light/dark theme"
+                  title="Toggle light/dark theme"
+                />
+                <span class="theme-switch-track" aria-hidden="true">
+                  <span class="theme-switch-thumb"></span>
+                </span>
+              </label>
+            </div>
+            <div class="settings-row">
+              <select id="langToggle" aria-label="Language" title="Language">
+                <option value="en">English</option>
+                <option value="pt-BR">Português Brasileiro</option>
+              </select>
+            </div>
+          </section>
+
+          <section id="byokSection" class="settings-section">
+            <h2 data-i18n="provider.legend">Provider</h2>
+            <p class="muted" data-i18n-html="settings.intro">
+              Bring your own key. Your key is stored locally in a
+              <code>0600</code> file (never a database, never committed) and
+              never leaves this machine except to the provider you choose.
+              Confirming validates it against the real endpoint before it's
+              saved.
+            </p>
+
+            <form id="setupForm">
+              <label for="provider" data-i18n="provider.label">Which provider?</label>
+              <select id="provider">
+                <option value="openrouter" data-i18n="provider.openrouter">OpenRouter (recommended)</option>
+                <option value="openai" data-i18n="provider.openai">OpenAI</option>
+                <option value="groq" data-i18n="provider.groq">Groq</option>
+                <option value="opencode_zen" data-i18n="provider.opencodeZen">OpenCode Zen</option>
+                <option value="cerebras" data-i18n="provider.cerebras">Cerebras</option>
+                <option value="custom" data-i18n="provider.custom">Custom</option>
+              </select>
+
+              <div id="baseUrlRow" class="settings-field" hidden>
+                <label for="baseUrl" data-i18n="baseurl.label">Base URL</label>
+                <input
+                  type="text"
+                  id="baseUrl"
+                  placeholder="https://example.com/v1"
+                />
+              </div>
+
+              <div id="keyRow" class="settings-field">
+                <label for="apiKey" data-i18n="apikey.label">API key <span id="keyHint" class="muted"></span></label>
+                <input type="password" id="apiKey" placeholder="sk-…" autocomplete="off" />
+              </div>
+
+              <div id="intentBox" class="settings-field">
+                <div id="budgetChoice">
+                  <span data-i18n="budget.legend">Budget</span>
+                  <div class="radios">
+                    <label><input type="radio" name="intent" value="free" checked /> <span data-i18n="budget.free">Free models</span></label>
+                    <label><input type="radio" name="intent" value="paid" /> <span data-i18n="budget.paid">Paid models (better quality)</span></label>
+                  </div>
+                </div>
+                <p class="muted" id="derived"></p>
+                <button type="button" id="advancedToggle" class="link-btn" data-i18n="settings.advancedShow">
+                  Show advanced options
+                </button>
+                <div id="advancedBox" hidden>
+                  <label for="modelFast" data-i18n="settings.modelFast">Fast-tier model</label>
+                  <input type="text" id="modelFast" placeholder="e.g. openai/gpt-4o-mini" />
+                  <label for="modelRobust" data-i18n="settings.modelRobust">Robust-tier model</label>
+                  <input type="text" id="modelRobust" placeholder="e.g. openai/gpt-4o" />
+                </div>
+              </div>
+
+              <button type="submit" id="setupSaveBtn" data-i18n="save.button">Save</button>
+            </form>
+            <p id="setupMsg" class="muted"></p>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
     <!-- Load order is load-bearing: core.js first (token, state, helpers),
          node.js last (it calls boot()). Classic scripts, not ES modules —
          module sub-imports would be fetched without the ?token query and the
-         guard would 401 them. -->
+         guard would 401 them. settings.js only needs core.js's `api`/`el`
+         helpers, so it can load anywhere after that. -->
     <script src="/assets/core.js?token={{TOKEN}}"></script>
+    <script src="/assets/settings.js?token={{TOKEN}}"></script>
     <script src="/assets/documents.js?token={{TOKEN}}"></script>
     <script src="/assets/outline.js?token={{TOKEN}}"></script>
     <script src="/assets/reading.js?token={{TOKEN}}"></script>

@@ -73,10 +73,10 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
     // that sets its own, deliberately more permissive CSP — this default is
     // only applied when a handler hasn't already set one, so that route's
     // policy is never clobbered on the way out.
-    // `'unsafe-inline'` is still needed, but only for `/setup`: the main page's
-    // script and styles now load as real files from `/assets` (see
-    // `app::asset`). Externalizing setup.html the same way is what remains
-    // before this can be dropped.
+    // No `'unsafe-inline'`: every page's script/style loads as a real file
+    // from `/assets` (`app::asset`) — the former standalone `/setup` page
+    // (the last holdout, with an inline `<script>`/`<style>`) was folded
+    // into the main page as a settings dialog (`settings.js`).
     let mut response = next.run(req).await;
     if !response
         .headers()
@@ -92,8 +92,8 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
 
 /// Content-security policy applied to every response.
 const CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; \
-     img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
-     script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self'";
+     img-src 'self' data: https:; style-src 'self'; \
+     script-src 'self'; connect-src 'self'; frame-src 'self'";
 
 /// Checks the token from the `X-Learnive-Token` header or the `?token=` query.
 fn token_valid(req: &Request, state: &AppState) -> bool {

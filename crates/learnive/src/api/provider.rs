@@ -8,12 +8,13 @@ use super::*;
 /// Builds the `Ai` from the environment (§12), together with the policy-ladder
 /// rung (§14) that goes with it — the two must never be derived separately:
 /// deriving the rung from `config` alone would desync from which `Ai` this
-/// function actually returns whenever an env-var override is active (a real
-/// provider while `config.provider` is still `Demo`). Precedence:
-/// 1. `LEARNIVE_API_BASE_URL` (+ optional `LEARNIVE_API_KEY`) — any OpenAI-compatible
-///    `chat/completions` endpoint: Inception's Mercury, OpenCode Zen, a local model.
-/// 2. `LEARNIVE_OPENROUTER_KEY` — the default OpenRouter path.
-/// 3. Otherwise, offline demo mode.
+/// function actually returns whenever an env-var override is active. Precedence:
+/// 1. `LEARNIVE_DEMO` (any non-empty value) — dev/test escape hatch, forces
+///    offline demo mode regardless of what's configured. Never a UI choice.
+/// 2. `LEARNIVE_API_BASE_URL` (+ optional `LEARNIVE_API_KEY`) — any OpenAI-compatible
+///    `chat/completions` endpoint: a paid provider, OpenCode Zen, a local model.
+/// 3. `LEARNIVE_OPENROUTER_KEY` — the default OpenRouter path.
+/// 4. Otherwise, the provider configured in the settings window.
 ///
 /// Rung: a real provider (any of the paths above) derives L1/L2 from the
 /// free/paid intent (§12.1); the demo fallback is always L0 (demo mode = L0,
@@ -23,6 +24,11 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
         Intent::Free => AgentPolicy::L1,
         Intent::Paid => AgentPolicy::L2,
     };
+
+    // 0. Dev/test override: force demo mode regardless of any other config.
+    if std::env::var("LEARNIVE_DEMO").is_ok_and(|v| !v.is_empty()) {
+        return (demo_ai(), AgentPolicy::L0);
+    }
 
     // 1. Environment override wins (dev / `.env`; CLAUDE.md: the real env wins).
     if let Ok(base_url) = std::env::var("LEARNIVE_API_BASE_URL")
@@ -51,8 +57,9 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
         );
     }
 
-    // 2. The provider configured in /setup, with its key from the secret store
-    //    (§12). Models are derived from the free/paid intent (§12.1).
+    // 4. The provider configured in the settings window, with its key from
+    //    the secret store (§12). Models are derived from the free/paid
+    //    intent (§12.1).
     match &config.provider {
         ProviderKind::OpenRouter => {
             if let Some(key) = secret.get("openrouter") {
@@ -74,11 +81,13 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
                 real_provider_policy,
             );
         }
-        ProviderKind::Demo => {}
     }
 
-    // 3. Nothing configured → demo.
-    eprintln!("No provider configured — DEMO MODE. Open /setup to configure a provider.");
+    // Nothing configured → demo.
+    eprintln!(
+        "No provider configured — DEMO MODE. Open the app and use the settings (⚙) \
+         button to configure a provider."
+    );
     (demo_ai(), AgentPolicy::L0)
 }
 

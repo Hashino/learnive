@@ -16,16 +16,20 @@ use serde::{Deserialize, Serialize};
 use crate::ai::Models;
 
 /// Which provider to talk to (§12). BYOK — no subscription OAuth tokens.
+/// There is no "demo" variant here on purpose: offline demo mode is a dev/test
+/// escape hatch (`LEARNIVE_DEMO` env var, checked in `build_ai`), never a
+/// choice persisted from the settings window — a real user config always
+/// names a real provider, even before a key has been saved for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderKind {
-    /// No provider configured — canned demo content.
-    #[default]
-    Demo,
     /// OpenRouter (default BYOK path). Key secret name: `openrouter`.
+    #[default]
     OpenRouter,
-    /// Any OpenAI-compatible endpoint (Mercury/Inception, OpenCode Zen, local).
-    /// Key secret name: `api`.
+    /// Any OpenAI-compatible endpoint (`chat/completions`-shaped): a named
+    /// preset (OpenAI, Groq, OpenCode Zen, …) or a fully custom one — both
+    /// resolve to the same shape, just a different `base_url`. Key secret
+    /// name: `api`.
     OpenAiCompatible { base_url: String },
 }
 
@@ -76,12 +80,14 @@ impl AppConfig {
         Ok(())
     }
 
-    /// The secret name under which this provider's key is stored, if any.
-    pub fn key_name(&self) -> Option<&'static str> {
+    /// The secret name under which this provider's key is stored. Every
+    /// remaining `ProviderKind` always has one — a key may still be absent
+    /// from the store (a keyless endpoint, or not saved yet), but there is
+    /// always a name to look it up under.
+    pub fn key_name(&self) -> &'static str {
         match self.provider {
-            ProviderKind::Demo => None,
-            ProviderKind::OpenRouter => Some("openrouter"),
-            ProviderKind::OpenAiCompatible { .. } => Some("api"),
+            ProviderKind::OpenRouter => "openrouter",
+            ProviderKind::OpenAiCompatible { .. } => "api",
         }
     }
 
@@ -114,7 +120,6 @@ pub fn recommended_pair(provider: &ProviderKind, intent: Intent) -> (&'static st
         // OpenAI-compatible endpoints vary wildly; sensible generic names the user
         // can override. A single-model endpoint just reuses one for both tiers.
         (ProviderKind::OpenAiCompatible { .. }, _) => ("gpt-4o-mini", "gpt-4o"),
-        (ProviderKind::Demo, _) => ("demo", "demo"),
     }
 }
 
@@ -127,7 +132,7 @@ mod tests {
     fn load_default_when_absent() {
         let dir = std::env::temp_dir().join(format!("learnive-cfg-none-{}", std::process::id()));
         let cfg = AppConfig::load(&dir);
-        assert_eq!(cfg.provider, ProviderKind::Demo);
+        assert_eq!(cfg.provider, ProviderKind::OpenRouter);
         assert_eq!(cfg.intent, Intent::Free);
     }
 
@@ -144,7 +149,7 @@ mod tests {
         let back = AppConfig::load(&dir);
         assert_eq!(back.provider, ProviderKind::OpenRouter);
         assert_eq!(back.intent, Intent::Paid);
-        assert_eq!(back.key_name(), Some("openrouter"));
+        assert_eq!(back.key_name(), "openrouter");
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::ai::ChatMessage;
 
 // ---------------------------------------------------------------------------
 // Setup (§12): configure the provider + key (in-app), key in the secret store.
@@ -6,7 +7,7 @@ use super::*;
 
 #[derive(Deserialize)]
 pub struct SetupReq {
-    /// `demo` | `openrouter` | `openai_compatible`.
+    /// `openrouter` | `openai_compatible`.
     provider: String,
     /// `free` | `paid` — the single intent that derives both tiers (§12.1).
     intent: String,
@@ -24,24 +25,34 @@ pub struct SetupStatus {
     base_url: Option<String>,
     /// Whether a key is stored — the key itself is NEVER returned (§12).
     has_key: bool,
+    /// True when the app is actually falling back to offline demo content
+    /// right now — only possible for OpenRouter with no key stored yet
+    /// (`build_ai`'s only fallthrough path). An `OpenAiCompatible` provider
+    /// is always used for real once saved, keyed or not (keyless endpoints
+    /// are a legitimate BYOK shape), so it's never "demo".
     demo: bool,
     /// The derived active model pair, for display only.
     model_fast: String,
     model_robust: String,
+    /// True when there is no working provider yet — drives the settings
+    /// window auto-opening straight to the Provider section on boot.
+    /// Currently identical to `demo` (the only "not working yet" case is
+    /// the OpenRouter-without-a-key fallthrough), kept as a separate field
+    /// since the two questions ("is this real" vs "should we nag") could
+    /// diverge later without becoming the same computation again.
+    needs_setup: bool,
 }
 
 fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
     let (provider, base_url) = match &config.provider {
-        ProviderKind::Demo => ("demo".to_string(), None),
         ProviderKind::OpenRouter => ("openrouter".to_string(), None),
         ProviderKind::OpenAiCompatible { base_url } => {
             ("openai_compatible".to_string(), Some(base_url.clone()))
         }
     };
-    let has_key = config
-        .key_name()
-        .map(|n| secret.get(n).is_some())
-        .unwrap_or(false);
+    let has_key = secret.get(config.key_name()).is_some();
+    // Only OpenRouter ever falls through to demo (`build_ai`) when unkeyed.
+    let demo = matches!(config.provider, ProviderKind::OpenRouter) && !has_key;
     let models = config.models();
     SetupStatus {
         provider,
@@ -52,9 +63,10 @@ fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
         .to_string(),
         base_url,
         has_key,
-        demo: matches!(config.provider, ProviderKind::Demo),
+        demo,
         model_fast: models.for_tier(Tier::Fast).to_string(),
         model_robust: models.for_tier(Tier::Robust).to_string(),
+        needs_setup: demo,
     }
 }
 
@@ -71,7 +83,6 @@ pub async fn save_setup(
     Json(req): Json<SetupReq>,
 ) -> Result<Json<SetupStatus>, ApiError> {
     let provider = match req.provider.as_str() {
-        "demo" => ProviderKind::Demo,
         "openrouter" => ProviderKind::OpenRouter,
         "openai_compatible" => {
             let base = req
@@ -97,17 +108,36 @@ pub async fn save_setup(
         model_robust: req.model_robust.filter(|s| !s.trim().is_empty()),
     };
 
+    // Validate before writing anything to disk: a bad key/model/endpoint
+    // would otherwise only surface later, mid-generation, far from where the
+    // mistake was made. The key is optional here — a keyless endpoint (e.g. a
+    // provider's free tier) is a legitimate BYOK shape; the round trip itself,
+    // not a client-side requirement, is what decides if it actually works.
+    let existing = state.config.read().await.clone();
+    let key = key_for_validation(
+        req.api_key.as_deref(),
+        &config.provider,
+        &existing,
+        &state.secret,
+    );
+    let candidate_provider = match &config.provider {
+        ProviderKind::OpenRouter => Provider::OpenAiCompat(OpenAiCompat::openrouter(key)),
+        ProviderKind::OpenAiCompatible { base_url } => {
+            Provider::OpenAiCompat(OpenAiCompat::new(base_url.clone(), key))
+        }
+    };
+    let models = config.models();
+    let candidate_ai = Ai::new(candidate_provider, models.clone());
+    validate_provider(&candidate_ai, &models).await?;
+
     // Persist config (no secret) and store the key separately (§12).
     config
         .save(&*state.data_dir)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    if let (Some(name), Some(key)) = (
-        config.key_name(),
-        req.api_key.as_ref().filter(|k| !k.trim().is_empty()),
-    ) {
+    if let Some(key) = req.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
         state
             .secret
-            .set(name, key.trim())
+            .set(config.key_name(), key.trim())
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
@@ -121,4 +151,145 @@ pub async fn save_setup(
 
     let status = status_of(&config, &state.secret);
     Ok(Json(status))
+}
+
+/// Which key to validate the candidate provider with: the freshly typed key
+/// wins; otherwise reuse the already-stored key, but ONLY when the candidate
+/// provider is identical (kind + base URL) to what's already configured —
+/// never probe one provider's endpoint with another provider's secret.
+fn key_for_validation(
+    typed: Option<&str>,
+    candidate: &ProviderKind,
+    existing: &AppConfig,
+    secret: &SecretStore,
+) -> Option<String> {
+    if let Some(k) = typed.map(str::trim).filter(|k| !k.is_empty()) {
+        return Some(k.to_string());
+    }
+    if &existing.provider == candidate {
+        secret.get(existing.key_name())
+    } else {
+        None
+    }
+}
+
+/// A minimal round trip against the candidate provider/key/model(s) — proof
+/// the endpoint is reachable, the key is accepted, and the model name is
+/// valid, before anything lands on disk. Content is ignored; only whether
+/// the call errors matters here. Validates both tiers when they differ (a
+/// manual override could break just one of them).
+async fn validate_provider(ai: &Ai, models: &Models) -> Result<(), ApiError> {
+    let ping = || {
+        vec![
+            ChatMessage::system(
+                "Connectivity check for a newly configured AI provider. \
+                 Reply with a single short word.",
+            ),
+            ChatMessage::user("ping"),
+        ]
+    };
+    ai.complete(Tier::Fast, ping())
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("Provider validation failed: {e}")))?;
+    if models.for_tier(Tier::Fast) != models.for_tier(Tier::Robust) {
+        ai.complete(Tier::Robust, ping()).await.map_err(|e| {
+            ApiError::BadRequest(format!("Provider validation failed (robust model): {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_secret() -> (tempfile::TempDir, SecretStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = SecretStore::open(dir.path());
+        (dir, secret)
+    }
+
+    #[test]
+    fn key_for_validation_prefers_typed_key() {
+        let (_dir, secret) = tmp_secret();
+        let existing = AppConfig::default();
+        let got = key_for_validation(
+            Some("  fresh-key  "),
+            &ProviderKind::OpenRouter,
+            &existing,
+            &secret,
+        );
+        assert_eq!(got, Some("fresh-key".to_string()));
+    }
+
+    #[test]
+    fn key_for_validation_reuses_stored_key_for_same_provider() {
+        let (_dir, secret) = tmp_secret();
+        secret.set("openrouter", "stored-key").unwrap();
+        let existing = AppConfig {
+            provider: ProviderKind::OpenRouter,
+            ..Default::default()
+        };
+        let got = key_for_validation(None, &ProviderKind::OpenRouter, &existing, &secret);
+        assert_eq!(got, Some("stored-key".to_string()));
+    }
+
+    #[test]
+    fn key_for_validation_refuses_to_leak_a_different_providers_key() {
+        let (_dir, secret) = tmp_secret();
+        secret.set("openrouter", "stored-key").unwrap();
+        let existing = AppConfig {
+            provider: ProviderKind::OpenRouter,
+            ..Default::default()
+        };
+        let candidate = ProviderKind::OpenAiCompatible {
+            base_url: "https://example.com/v1".into(),
+        };
+        let got = key_for_validation(None, &candidate, &existing, &secret);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn key_for_validation_none_when_nothing_typed_or_stored() {
+        let (_dir, secret) = tmp_secret();
+        let existing = AppConfig::default();
+        let got = key_for_validation(None, &ProviderKind::OpenRouter, &existing, &secret);
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn validate_provider_passes_on_a_working_mock() {
+        let ai = Ai::new(
+            Provider::Mock(MockProvider::new("ok")),
+            Models::new("fast", "robust"),
+        );
+        let models = Models::new("fast", "robust");
+        assert!(validate_provider(&ai, &models).await.is_ok());
+    }
+
+    #[test]
+    fn needs_setup_true_until_openrouter_is_keyed() {
+        let (_dir, secret) = tmp_secret();
+        let unkeyed = AppConfig::default(); // OpenRouter, no key stored yet.
+        assert!(status_of(&unkeyed, &secret).needs_setup);
+        assert!(status_of(&unkeyed, &secret).demo);
+
+        secret.set("openrouter", "k").unwrap();
+        assert!(!status_of(&unkeyed, &secret).needs_setup);
+    }
+
+    #[test]
+    fn needs_setup_false_for_a_saved_keyless_custom_endpoint() {
+        let (_dir, secret) = tmp_secret();
+        let custom = AppConfig {
+            provider: ProviderKind::OpenAiCompatible {
+                base_url: "https://example.com/v1".into(),
+            },
+            ..Default::default()
+        };
+        // A keyless OpenAI-compatible endpoint (e.g. a free tier) is a
+        // legitimate, already-validated BYOK shape — it must never nag.
+        assert!(!status_of(&custom, &secret).needs_setup);
+        assert!(!status_of(&custom, &secret).demo);
+    }
 }

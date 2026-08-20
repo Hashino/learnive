@@ -41,8 +41,8 @@ pub struct AppState {
     pub allowed_hosts: Arc<HashSet<String>>,
     /// File storage (§4).
     pub store: Store,
-    /// AI provider + tiering (§12). Hot-swappable so /setup applies without a
-    /// restart — read per request with `state.ai.load_full()`.
+    /// AI provider + tiering (§12). Hot-swappable so the settings window
+    /// applies without a restart — read per request with `state.ai.load_full()`.
     pub ai: Arc<ArcSwap<Ai>>,
     /// Policy-ladder rung (§14) that goes with `ai` — always set together with
     /// it (`api::build_ai`), never derived from `config` alone (see that
@@ -128,7 +128,6 @@ pub fn build_router(state: AppState) -> Router {
         // Page assets (§15: still baked into the binary, just not into one
         // file). Fixed table, no filesystem lookup — nothing to traverse.
         .route("/assets/{file}", get(asset))
-        .route("/setup", get(setup_page))
         .route("/health", get(health))
         .route("/events", get(events))
         // Setup (§12): GET reads status (no secret); POST saves + hot-swaps.
@@ -242,6 +241,7 @@ async fn asset(Path(file): Path<String>) -> Response {
         "outline.js" => (JS, include_str!("assets/outline.js")),
         "reading.js" => (JS, include_str!("assets/reading.js")),
         "node.js" => (JS, include_str!("assets/node.js")),
+        "settings.js" => (JS, include_str!("assets/settings.js")),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     // `no-store`: the asset URLs are stable (no content hash) but their bodies
@@ -257,12 +257,6 @@ async fn asset(Path(file): Path<String>) -> Response {
         body,
     )
         .into_response()
-}
-
-/// In-app setup page (§12): provider + key + free/paid intent. Same token
-/// injection as `index` so its fetch calls are authenticated (§3.1).
-async fn setup_page(State(state): State<AppState>) -> Html<String> {
-    Html(include_str!("assets/setup.html").replace("{{TOKEN}}", &state.token))
 }
 
 /// Liveness. Exposes nothing sensitive; still requires the token via the layer.

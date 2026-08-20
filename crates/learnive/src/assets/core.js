@@ -69,14 +69,15 @@ const state = {
 
 // --- Theme toggle -----------------------------------------------------
 // The head script already applied the theme; here we wire the switch and
-// persist the choice. The icon shows the mode you'd switch TO.
+// persist the choice. A checkbox styled as a switch (app.css); checked =
+// dark, unchecked = light.
 const currentTheme = () =>
   document.documentElement.dataset.theme === "light" ? "light" : "dark";
 function syncThemeToggle() {
-  el("themeToggle").textContent = currentTheme() === "light" ? "☾" : "☀";
+  el("themeToggle").checked = currentTheme() === "dark";
 }
-el("themeToggle").addEventListener("click", () => {
-  const next = currentTheme() === "light" ? "dark" : "light";
+el("themeToggle").addEventListener("change", () => {
+  const next = el("themeToggle").checked ? "dark" : "light";
   document.documentElement.dataset.theme = next;
   localStorage.setItem("learnive-theme", next);
   syncThemeToggle();
@@ -94,16 +95,17 @@ el("themeToggle").addEventListener("click", () => {
 syncThemeToggle();
 
 // --- Language switcher ------------------------------------------------
-// The default locale is English; the learner can switch to pt-BR (or back).
+// A dropdown (one option per `I18N_SUPPORTED` locale, i18n.js) rather than a
+// cycling toggle — scales to more than two locales without changing shape.
 // The choice persists in localStorage (i18n.js) and rides every request as
 // the `X-Learnive-Lang` header, so server-rendered strings follow too.
 if (el("langToggle")) {
   const refreshLangLabel = () => {
-    el("langToggle").textContent = currentLocale() === "pt-BR" ? "PT" : "EN";
+    el("langToggle").value = currentLocale();
   };
   refreshLangLabel();
-  el("langToggle").addEventListener("click", () => {
-    const next = currentLocale() === "pt-BR" ? "en" : "pt-BR";
+  el("langToggle").addEventListener("change", () => {
+    const next = el("langToggle").value;
     i18nSetLang(next);
     refreshLangLabel();
     // Re-fill static chrome; already-rendered dynamic strings adopt the new

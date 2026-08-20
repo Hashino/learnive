@@ -71,6 +71,10 @@ html[data-theme="dark"] {
   --btn-fg: var(--nord6);
   --star-filter: none;
   --star-opacity: 1;
+  /* Solid (no alpha) chrome, for surfaces that shouldn't read as glass —
+     the settings window, in particular: a floating dialog, but not a
+     translucent one. Same hue as `--chrome-bg`, just fully opaque. */
+  --modal-bg: var(--nord0);
   /* Reading line (§9): the block nearest the viewport centre. Ephemeral
      client state — deliberately quiet, it marks where you are, it does
      not annotate the text. */
@@ -115,6 +119,7 @@ html[data-theme="light"] {
   --btn-fg: var(--nord6);
   --star-filter: invert(1);
   --star-opacity: 0.35;
+  --modal-bg: var(--nord6);
   --reading-line: rgba(94, 129, 172, 0.12);
   --callout-bg: rgba(216, 222, 233, 0.55);
   --panel-bg: rgba(255, 255, 255, 0.6);
@@ -1185,4 +1190,235 @@ math[display="block"] {
   #annotationsLayer {
     display: none;
   }
+}
+
+/* Settings dialog (§12): a native <dialog>, which centers itself and paints
+   a backdrop for free — reused here instead of hand-rolling either. Opened
+   by the sidebar footer's gear button, or automatically on boot straight to
+   the BYOK section when no working provider is configured yet. */
+#settingsModal {
+  width: min(76rem, 92vw);
+  /* Fixed, not shrink-to-fit: without this the dialog's height changed with
+     whichever section was active (Appearance is short, Provider is tall),
+     which reads as the window jumping around when you switch tabs. */
+  height: calc(100vh - 4rem);
+  padding: 1.5rem var(--card-pad-x) 2rem;
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  /* Solid, not glass — unlike `.card`/the sidebar, this window shouldn't
+     show the document blurring through it (user feedback: the app's usual
+     translucency read as a mismatch here). */
+  background: var(--modal-bg);
+  color: var(--fg);
+  box-shadow: 0 20px 60px var(--card-shadow);
+}
+/* `display` must stay scoped to `[open]`: an unconditional `#settingsModal {
+   display: flex }` is an author rule and beats the UA stylesheet's
+   `dialog:not([open]) { display: none }` no matter the specificity, which
+   left the (closed) dialog sitting in normal document flow — visible at the
+   bottom of the page once you scrolled past the document. */
+#settingsModal[open] {
+  display: flex;
+  flex-direction: column;
+}
+#settingsModal::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+#settingsModal h1 {
+  font-size: 1.3rem;
+  margin: 0;
+}
+#settingsModal h2 {
+  font-size: 1rem;
+  margin: 0 0 0.6rem;
+}
+.settings-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.2rem;
+  flex-shrink: 0;
+}
+/* Common settings-window layout: a left nav rail picks the section, the
+   right panel shows it. The dialog's own height is fixed (above); this row
+   fills what's left of it, and only `.settings-panel` scrolls internally,
+   so the nav rail stays put and the window never resizes when the active
+   section changes. */
+.settings-body {
+  display: flex;
+  align-items: stretch;
+  gap: 1.2rem;
+  flex: 1;
+  min-height: 0;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 8.5rem;
+  flex-shrink: 0;
+  padding-right: 1rem;
+  border-right: 1px solid var(--card-border);
+}
+.settings-nav-item {
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: var(--roundness);
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.settings-nav-item:hover {
+  color: var(--accent);
+}
+.settings-nav-item.active {
+  background: var(--field-bg);
+  color: var(--accent);
+  border-color: var(--card-border);
+}
+.settings-panel {
+  flex: 1;
+  min-width: 0;
+  /* The dialog itself is wide (fills most of the screen); the content
+     column stays a readable measure instead of stretching form fields
+     edge to edge. */
+  max-width: 42rem;
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+.settings-section[hidden] {
+  display: none;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+/* Each config (theme, language, …) gets its own line, not packed into one
+   row — a row is only for a single control's own internal parts. */
+.settings-row + .settings-row {
+  margin-top: 0.8rem;
+}
+/* Language dropdown: the generic `#settingsModal select` rule below makes
+   every select fill its row, which is right for the provider form but
+   would stretch this one-line switcher absurdly wide. */
+.settings-row #langToggle {
+  width: auto;
+  min-width: 4.5rem;
+}
+/* Theme switch: a checkbox visually replaced by a track + thumb, not the
+   sun/moon icon button used before — same on/off semantics, common-toggle
+   shape instead. Checked = dark. */
+.theme-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.theme-switch input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.theme-switch-track {
+  display: inline-block;
+  width: 2.6rem;
+  height: 1.4rem;
+  background: var(--field-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  position: relative;
+  transition: background 0.15s ease;
+}
+.theme-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 50%;
+  background: var(--fg);
+  transition: transform 0.15s ease;
+}
+.theme-switch input:checked ~ .theme-switch-track {
+  background: var(--accent);
+}
+.theme-switch input:checked ~ .theme-switch-track .theme-switch-thumb {
+  transform: translateX(1.2rem);
+  background: var(--btn-fg);
+}
+.theme-switch input:focus-visible ~ .theme-switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.settings-field {
+  margin-top: 0.8rem;
+}
+#settingsModal label {
+  display: block;
+  margin: 0.6rem 0 0.25rem;
+  font-size: 0.9rem;
+}
+#settingsModal input[type="text"],
+#settingsModal input[type="password"],
+#settingsModal select {
+  width: 100%;
+  font: inherit;
+  padding: 0.45rem 0.55rem;
+  color: var(--field-fg);
+  background: var(--field-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+}
+#settingsModal input:focus,
+#settingsModal select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* Base URL is shown but not editable for a preset provider — the value is
+   still visible (transparency about what endpoint will be used), just not
+   a field the user is meant to type into unless "Custom" is selected. */
+#settingsModal input[readonly] {
+  opacity: 0.7;
+  cursor: default;
+}
+#settingsModal .radios label {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-right: 1.2rem;
+  font-size: inherit;
+}
+#settingsModal button[type="submit"] {
+  margin-top: 1rem;
+}
+/* Advanced model-name toggle: a link, not a button — it reveals two more
+   fields rather than acting, and shouldn't compete with Save. */
+.link-btn {
+  display: block;
+  margin-top: 0.6rem;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--link);
+  font: inherit;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:hover:not(:disabled) {
+  background: none;
+  color: var(--link-hover);
+}
+#setupMsg.ok {
+  color: var(--nord14);
+}
+#setupMsg.err {
+  color: var(--nord11);
 }
