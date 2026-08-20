@@ -46,18 +46,29 @@ const TRANSIENT_RETRIES: u32 = 2;
 const RETRY_BACKOFF: Duration = Duration::from_millis(750);
 
 /// Wall-clock ceiling on `complete()`'s whole retry loop, independent of how
-/// many attempts it takes. Retrying 5xx/429 (added 2026-08-19, see
-/// `TRANSIENT_RETRIES`'s doc comment) compounds against the *per-attempt*
-/// 120s send + 45s body-read budget: three attempts that each stall near
-/// their cap before finally erroring is ~500s, which showed up live as a
-/// downstream caller (the QA driver's own 200s HTTP timeout on `/answer`)
-/// timing out on what looked like a hung server. `complete()` is only ever
-/// used for short structured calls (test/profile/outline/rubric/grading,
-/// see its doc comment) that normally finish in single-digit seconds even
-/// on a slow model, so 60s is a generous ceiling for the legitimate case
-/// while keeping the pathological retry-storm case bounded to something a
-/// synchronous caller can budget around.
-const COMPLETE_BUDGET: Duration = Duration::from_secs(60);
+/// many attempts it takes. This is a *hard* `tokio::time::timeout` around
+/// the entire loop, so raising it does not reopen the retry-storm risk
+/// described below — total wall time is capped here no matter how many
+/// attempts fire inside it.
+///
+/// Previously assumed structured calls (test/profile/outline/rubric/
+/// grading) "normally finish in single-digit seconds even on a slow
+/// model" and used 60s. Live QA (2026-08-20) refuted that: a real node's
+/// `test` move failed this budget deterministically (2/2) with the exact
+/// "gave up after retrying" error below, and direct-provider probes
+/// (bypassing learnive) confirmed why — the free-tier default provider is
+/// healthy (0.84s time-to-first-token on the same prompt streamed) but a
+/// non-streamed structured call for a realistic grounded prompt
+/// legitimately takes 126-147s to return anything at all, well past the
+/// old 60s. 200s covers that with margin while staying just under the
+/// client's 210s send timeout above, so a genuine stall surfaces this
+/// crate's own clearer message instead of a raw reqwest error. Retrying
+/// 5xx/429 (added 2026-08-19, see `TRANSIENT_RETRIES`'s doc comment) still
+/// only gets meaningful extra attempts for *fast* transient failures now —
+/// a second full ~140s attempt plus a first mostly exhausts 200s already,
+/// which is the correct trade: a synchronous caller's wait is bounded here
+/// either way, so there's nothing to budget around beyond this constant.
+const COMPLETE_BUDGET: Duration = Duration::from_secs(200);
 
 /// Stream of text deltas (§14 — token-by-token streaming for low TTFT).
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<String, ProviderError>> + Send>>;
@@ -172,12 +183,20 @@ impl OpenAiCompat {
             // to hang for minutes under load with no error — an unbounded
             // client left `generate_node`'s SSE loop stuck forever, which is
             // what put a node on disk with content but no `NodeGenerated`
-            // event in the first place. 120s comfortably covers a full
-            // streamed prose move (TTFT is ~1-2s on a healthy model); a short
-            // connect timeout fails fast on a dead endpoint instead of
-            // queueing behind the same 120s.
+            // event in the first place. Live measurement (2026-08-20,
+            // direct-provider probes against this same free-tier default,
+            // bypassing learnive) found a *non-streamed* `chat/completions`
+            // call — used only by `complete()`, never the live prose
+            // stream — legitimately taking 126-147s for a realistic
+            // structured-move prompt (~8.5KB, grounded); TTFT on the same
+            // prompt streamed was 0.84s, ruling out a dead/degraded
+            // provider. 210s comfortably covers that with margin and stays
+            // above `COMPLETE_BUDGET` below, so *that* timeout's clearer
+            // message fires first on a genuine stall instead of a raw
+            // reqwest error; a short connect timeout still fails fast on a
+            // dead endpoint instead of queueing behind the same 210s.
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(210))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("reqwest client builder with static config"),
