@@ -55,14 +55,23 @@ fn continuity_note() -> &'static str {
 /// tree position; "overall topic" may motivate or pick examples, never
 /// decide what gets left out.
 fn topic_scope_note() -> &'static str {
-    "\"Overall topic\" below is background/motivational context ONLY — \
-     never a lens that narrows which aspects of THIS node's own concept \
-     (\"Concept of this node\") get taught. Teach \"Concept of this \
+    "\"Overall topic\" and \"Curriculum objective\" below are background/\
+     motivational context ONLY — never a lens that narrows which aspects of \
+     THIS node's own concept (\"Concept of this node\") get taught, and \
+     never something to state or paraphrase to the learner directly (never \
+     write a sentence like \"this matters for the curriculum's objective of \
+     ...\" or \"by the end of this curriculum you'll...\" — the learner is \
+     reading one atomic node, not a syllabus). Teach \"Concept of this \
      node\" in full: as a self-contained, general concept a reader could \
-     learn and reuse on its own, regardless of the overall topic — not \
-     just the slice of it the overall topic happens to need. You may use \
-     \"Overall topic\" to motivate why the concept matters or to pick an \
-     illustrative example, but never to decide what to omit."
+     learn and reuse on its own, regardless of the overall topic or where \
+     the curriculum is ultimately headed — not just the slice of it the \
+     overall topic happens to need. You may use \"Overall topic\" or \
+     \"Curriculum objective\" silently, to motivate why the concept matters \
+     or to pick an illustrative example, but never to decide what to omit \
+     and never as text the learner sees named or referenced. \"Teach in \
+     full\" still excludes anything listed under \"Not yet taught\" below, \
+     when present — those are separate, later nodes' own material, not a \
+     part of THIS node's concept just because they're related to it."
 }
 
 fn node_so_far_line(ctx: &MoveContext) -> String {
@@ -70,6 +79,22 @@ fn node_so_far_line(ctx: &MoveContext) -> String {
         "\nNode content so far: {}",
         non_empty(tail_chars(&ctx.node_tail, 1500))
     )
+}
+
+/// Renders `MoveContext::later_titles` as a user-message line, paired with
+/// "Context of what has been taught so far" — see that field's doc comment
+/// for the live bug (a prerequisite node teaching a later, sibling node's
+/// own material) this closes.
+fn not_yet_taught_line(ctx: &MoveContext) -> String {
+    if ctx.later_titles.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nNot yet taught — belongs to a SEPARATE, LATER node, not this \
+             one (do not teach, preview, or state its content here): {}",
+            ctx.later_titles.join("; ")
+        )
+    }
 }
 
 fn describe_prior(prior: &[MoveRecord]) -> String {
@@ -219,12 +244,13 @@ pub fn decide_and_generate(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMe
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
-             Context of what has been taught so far: {}\n\
+             Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}\nLearner profile: {}\n\
              Moves already in this node: {}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
+            not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
             describe_prior(&ctx.prior_moves),
@@ -359,6 +385,16 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              be false. NEVER write about the absence of a hypothesis: \
              whatever you produce is what the learner reads."
         }
+        MoveType::Integrate => {
+            "Connect this node's concept to concept(s) the learner has \
+             ALREADY been taught — named in \"Context of what has been \
+             taught so far\" or earlier in \"Moves already in this node\". \
+             Never integrate forward into \"Curriculum objective\" or a \
+             concept not yet taught: do not preview, name, or state the \
+             curriculum's final definition/destination, even to foreshadow \
+             where the material is headed. If nothing has been taught yet to \
+             integrate with, pick a different move instead of forcing one."
+        }
         MoveType::Plan => {
             "Revise the outline non-destructively ONLY if you have a concrete \
              structural change to propose (reordering, adding, splitting, or \
@@ -413,11 +449,12 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
-             Context of what has been taught so far: {}\n\
+             Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}\nLearner profile: {}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
+            not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
@@ -477,11 +514,12 @@ pub fn generate_move(
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
-             Context of what has been taught so far: {}\n\
+             Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}\nLearner profile: {}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
+            not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
             sources_block(&ctx.grounding),

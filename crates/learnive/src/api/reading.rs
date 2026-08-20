@@ -564,6 +564,12 @@ pub(super) struct NodePrep {
     /// Rust" review sub-node ended up teaching recursion's base case/
     /// recursive step, the parent node's own concept).
     pub(super) parent_title: Option<String>,
+    /// Titles of every other outline item with no node generated for it yet
+    /// — fed to `MoveContext::later_titles` so a move can be told these
+    /// belong to a separate, later node and are off-limits here. See
+    /// `MoveContext::later_titles`'s doc comment for the live bug this
+    /// closes.
+    pub(super) later_titles: Vec<String>,
     /// §14 resilience: moves already generated, persisted, and logged by a
     /// prior, interrupted `generate_node` attempt for this same node (empty
     /// on a node's first-ever attempt) — seeds `generate_node`'s
@@ -715,7 +721,7 @@ pub(super) async fn prepare(
     }
 
     let context = prior_content_context(state, doc_id, &outline.items[..idx]);
-    let grounding = grounding_for(state, &format!("{} {}", outline.topic, item.title)).await;
+    let grounding = grounding_for(state, &item.title).await;
     let objective = objective_for(state, doc_id);
     let profile = profile_for(state, doc_id);
     let outline_titles = outline.items.iter().map(|i| i.title.clone()).collect();
@@ -737,6 +743,12 @@ pub(super) async fn prepare(
             .find(|i| i.id == pid)
             .map(|i| i.title.clone())
     });
+    let later_titles: Vec<String> = outline
+        .items
+        .iter()
+        .filter(|i| i.id != item.id && !states.contains_key(&i.id))
+        .map(|i| i.title.clone())
+        .collect();
     let resumed_moves =
         resumed_ungraded_moves(event_log.iter().map_err(|e| e.to_string())?, &item.id);
     let resumed_move_index =
@@ -762,6 +774,7 @@ pub(super) async fn prepare(
         children_titles,
         review_mode,
         parent_title,
+        later_titles,
         resumed_moves,
         resumed_content_html,
         resumed_move_index,
@@ -957,6 +970,17 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
 /// Retrieves grounding passages for a concept and formats them so the model can
 /// cite each by its exact id/locator (§10/§4.3). Returns "" when grounding is off
 /// or nothing relevant is indexed yet.
+///
+/// Callers pass the node's own concept title alone, never `{topic} {title}` —
+/// prepending the raw curriculum topic was found (2026-08-20, live QA on an
+/// "Epistemologia" document) to dominate the embedding query over the node's
+/// own title, pulling in grounding for the topic itself even on a
+/// prerequisite node meant to teach something standalone and different from
+/// it ("Familiarity with the concept of philosophy" retrieved only
+/// Epistemology passages, never the corpus's own Introduction to Philosophy
+/// source, which scored higher once the topic prefix was dropped). A node's
+/// own title is already a self-contained concept name (`propose_outline`'s
+/// contract, `engine/prompt.rs`) — the topic doesn't need to ride along.
 pub(super) async fn grounding_for(state: &AppState, query: &str) -> String {
     let Some(retriever) = &state.retriever else {
         return String::new();

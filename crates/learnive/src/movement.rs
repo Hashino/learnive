@@ -259,6 +259,21 @@ pub struct MoveContext {
     /// A prerequisite sub-node's prompt is told to stay out of it (§S15,
     /// `purpose`'s `scope_addendum`) — the parent gets its own node later.
     pub parent_title: Option<String>,
+    /// Titles of every OTHER outline item with no node generated for it yet
+    /// (`api::reading::prepare`'s `states` fold) — the counterpart to
+    /// `outline_context`'s already-taught list, naming what's NOT taught yet
+    /// so a move can be told to stay out of it. Added 2026-08-20 after live
+    /// QA on an "Epistemologia" document: `topic_scope_note`'s "teach the
+    /// node's own concept in full" and `scope_addendum`'s parent-only guard
+    /// left a gap for SIBLING/later outline items with no parent-child
+    /// relationship — a "belief" prerequisite node (objective: "distinguish
+    /// knowledge from mere belief") taught the Gettier problem and the
+    /// justified-true-belief analysis, which is the LATER "distinguishing
+    /// knowledge from mere belief" node's own material, because nothing told
+    /// it that node existed and was off-limits. `scope_addendum` only fires
+    /// for `parent_title` (§S15 decomposed sub-nodes); this field covers the
+    /// general case, any outline shape.
+    pub later_titles: Vec<String>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

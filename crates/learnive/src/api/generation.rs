@@ -112,6 +112,7 @@ pub async fn generate_node(
             children_titles: prep.children_titles.clone(),
             review_mode: prep.review_mode,
             parent_title: prep.parent_title.clone(),
+            later_titles: prep.later_titles.clone(),
             prior_moves: prep.resumed_moves.clone(),
             node_tail: resumed_tail,
             ..Default::default()
@@ -208,8 +209,7 @@ pub async fn generate_node(
                 }
                 ctx.research_attempted = true;
                 if outcome.grounded {
-                    ctx.grounding =
-                        grounding_for(&state, &format!("{} {}", ctx.topic, ctx.item_title)).await;
+                    ctx.grounding = grounding_for(&state, &ctx.item_title).await;
                 }
                 continue;
             }

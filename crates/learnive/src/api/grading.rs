@@ -241,7 +241,7 @@ pub async fn answer(
     // (b) A NEW gradeable problem in the sandbox, similar to the failed one and
     // grounded in the same sources (§8/§8.2). Its rubric is freshly locked and the
     // answer is never revealed (EXERCISE_HTML_CONTRACT).
-    let grounding = grounding_for(&state, &format!("{} {}", sidecar.topic, sidecar.title)).await;
+    let grounding = grounding_for(&state, &sidecar.title).await;
     let er = engine::generate_remediation_exercise(
         &ai,
         &sidecar.title,
