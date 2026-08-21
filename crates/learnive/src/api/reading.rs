@@ -697,6 +697,20 @@ fn resumed_ungraded_moves(
 /// one of this node's own `i` iterations or tagged content with this node's
 /// block-id prefix. Counting it here overcounts the resume index by one per
 /// question asked while the node sits paused between moves.
+///
+/// Does NOT exclude `explain`/`test` the same way for §8.2 remediation
+/// (`api/grading.rs::answer`, also a wholly separate handler that appends
+/// its own `MoveGenerated` under this node_id) — checked, not overlooked:
+/// remediation only ever fires after this node's graded `Test` move has
+/// already settled, and settling that move runs `finalize` in the same
+/// request, which appends `NodeGenerated` before any submission can reach
+/// remediation. `prepare`'s finalized-node refusal (this file, "Also
+/// refuses regenerating a node that has already been finalized") means a
+/// node carrying remediation events can never reach this function through
+/// `/generate` again — so no exclusion is needed today. If that refusal is
+/// ever loosened (e.g. to let remediation reopen a finalized node in
+/// place), this function needs the same `move_type`-based exclusion
+/// `respond` already has, or remediation reintroduces this exact stall.
 fn resumed_move_index(events: impl Iterator<Item = crate::events::Event>, node_id: &str) -> usize {
     events
         .filter(|e| e.node_id.as_deref() == Some(node_id))
