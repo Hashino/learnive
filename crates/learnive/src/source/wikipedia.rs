@@ -155,10 +155,12 @@ impl WikipediaSource {
                 if text.is_empty() {
                     return None;
                 }
+                let html = super::sanitize_html(&body_html);
                 Some(Section {
                     locator: format!("sec:{}", i + 1),
                     title: heading,
                     text,
+                    html,
                 })
             })
             .collect();

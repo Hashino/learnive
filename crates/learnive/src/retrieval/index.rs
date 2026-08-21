@@ -290,6 +290,7 @@ mod tests {
                         text: "A limit describes the value that a function approaches as the \
                                input approaches some value. Limits are the foundation of calculus."
                             .into(),
+                        html: String::new(),
                     },
                     Section {
                         locator: "sec:3.1".into(),
@@ -297,6 +298,7 @@ mod tests {
                         text: "A derivative measures the instantaneous rate of change of a \
                                function, defined via a limit of average rates of change."
                             .into(),
+                        html: String::new(),
                     },
                 ],
             })

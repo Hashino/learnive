@@ -204,6 +204,7 @@ mod tests {
                 locator: "chap:2;sec:1".into(),
                 title: "The Limit of a Function".into(),
                 text: "A limit describes the value a function approaches.".into(),
+                html: "<p>A limit describes the value a function approaches.</p>".into(),
             }],
         }
     }
@@ -231,6 +232,50 @@ mod tests {
         let manifest = fs::read_to_string(dir.join("corpus/SOURCES.md")).unwrap();
         assert!(manifest.contains("Calculus, Volume 1"));
         assert!(manifest.contains("CC BY 4.0"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §S19 item 1 regression: `Section` gained `html` with `#[serde(default)]`
+    /// specifically so every `source.json` already on disk (written before this
+    /// field existed) keeps loading — a source is fetched once and reused
+    /// (§4/§11 immutable corpus), so this file predates the field permanently
+    /// until an explicit re-ingest/completion pass (§11.1 item 6) backfills it.
+    #[test]
+    fn loads_a_pre_html_field_source_json_without_the_html_key() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-corpus-oldshape-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus_dir = dir.join("corpus").join("old-source-1234");
+        fs::create_dir_all(&corpus_dir).unwrap();
+        fs::write(
+            corpus_dir.join("source.json"),
+            r#"{
+                "meta": {
+                    "id": "old-source-1234",
+                    "title": "Integral",
+                    "authors": ["Wikipedia contributors"],
+                    "kind": "article",
+                    "license": "CC BY-SA 4.0",
+                    "origin": {"backend": "wikipedia"}
+                },
+                "sections": [
+                    {"locator": "sec:1", "title": "Introduction", "text": "An integral sums infinitesimal pieces."}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let corpus = Corpus::open(&dir).unwrap();
+        let loaded = corpus.load("old-source-1234").unwrap();
+        assert_eq!(
+            loaded.sections[0].text,
+            "An integral sums infinitesimal pieces."
+        );
+        assert_eq!(
+            loaded.sections[0].html, "",
+            "missing key defaults to empty, not a decode error"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

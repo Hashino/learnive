@@ -203,17 +203,19 @@ impl OpenStaxSource {
                 let url = format!("{base_page}{}.json", p.uuid);
                 async move {
                     let body = self.get_json(&url).await.ok()?;
-                    let html = body.get("content").and_then(Value::as_str)?;
-                    let text = super::normalize_html(html, SECTION_TEXT_CAP);
+                    let raw_html = body.get("content").and_then(Value::as_str)?;
+                    let text = super::normalize_html(raw_html, SECTION_TEXT_CAP);
                     if text.is_empty() {
                         return None;
                     }
+                    let html = super::sanitize_html(raw_html);
                     Some((
                         idx,
                         Section {
                             locator: p.locator,
                             title: p.title,
                             text,
+                            html,
                         },
                     ))
                 }

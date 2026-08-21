@@ -27,6 +27,58 @@ pub use mock::MockSource;
 pub use openstax::OpenStaxSource;
 pub use wikipedia::WikipediaSource;
 
+/// MathML tags a source may deliver (OpenStax; LibreTexts's LaTeX is
+/// converted to MathML separately by `learnive_core::math` at freeze time) —
+/// not in `ammonia`'s prose-oriented default whitelist, so listed explicitly.
+const MATHML_TAGS: &[&str] = &[
+    "math",
+    "mi",
+    "mn",
+    "mo",
+    "mrow",
+    "mfrac",
+    "msup",
+    "msub",
+    "msubsup",
+    "msqrt",
+    "mroot",
+    "mtable",
+    "mtr",
+    "mtd",
+    "mtext",
+    "mspace",
+    "mstyle",
+    "menclose",
+    "mpadded",
+    "mphantom",
+    "mfenced",
+    "munder",
+    "mover",
+    "munderover",
+    "semantics",
+    "annotation",
+    "mmultiscripts",
+    "mprescripts",
+    "none",
+];
+
+/// Sanitizes acquired source HTML **once, at ingestion** (§11.1 item 2) —
+/// before it is ever stored in the corpus or reaches a browser. Beyond
+/// `ammonia`'s default whitelist (already covers headings, lists, tables,
+/// `figure`/`figcaption`, `code`/`pre`, `sub`/`sup`, and `img[src]`) this adds
+/// the `<math>` subtree so OpenStax's MathML survives. `img[src]` is kept
+/// pointed at the remote host for now — downloading figures into the corpus
+/// is a separate follow-up (§11.1 item 5); dropping the attribute today would
+/// make any source where the figure IS the content (physics, geometry)
+/// useless in the reader before that lands.
+pub(crate) fn sanitize_html(html: &str) -> String {
+    ammonia::Builder::default()
+        .add_tags(MATHML_TAGS)
+        .add_generic_attributes(["mathvariant", "display", "xmlns", "columnalign", "rowalign"])
+        .clean(html)
+        .to_string()
+}
+
 /// HTML → plain text via the `html2text` crate, whitespace collapsed to
 /// single spaces (rendered line-wrapping is irrelevant for retrieval) and
 /// truncated to `cap` chars so the corpus stays lean (retrieval chunks it
@@ -120,6 +172,16 @@ pub struct Section {
     pub title: String,
     /// Extracted plain text — the normalization target used for retrieval (§10).
     pub text: String,
+    /// Sanitized HTML (§11.1 item 1/2, S19) — what the real reader (item 7)
+    /// and passage deep-linking (item 8, `learnive_core::anchor::resolve_quote`
+    /// against this field) will render/resolve against, instead of `text`'s
+    /// flattened prose. `#[serde(default)]`: every source already in the
+    /// corpus before this field existed has no `html` in its `source.json` —
+    /// they deserialize with an empty string here rather than failing to
+    /// load, and stay readable (via `text`) until a completion/re-ingest pass
+    /// (§11.1 item 6) backfills them.
+    #[serde(default)]
+    pub html: String,
 }
 
 /// A source after acquisition, **normalized** (§11.1): metadata + addressable
@@ -248,6 +310,54 @@ pub(crate) fn corpus_id(title: &str, disambiguator: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_html_drops_script_but_keeps_structural_whitelist() {
+        let html = r#"<script>alert('xss')</script>
+            <h2>Limits</h2>
+            <p onclick="evil()">A <strong>limit</strong> describes a value.</p>
+            <ul><li>First</li><li>Second</li></ul>
+            <table><tr><td>1</td></tr></table>
+            <figure><img src="https://openstax.org/fig.png" alt="graph"><figcaption>Fig 1</figcaption></figure>
+            <code>x + 1</code>
+            <sub>n</sub><sup>2</sup>"#;
+        let clean = sanitize_html(html);
+        assert!(
+            !clean.contains("<script"),
+            "script tag must be removed: {clean}"
+        );
+        assert!(
+            !clean.contains("alert"),
+            "script content must be removed: {clean}"
+        );
+        assert!(
+            !clean.contains("onclick"),
+            "event handler attribute must be stripped: {clean}"
+        );
+        assert!(clean.contains("<h2>Limits</h2>"));
+        assert!(clean.contains("<strong>limit</strong>"));
+        assert!(clean.contains("<li>First</li>"));
+        assert!(clean.contains("<table>"));
+        assert!(clean.contains("<figure>") && clean.contains("<figcaption>Fig 1</figcaption>"));
+        assert!(
+            clean.contains(r#"src="https://openstax.org/fig.png""#),
+            "img src kept until asset download lands: {clean}"
+        );
+        assert!(clean.contains("<code>x + 1</code>"));
+        assert!(clean.contains("<sub>n</sub>") && clean.contains("<sup>2</sup>"));
+    }
+
+    #[test]
+    fn sanitize_html_keeps_mathml_subtree() {
+        let html = r#"<p>The area is <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <mrow><mi>A</mi><mo>=</mo><msup><mi>r</mi><mn>2</mn></msup></mrow>
+            </math>.</p>"#;
+        let clean = sanitize_html(html);
+        assert!(clean.contains("<math"));
+        assert!(clean.contains("<msup>"));
+        assert!(clean.contains("<mi>r</mi>"));
+        assert!(clean.contains("<mn>2</mn>"));
+    }
 
     #[test]
     fn corpus_id_is_slug_plus_stable_hash() {

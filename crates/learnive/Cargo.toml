@@ -20,6 +20,9 @@ serde_json = "1"
 arc-swap = "1"
 # Source normalization (§11.1): acquired HTML → extracted text.
 html2text = "0.17"
+# Source ingestion sanitization (§11.1/S19): whitelist acquired HTML once,
+# at ingestion, before it's stored in the corpus or ever reaches a browser.
+ammonia = "4"
 # Retrieval layer (§10): semantic embeddings (static, no onnxruntime) + chunking.
 model2vec-rs = "0.2"
 text-splitter = "0.32"

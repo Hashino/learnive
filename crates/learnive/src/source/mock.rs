@@ -43,24 +43,32 @@ impl MockSource {
             .to_string();
         let id = corpus_id(&hit.title, "mock");
         let sections = vec![
-            Section {
-                locator: "chap:1;sec:1".into(),
-                title: format!("What is {topic}?"),
-                text: format!(
+            {
+                let text = format!(
                     "{topic} is a foundational idea. This section introduces its core \
                      definition and the vocabulary used to talk about it, grounding the \
                      learner before any exercise. A worked intuition precedes the formal \
                      statement so the concept is met concretely first."
-                ),
+                );
+                Section {
+                    locator: "chap:1;sec:1".into(),
+                    title: format!("What is {topic}?"),
+                    html: format!("<p>{text}</p>"),
+                    text,
+                }
             },
-            Section {
-                locator: "chap:1;sec:2".into(),
-                title: format!("Why {topic} matters"),
-                text: format!(
+            {
+                let text = format!(
                     "Building on the definition, this section shows where {topic} is used \
                      and connects it to adjacent concepts, so the learner integrates it \
                      rather than memorizing it in isolation."
-                ),
+                );
+                Section {
+                    locator: "chap:1;sec:2".into(),
+                    title: format!("Why {topic} matters"),
+                    html: format!("<p>{text}</p>"),
+                    text,
+                }
             },
         ];
         Ok(FetchedSource {
