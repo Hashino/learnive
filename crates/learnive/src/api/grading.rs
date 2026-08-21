@@ -285,7 +285,12 @@ pub async fn answer(
     ) {
         eprintln!("event log append failed: {e}");
     }
-    let explanation = explain_move.html;
+    // Rendered here, not at assembly: this prose lands in the interaction
+    // layer as `body_html`/`remediation_html` and never passes through
+    // `assemble_node`, which is where every other path picks up math
+    // rendering (same reasoning `tag_move_html` documents for the
+    // content-layer per-move path).
+    let explanation = render_math(&explain_move.html);
 
     // (b) A NEW gradeable problem in the sandbox, similar to the failed one and
     // grounded in the same sources (§8/§8.2). Its rubric is freshly locked and the

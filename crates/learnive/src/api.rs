@@ -25,7 +25,7 @@ use axum::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use learnive_core::{Anchor, InteractionItem, Node, ThreadKind, ensure_block_ids};
+use learnive_core::{Anchor, InteractionItem, Node, ThreadKind, ensure_block_ids, render_math};
 
 use crate::ai::{Ai, MockProvider, Models, OpenAiCompat, Provider, Tier};
 use crate::app::AppState;

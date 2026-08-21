@@ -349,8 +349,13 @@ pub async fn ask_question(
             // the same `{id}-b{n}` scheme the content layer uses: an answer is
             // several paragraphs and the learner asks about *one* of them, so
             // it has to be addressable at that grain (§4.3) rather than as one
-            // undifferentiated blob.
-            let answer_html = ensure_block_ids(&generated.html, &format!("{move_id}-b"));
+            // undifferentiated blob. This body never passes through
+            // `assemble_node`/`assemble_content_node` (it lands in the
+            // interaction layer, not the content layer), so `render_math`
+            // has to run explicitly here — the same reason `tag_move_html`
+            // exists for the content-layer per-move path.
+            let answer_html =
+                ensure_block_ids(&render_math(&generated.html), &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
                 question_header(question, &body.anchor, locale)

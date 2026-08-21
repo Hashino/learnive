@@ -484,11 +484,17 @@ fn remediation_addendum(ctx: &MoveContext, move_type: MoveType) -> String {
              explain: walk through the worked solution to the SPECIFIC \
              problem the learner just missed, step by step, pointing at \
              exactly where their reasoning likely went wrong given what they \
-             submitted. Higher attempt numbers should be more heavily \
-             scaffolded — spell out more of the steps directly rather than \
-             prompting the learner to find them. Do NOT pose a new problem \
-             here and do NOT state the answer to the exercise that follows — \
-             a separate practice problem is generated as its own move.{no_echo}\n\
+             submitted. \"Node content so far\" below is what the learner \
+             already read — do NOT re-explain anything it already covers; \
+             stay tightly focused on correcting THIS mistake. Only add new \
+             conceptual explanation for the specific point behind the \
+             student's error if it wasn't covered there, or was covered too \
+             thinly to account for this particular mistake. Higher attempt \
+             numbers should be more heavily scaffolded — spell out more of \
+             the steps directly rather than prompting the learner to find \
+             them. Do NOT pose a new problem here and do NOT state the \
+             answer to the exercise that follows — a separate practice \
+             problem is generated as its own move.{no_echo}\n\
              The problem they missed:\n{failed}\n\
              Objectives not yet demonstrated:\n{unmet}"
         ),

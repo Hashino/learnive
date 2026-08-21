@@ -1203,6 +1203,87 @@ async fn reading_interactions_ask_annotate_and_read_to_end() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// §S17 regression: `Respond`'s inline `/ask` answer lands in the
+/// interaction layer (`body_html`), which never passes through
+/// `assemble_node`/`assemble_content_node` — so unlike every content-layer
+/// move, `render_math` isn't picked up for free at assembly and has to run
+/// explicitly at the `/ask` call site. Caught by review, not by the test
+/// suite, when `S17` first unified this path onto the move ABI and dropped
+/// the call that used to live in the deleted `engine::answer_question`.
+#[tokio::test]
+async fn ask_answer_renders_math_before_storing() {
+    use crate::ai::{Ai, MockProvider, Models, Provider};
+
+    let scripted = Provider::Mock(MockProvider::scripted(|req| {
+        let text = req
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.contains("<!--tactics:") {
+            return "<p>Half is $\\frac{1}{2}$ of the whole.</p>\n<!--tactics: analogy-->"
+                .to_string();
+        }
+        crate::api::demo_responder(req)
+    }));
+    let ai = Ai::new(scripted, Models::single("ask-math-demo"));
+    let state = test_state_with_ai(ai);
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content_html = view["content_html"].as_str().unwrap();
+    let block_id = content_html
+        .split("data-block-id=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("at least one frozen block")
+        .to_string();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
+        &format!(r#"{{"question":"why half?","anchor":{{"block_id":"{block_id}"}}}}"#),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ask: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ask_html = ask["body_html"].as_str().unwrap();
+    assert!(
+        ask_html.contains("<math"),
+        "expected rendered MathML in stored answer, got: {ask_html}"
+    );
+    // The literal `$...$` delimiters are gone (MathML's own `<annotation>`
+    // still carries the raw LaTeX as text, per `render_math`'s contract).
+    assert!(!ask_html.contains("$\\frac"));
+}
+
 /// §S7 — evidence profile: a node closing (demonstrated) is the "fechar
 /// nó" distillation trigger (§7.1). Exercises the whole chain through the
 /// real router + demo_responder (which has a dedicated branch for the
