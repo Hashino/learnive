@@ -311,6 +311,40 @@ pub(crate) fn corpus_id(title: &str, disambiguator: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Advisor-flagged risk: `xmlns` was added as a *generic* attribute, so
+    /// it's allowed on every whitelisted tag, not just `<math>`. A foreign
+    /// namespace declared on an ordinary HTML element is the classic
+    /// content-confusion sanitizer bypass shape — check it doesn't actually
+    /// let a script/handler through, and that `annotation-xml` (excluded on
+    /// purpose, see `MATHML_TAGS`'s doc comment) stays excluded so nobody
+    /// "completes" the MathML tag list later and reopens it.
+    #[test]
+    fn sanitize_html_xmlns_does_not_smuggle_scripts() {
+        let via_div = sanitize_html(
+            r#"<div xmlns="http://www.w3.org/2000/svg"><style><img src=1 onerror=alert(1)></style></div>"#,
+        );
+        assert!(
+            !via_div.contains("onerror"),
+            "handler smuggled via div/svg xmlns: {via_div}"
+        );
+        assert!(
+            !via_div.to_lowercase().contains("<style"),
+            "style tag smuggled: {via_div}"
+        );
+
+        let via_annotation = sanitize_html(
+            r#"<math><annotation-xml encoding="text/html"><img src=1 onerror=alert(1)></annotation-xml></math>"#,
+        );
+        assert!(
+            !via_annotation.contains("annotation-xml"),
+            "annotation-xml must stay outside the whitelist: {via_annotation}"
+        );
+        assert!(
+            !via_annotation.contains("onerror"),
+            "handler smuggled via annotation-xml: {via_annotation}"
+        );
+    }
+
     #[test]
     fn sanitize_html_drops_script_but_keeps_structural_whitelist() {
         let html = r#"<script>alert('xss')</script>
