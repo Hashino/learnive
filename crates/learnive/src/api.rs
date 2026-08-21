@@ -96,6 +96,12 @@ struct RubricSidecar {
     move_id: String,
     rubric: Rubric,
     exercise_html: String,
+    /// The model's worked solution to `exercise_html` (S16) — server-only,
+    /// like the rest of this sidecar; `#[serde(default)]` so a sidecar
+    /// written before this field existed still deserializes, with `grade()`
+    /// degrading to rubric-only grading for it.
+    #[serde(default)]
+    reference_solution: String,
     title: String,
     topic: String,
 }

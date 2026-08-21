@@ -508,12 +508,17 @@ pub fn generate_move(
              short kebab-case tags, in the SAME call (§7).\n\n\
              Respond ONLY with the Move JSON contract: \
              {{\"html\":\"...\",\"interactive\":true|false,\"graded\":true|\
-             false,\"tactics\":[\"...\"],\"objectives\":[{{\"id\":\"o1\",\
+             false,\"tactics\":[\"...\"],\"reference_solution\":\"...\",\
+             \"objectives\":[{{\"id\":\"o1\",\
              \"kind\":\"knowledge|application|synthesis\",\"description\":\
              \"...\",\"criteria\":\"...\",\"transfer\":true|false}}],\
              \"outline\":[\"...\"]}}. Omit \"objectives\" (or leave it empty) \
              when graded=false. Omit \"outline\" (or leave it empty) for every \
-             move type except \"plan\" with a concrete structural change.",
+             move type except \"plan\" with a concrete structural change. \
+             Omit \"reference_solution\" when graded=false; when graded=true \
+             (a \"test\" move) it is REQUIRED — the worked-out correct answer \
+             to the exact task in html, server-only, never shown to the \
+             student (see the exercise contract below for why).",
             purpose(move_type, ctx),
             continuity_note(),
             topic_scope_note()

@@ -281,14 +281,19 @@ mod tests {
     }
 
     #[test]
-    fn tactic_outcomes_joins_generated_and_graded() {
+    fn tactic_outcomes_joins_by_node_not_move_id() {
+        // S16: the bug this locks in — `MoveGraded` is always appended with
+        // the *test* move's own id, so a teaching move (explain) generated
+        // earlier in the SAME node, under a DIFFERENT move_id, must still
+        // get credited when that node's test is graded. A move_id-keyed
+        // join would only ever see "testar"'s own tactics here.
         let dir = tempfile::tempdir().unwrap();
         let log = EventLog::new(dir.path().join("events.jsonl"));
 
         log.append(
-            None,
+            Some("n1"),
             EventKind::MoveGenerated {
-                move_id: "m1".into(),
+                move_id: "m1-explain".into(),
                 move_type: "explicar".into(),
                 tactics: vec!["analogy".into(), "worked-example".into()],
                 rung: "l1".into(),
@@ -296,17 +301,31 @@ mod tests {
         )
         .unwrap();
         log.append(
-            None,
+            Some("n1"),
+            EventKind::MoveGenerated {
+                move_id: "m1-test".into(),
+                move_type: "testar".into(),
+                tactics: vec!["formal-first".into()],
+                rung: "l1".into(),
+            },
+        )
+        .unwrap();
+        // MoveGraded always carries the id of the move actually graded
+        // (the test), never the explain that preceded it — this is the
+        // real shape `api/grading.rs` produces.
+        log.append(
+            Some("n1"),
             EventKind::MoveGraded {
-                move_id: "m1".into(),
+                move_id: "m1-test".into(),
                 grade: Grade::Demonstrated,
             },
         )
         .unwrap();
+
         log.append(
-            None,
+            Some("n2"),
             EventKind::MoveGenerated {
-                move_id: "m2".into(),
+                move_id: "m2-test".into(),
                 move_type: "testar".into(),
                 tactics: vec!["analogy".into()],
                 rung: "l1".into(),
@@ -314,16 +333,16 @@ mod tests {
         )
         .unwrap();
         log.append(
-            None,
+            Some("n2"),
             EventKind::MoveGraded {
-                move_id: "m2".into(),
+                move_id: "m2-test".into(),
                 grade: Grade::Partial,
             },
         )
         .unwrap();
         // A generated move with no grade yet (still open) must not appear.
         log.append(
-            None,
+            Some("n3"),
             EventKind::MoveGenerated {
                 move_id: "m3".into(),
                 move_type: "explicar".into(),
@@ -334,17 +353,80 @@ mod tests {
         .unwrap();
 
         let table = aggregate::tactic_outcomes(log.iter().unwrap());
+        // The explain-move tactics from n1 are credited, via the node join,
+        // even though MoveGraded named the test move, not them.
         let analogy = table.get("analogy").unwrap();
         assert_eq!(analogy.demonstrated, 1);
         assert_eq!(analogy.partial, 1);
-
         let worked = table.get("worked-example").unwrap();
         assert_eq!(worked.demonstrated, 1);
+        let formal = table.get("formal-first").unwrap();
+        assert_eq!(
+            formal.demonstrated, 1,
+            "the test move's own tactics still count"
+        );
 
         assert!(
             !table.contains_key("interactive-visual"),
             "ungraded moves contribute no evidence yet"
         );
+    }
+
+    #[test]
+    fn tactic_outcomes_does_not_double_credit_across_grading_cycles() {
+        // A node graded twice (e.g. a later review) must only credit what
+        // was generated since the PREVIOUS grade, never re-credit the same
+        // tactics on the second grading event.
+        let dir = tempfile::tempdir().unwrap();
+        let log = EventLog::new(dir.path().join("events.jsonl"));
+
+        log.append(
+            Some("n1"),
+            EventKind::MoveGenerated {
+                move_id: "m1".into(),
+                move_type: "testar".into(),
+                tactics: vec!["analogy".into()],
+                rung: "l1".into(),
+            },
+        )
+        .unwrap();
+        log.append(
+            Some("n1"),
+            EventKind::MoveGraded {
+                move_id: "m1".into(),
+                grade: Grade::Partial,
+            },
+        )
+        .unwrap();
+        log.append(
+            Some("n1"),
+            EventKind::MoveGenerated {
+                move_id: "m2".into(),
+                move_type: "testar".into(),
+                tactics: vec!["worked-example".into()],
+                rung: "l1".into(),
+            },
+        )
+        .unwrap();
+        log.append(
+            Some("n1"),
+            EventKind::MoveGraded {
+                move_id: "m2".into(),
+                grade: Grade::Demonstrated,
+            },
+        )
+        .unwrap();
+
+        let table = aggregate::tactic_outcomes(log.iter().unwrap());
+        let analogy = table.get("analogy").unwrap();
+        assert_eq!(analogy.partial, 1);
+        assert_eq!(
+            analogy.demonstrated, 0,
+            "already credited on the first grade"
+        );
+        let worked = table.get("worked-example").unwrap();
+        assert_eq!(worked.demonstrated, 1);
+        assert_eq!(worked.partial, 0);
     }
 
     #[test]

@@ -188,6 +188,15 @@ impl Assessment {
 pub struct ExerciseAndRubric {
     pub exercise_html: String,
     pub rubric: Rubric,
+    /// The model's own worked-out solution to the exact task it just wrote
+    /// (S16) — server-only, never sent to the client. Grading against this
+    /// instead of the rubric alone closes the leniency gap `EXERCISE_HTML_
+    /// CONTRACT` already half-solved: the model was already computing this
+    /// to write correct criteria, just discarding it afterward. May be
+    /// empty for model output that predates this field (defaulted, not
+    /// required, in the parser) — `grade()` degrades to rubric-only grading
+    /// in that case, same as before this slice.
+    pub reference_solution: String,
 }
 
 /// Engine errors.
@@ -326,17 +335,26 @@ pub async fn propose_outline(
 }
 
 /// Grades an answer against the locked rubric (§8). Light tier.
+///
+/// `reference_solution` (S16) is the model's own worked-out answer to
+/// `exercise_html`, captured at generation time and never shown to the
+/// student — grading against it closes the LLM-as-grader leniency gap
+/// (`prompt::grading`'s doc comment has the instruction not to leak it back
+/// through feedback). May be empty (a sidecar written before this field
+/// existed, or a model that omitted it) — `prompt::grading` degrades to
+/// rubric-only grading in that case, same behavior as before this slice.
 pub async fn grade(
     ai: &Ai,
     rubric: &Rubric,
     exercise_html: &str,
     answer: &str,
+    reference_solution: &str,
     locale: crate::locale::Locale,
 ) -> Result<Assessment, EngineError> {
     let text = collect(
         ai,
         Tier::Fast,
-        prompt::grading(rubric, exercise_html, answer, locale),
+        prompt::grading(rubric, exercise_html, answer, reference_solution, locale),
     )
     .await?;
     parse::assessment(&text)
@@ -846,6 +864,19 @@ mod tests {
         assert_eq!(er.rubric.objectives.len(), 1);
         assert_eq!(er.rubric.objectives[0].kind, ObjectiveType::Application);
         assert!(er.rubric.objectives[0].transfer);
+        // S16: missing reference_solution (model output that predates the
+        // field, or a repair round that dropped it) degrades to empty
+        // rather than a parse failure.
+        assert_eq!(er.reference_solution, "");
+    }
+
+    /// S16: the field the leniency fix depends on actually round-trips.
+    #[test]
+    fn parse_exercise_rubric_captures_reference_solution() {
+        let text = r#"{"exercise_html":"<form></form>","reference_solution":"x = 42",
+ "objectives":[{"id":"o1","kind":"application","description":"apply","criteria":"c"}]}"#;
+        let er = parse::exercise_rubric(text).unwrap();
+        assert_eq!(er.reference_solution, "x = 42");
     }
 
     #[test]
@@ -1121,8 +1152,37 @@ mod tests {
 
         let rubric = Rubric { objectives: vec![] };
         let grading_pt =
-            &prompt::grading(&rubric, "<form></form>", "answer", Locale::PtBr)[0].content;
+            &prompt::grading(&rubric, "<form></form>", "answer", "", Locale::PtBr)[0].content;
         assert!(grading_pt.contains("Brazilian Portuguese"));
+    }
+
+    /// S16: `grade()` grading against a concrete answer key, not just rubric
+    /// prose, is the leniency fix — and the model must be told never to
+    /// hand that key back to the student through its own feedback text.
+    #[test]
+    fn grading_prompt_includes_reference_solution_with_a_no_leak_instruction() {
+        let rubric = Rubric { objectives: vec![] };
+        let with_solution = prompt::grading(
+            &rubric,
+            "<form></form>",
+            "my answer",
+            "the answer is 42",
+            crate::locale::Locale::En,
+        );
+        assert!(with_solution[1].content.contains("the answer is 42"));
+        assert!(with_solution[0].content.to_lowercase().contains("never"));
+
+        // Empty reference_solution (older sidecar / model omitted it)
+        // degrades cleanly — no dangling "Reference solution: " with
+        // nothing after it.
+        let without_solution = prompt::grading(
+            &rubric,
+            "<form></form>",
+            "my answer",
+            "",
+            crate::locale::Locale::En,
+        );
+        assert!(!without_solution[1].content.contains("Reference solution"));
     }
 
     /// Shared by the live quality-iteration probes below: builds the REAL
@@ -1317,6 +1377,7 @@ mod tests {
             &rubric,
             "<form></form>",
             "my answer",
+            "",
             crate::locale::Locale::En,
         )
         .await

@@ -63,6 +63,8 @@ pub fn exercise_rubric(text: &str) -> Result<ExerciseAndRubric, EngineError> {
     #[derive(Deserialize)]
     struct Raw {
         exercise_html: String,
+        #[serde(default)]
+        reference_solution: String,
         objectives: Vec<RawObjective>,
     }
     #[derive(Deserialize)]
@@ -84,6 +86,7 @@ pub fn exercise_rubric(text: &str) -> Result<ExerciseAndRubric, EngineError> {
     let raw: Raw = serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
     Ok(ExerciseAndRubric {
         exercise_html: raw.exercise_html,
+        reference_solution: raw.reference_solution,
         rubric: Rubric {
             objectives: raw
                 .objectives

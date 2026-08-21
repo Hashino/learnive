@@ -296,6 +296,12 @@ pub struct GeneratedMove {
     pub tactics: Vec<String>,
     /// Present iff `graded` — locked together with the move (§8).
     pub rubric: Option<Rubric>,
+    /// The model's own worked solution to the exact task in `html` (S16) —
+    /// server-only, never sent to the client. Empty for a non-graded move
+    /// (the schema doesn't ask for one) and for model output that predates
+    /// this field; see `engine::ExerciseAndRubric::reference_solution` for
+    /// why it exists and `engine::grade`'s degrade-when-empty behavior.
+    pub reference_solution: String,
     /// The revised outline titles a `plan` move proposes (§S4/§5) — the
     /// model computes the diff, not Rust. Empty for every other move type,
     /// and empty for a `plan` move that only remarks in prose without a
@@ -513,6 +519,7 @@ pub fn finish_streamed_move(move_type: MoveType, accumulated: &str) -> Generated
         html,
         tactics,
         rubric: None,
+        reference_solution: String::new(),
         proposed_outline: Vec::new(),
         repaired: false,
     }
@@ -1121,6 +1128,29 @@ mod tests {
         assert!(sys.contains("postMessage"));
         assert!(sys.contains("sandbox"));
         assert!(sys.contains("MUST be graded"));
+    }
+
+    /// S16: a `test` move's `reference_solution` round-trips off the wire
+    /// into `GeneratedMove`, and is empty (not an error) when the model
+    /// omits it — the same degrade-gracefully contract as `rubric`/
+    /// `objectives` already have.
+    #[test]
+    fn generated_move_parses_reference_solution() {
+        let with_solution = parse::generated_move(
+            MoveType::Test,
+            r#"{"html":"<form></form>","graded":true,"reference_solution":"x=42",
+               "objectives":[{"id":"o1","kind":"application","description":"d","criteria":"c"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with_solution.reference_solution, "x=42");
+
+        let without_solution = parse::generated_move(
+            MoveType::Test,
+            r#"{"html":"<form></form>","graded":true,
+               "objectives":[{"id":"o1","kind":"application","description":"d","criteria":"c"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(without_solution.reference_solution, "");
     }
 
     #[test]

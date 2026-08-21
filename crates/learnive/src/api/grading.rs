@@ -162,6 +162,7 @@ pub async fn answer(
         &sidecar.rubric,
         &sidecar.exercise_html,
         &body.answer,
+        &sidecar.reference_solution,
         locale,
     )
     .await?;
@@ -285,6 +286,7 @@ pub async fn answer(
         move_id: new_move_id,
         rubric: er.rubric,
         exercise_html: er.exercise_html.clone(),
+        reference_solution: er.reference_solution.clone(),
         title: sidecar.title.clone(),
         topic: sidecar.topic.clone(),
     };

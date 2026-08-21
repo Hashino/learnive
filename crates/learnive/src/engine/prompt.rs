@@ -145,6 +145,12 @@ solution itself still never appears in exercise_html, per the reveal rule above)
 Criteria invented in parallel with the question, rather than derived from actually \
 solving it, is how a rubric ends up grading a different answer than the one the \
 exercise itself calls for.\n\
+CRITICAL: put that worked-out solution in a \"reference_solution\" field of your JSON \
+response (server-only — never sent to the student, never rendered in exercise_html). \
+You already have to compute it to write correct criteria; this just keeps it instead of \
+throwing it away. It becomes the answer key an automated grader checks the student's \
+submission against, so state it as the concrete correct answer to the exact task \
+(the specific number/option/derivation/output), not a restatement of the objective.\n\
 CRITICAL: ground the exercise in what the student was actually taught, in a scenario \
 the student hasn't already seen. Every objective must test a concept, fact, or \
 procedure that appears in the content/context given to you above (what the node has \
@@ -555,7 +561,8 @@ pub fn remediation_exercise(
              numbers/scenario), similar to the failed one — attempt {attempt}: the \
              higher it is, the closer to the worked example (more scaffolding). \
              Respond ONLY with JSON: \
-             {{\"exercise_html\":\"<form>...</form>\",\"objectives\":[{{\"id\":\"o1\",\
+             {{\"exercise_html\":\"<form>...</form>\",\"reference_solution\":\"...\",\
+             \"objectives\":[{{\"id\":\"o1\",\
              \"kind\":\"knowledge|application|synthesis\",\"description\":\"...\",\
              \"criteria\":\"what counts as demonstrated\",\"transfer\":true|false}}]}}.\n\n\
              {lang}\n\n{EXERCISE_HTML_CONTRACT}"
@@ -568,24 +575,47 @@ pub fn remediation_exercise(
     ]
 }
 
+/// `reference_solution` (S16) is the answer key computed at generation time
+/// (`EXERCISE_HTML_CONTRACT`) — grading against a concrete solution, not
+/// just the rubric's prose criteria, is the leniency fix. Deliberately
+/// instructed never to leak it back through feedback: the student can see
+/// the feedback text (remediation may show the same exercise again), so
+/// restating the reference solution there would hand out the answer through
+/// the one channel meant to grade it.
 pub fn grading(
     rubric: &Rubric,
     exercise_html: &str,
     answer: &str,
+    reference_solution: &str,
     locale: Locale,
 ) -> Vec<ChatMessage> {
     let rubric_json = serde_json::to_string(rubric).unwrap_or_default();
     let lang = language_directive(locale);
+    let solution_block = if reference_solution.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nReference solution (for YOUR evaluation only — the student never sees \
+             this; do NOT quote, paraphrase, or otherwise reveal it in \"feedback\", \
+             even to explain a wrong answer): {reference_solution}"
+        )
+    };
     vec![
         ChatMessage::system(format!(
             "Grade the student's answer AGAINST the locked rubric, without leniency \
-             (§8). For each objective give the grade {{not_demonstrated|partial|\
-             demonstrated}} and short feedback. Respond ONLY with JSON: \
+             (§8). When a reference solution is given below, use it as the answer key — \
+             a submission that doesn't match it on the graded specifics fails that \
+             objective regardless of how confident or well-written it sounds; do not \
+             award credit for reasoning that merely sounds plausible. For each \
+             objective give the grade {{not_demonstrated|partial|demonstrated}} and \
+             short feedback that never restates the reference solution itself. \
+             Respond ONLY with JSON: \
              {{\"grades\":[{{\"objective_id\":\"o1\",\"grade\":\"...\",\
              \"feedback\":\"...\"}}]}}.\n\n{lang}"
         )),
         ChatMessage::user(format!(
-            "Rubric: {rubric_json}\nExercise: {exercise_html}\nStudent's answer: {answer}"
+            "Rubric: {rubric_json}\nExercise: {exercise_html}{solution_block}\n\
+             Student's answer: {answer}"
         )),
     ]
 }

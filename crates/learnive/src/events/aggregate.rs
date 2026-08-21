@@ -14,20 +14,40 @@ pub struct TacticOutcome {
     pub not_demonstrated: u32,
 }
 
-/// Joins each `MoveGenerated`'s tactics with the `MoveGraded` that
-/// follows for the same `move_id`, one pass over the log.
+/// Joins each `MoveGenerated`'s tactics with the outcome of its **node**
+/// (S16, 2026-08-21 — fixes a join-key bug, not a schema change). Keyed on
+/// `node_id`, not `move_id`: `MoveGraded` is appended in exactly one place
+/// in the whole codebase (`api/grading.rs`), always with the id of the
+/// **test** move being graded — so a `move_id`-keyed join only ever credits
+/// test-move tactics, and every teaching move that precedes the test in the
+/// same node (`explain`/`ask`/`confront`, the ones that actually carry
+/// `analogy`/`worked-example`/`formal-first`/`interactive-visual`) piles up
+/// in `pending` forever and never joins anything. In practice the evidence
+/// table was measuring exercise-writing style, not teaching effectiveness —
+/// exactly backwards from what §7 needs to feed `decide_move`.
+///
+/// All `MoveGenerated` tactics accumulated for a node since its last credit
+/// are credited **equally** when that node's `MoveGraded` arrives, then
+/// cleared — a node graded again later (a fresh review cycle) only credits
+/// what was generated since the previous grade, never double-counts.
+/// Weighting is deliberately flat (every teaching move that preceded the
+/// gate gets the same weight as any other) rather than by recency/proximity
+/// to the gate: there is no telemetry yet to justify anything else, and
+/// flat is the more honest default until there is (noted in PLAN.md S16,
+/// not resolved silently).
 pub fn tactic_outcomes(events: impl Iterator<Item = Event>) -> HashMap<String, TacticOutcome> {
     let mut pending: HashMap<String, Vec<String>> = HashMap::new();
     let mut out: HashMap<String, TacticOutcome> = HashMap::new();
     for event in events {
+        let Some(node_id) = event.node_id else {
+            continue;
+        };
         match event.kind {
-            EventKind::MoveGenerated {
-                move_id, tactics, ..
-            } => {
-                pending.insert(move_id, tactics);
+            EventKind::MoveGenerated { tactics, .. } => {
+                pending.entry(node_id).or_default().extend(tactics);
             }
-            EventKind::MoveGraded { move_id, grade } => {
-                let Some(tactics) = pending.remove(&move_id) else {
+            EventKind::MoveGraded { grade, .. } => {
+                let Some(tactics) = pending.remove(&node_id) else {
                     continue;
                 };
                 for tactic in tactics {

@@ -1054,6 +1054,7 @@ pub(super) async fn finalize(
         move_id: move_id.to_string(),
         rubric,
         exercise_html: graded.html.clone(),
+        reference_solution: graded.reference_solution.clone(),
         title: prep.title.clone(),
         topic: prep.topic.clone(),
     };

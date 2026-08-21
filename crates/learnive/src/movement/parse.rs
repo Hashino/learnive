@@ -56,6 +56,8 @@ struct RawMove {
     #[serde(default)]
     tactics: Vec<String>,
     #[serde(default)]
+    reference_solution: String,
+    #[serde(default)]
     objectives: Vec<RawObjective>,
     /// `plan`'s proposed revised outline (§S4) — ignored for every other
     /// move type.
@@ -118,6 +120,7 @@ pub fn generated_move(move_type: MoveType, text: &str) -> Result<GeneratedMove, 
         html: raw.html,
         tactics: raw.tactics,
         rubric,
+        reference_solution: raw.reference_solution,
         proposed_outline: raw.outline,
         repaired: false,
     })
