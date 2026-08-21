@@ -351,7 +351,15 @@ pub fn observation_frame(events: impl Iterator<Item = Event>, node_id: &str) -> 
             continue;
         }
         match e.kind {
-            EventKind::MoveGenerated { .. } => frame = ObservationFrame::default(),
+            // `respond` excluded from the reset (§S18, live-caught
+            // 2026-08-21): it's `ask_question` appending its own
+            // bookkeeping for the very question this fold is trying to
+            // surface, not this node's own `generate_node` loop settling a
+            // move — resetting on it would wipe the question out of the
+            // frame before the node's real next move ever saw it.
+            EventKind::MoveGenerated { ref move_type, .. } if move_type != "respond" => {
+                frame = ObservationFrame::default()
+            }
             EventKind::QuestionAsked { question, .. } => {
                 if !question.is_empty() {
                     frame.questions.push(question);

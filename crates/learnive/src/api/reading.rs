@@ -648,6 +648,18 @@ pub(super) struct NodePrep {
 /// `ctx.prior_moves.push` in a live single-request run either — it `continue`s
 /// the loop before that point — so a resumed reconstruction that included it
 /// would disagree with what a live run's own `prior_moves` ever contains.
+///
+/// Also excludes `respond` (§S18, live-caught 2026-08-21): `ask_question`
+/// logs a `MoveGenerated{move_type: "respond"}` event tagged with the SAME
+/// `node_id` it's a question about (§7 evidence bookkeeping), but that event
+/// comes from a completely separate handler, never from `generate_node`'s
+/// loop — a live loop's own `ctx.prior_moves` never contains a `respond`
+/// entry either. Before §S18 this only mattered on a genuine crash-resume
+/// (rare); §S18 makes "ask a question while the node is paused between
+/// moves" the common case, so leaving `respond` in here reliably broke the
+/// NEXT per-move request: L0's fixed [explain, test] rule
+/// (`movement::l0_next_move`) doesn't recognize a 3rd move and errored with
+/// "this node's moves are already complete".
 fn resumed_ungraded_moves(
     events: impl Iterator<Item = crate::events::Event>,
     node_id: &str,
@@ -660,7 +672,7 @@ fn resumed_ungraded_moves(
             }
             _ => None,
         })
-        .filter(|mt| *mt != MoveType::Research)
+        .filter(|mt| !matches!(mt, MoveType::Research | MoveType::Respond))
         .map(|move_type| MoveRecord {
             move_type,
             graded: false,
@@ -677,10 +689,23 @@ fn resumed_ungraded_moves(
 /// count instead would reuse an index a prior iteration already tagged
 /// content with, colliding block ids between the resumed content already on
 /// disk and the next freshly generated move's.
+///
+/// Excludes `respond` (§S18, live-caught 2026-08-21, same root cause as the
+/// exclusion in `resumed_ungraded_moves`): unlike `research`, a `respond`
+/// move never comes from THIS node's own `generate_node` loop at all — it's
+/// appended by `ask_question`, a wholly separate handler, and never consumed
+/// one of this node's own `i` iterations or tagged content with this node's
+/// block-id prefix. Counting it here overcounts the resume index by one per
+/// question asked while the node sits paused between moves.
 fn resumed_move_index(events: impl Iterator<Item = crate::events::Event>, node_id: &str) -> usize {
     events
         .filter(|e| e.node_id.as_deref() == Some(node_id))
-        .filter(|e| matches!(e.kind, EventKind::MoveGenerated { .. }))
+        .filter(|e| {
+            matches!(
+                &e.kind,
+                EventKind::MoveGenerated { move_type, .. } if move_type != "respond"
+            )
+        })
         .count()
 }
 

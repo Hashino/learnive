@@ -865,6 +865,104 @@ async fn asking_works_against_a_node_still_mid_generation() {
 }
 
 #[tokio::test]
+async fn asking_mid_pause_does_not_desync_the_next_move_loop_request() {
+    // §S18 regression, live-caught 2026-08-21: `ask_question` logs its own
+    // `MoveGenerated{move_type: "respond"}` event under the SAME node_id as
+    // the node it's anchored inside. Before the fix, `resumed_move_index`/
+    // `resumed_ungraded_moves` (api/reading.rs) counted that event as one of
+    // THIS node's own move-loop slots, so a question asked between a
+    // `move_paused` and the next `/generate` call desynced the resumed
+    // index — L0's fixed [explain, test] rule (`movement::l0_next_move`)
+    // then saw a phantom 3rd move and errored "no next move: this node's
+    // moves are already complete", permanently stalling the node before its
+    // graded exercise ever generated. This pins the fix: asking mid-pause
+    // must not stop the node from reaching `done`.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    // First per-move request: one real move (`explain`) settles, then the
+    // node pauses — the exact window `/ask` can land in under §S18.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("event: move_paused"),
+        "expected the node to pause after its first move: {body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "node finished in one move: {body}"
+    );
+
+    // Pull the block id from the (already-unescaped) persisted content
+    // rather than the raw SSE bytes, which JSON-escape the quotes.
+    let (status, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let block_id = view["content_html"]
+        .as_str()
+        .unwrap()
+        .split("data-block-id=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("a real block id in the paused move's content")
+        .to_string();
+
+    // Ask a question anchored in that first move's content while the node
+    // sits paused — this is what used to desync the resume reconstruction.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
+        &format!(r#"{{"question":"why does this matter?","anchor":{{"block_id":"{block_id}"}}}}"#),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Resume generation — must continue past the `respond` event, not error
+    // out, and must still eventually reach a graded exercise.
+    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("event: error"), "unexpected error:\n{body}");
+    assert!(
+        body.contains("event: exercise"),
+        "no exercise generated:\n{body}"
+    );
+    assert!(body.contains("event: done"), "node never finished:\n{body}");
+
+    let (status, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(view["exercise_block_id"].is_string());
+}
+
+#[tokio::test]
 async fn csp_default_is_strict_but_exercise_frame_gets_its_own() {
     // §S10: `security::guard` now only inserts the default strict CSP
     // when a handler hasn't already set one, so `exercise_frame`'s own
