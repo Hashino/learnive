@@ -331,11 +331,12 @@ pub async fn grade(
     rubric: &Rubric,
     exercise_html: &str,
     answer: &str,
+    locale: crate::locale::Locale,
 ) -> Result<Assessment, EngineError> {
     let text = collect(
         ai,
         Tier::Fast,
-        prompt::grading(rubric, exercise_html, answer),
+        prompt::grading(rubric, exercise_html, answer, locale),
     )
     .await?;
     parse::assessment(&text)
@@ -344,6 +345,7 @@ pub async fn grade(
 /// Remediation conversation on failure (§8.2): explains the concept in the
 /// exercise's context and proposes a new similar problem whose similarity grows
 /// with each attempt (`attempt`). Robust tier (it is teaching/prose). Returns HTML.
+#[allow(clippy::too_many_arguments)]
 pub async fn remediate(
     ai: &Ai,
     item_title: &str,
@@ -352,6 +354,7 @@ pub async fn remediate(
     answer: &str,
     unmet: &[&ObjectiveGrade],
     attempt: u32,
+    locale: crate::locale::Locale,
 ) -> Result<String, EngineError> {
     let unmet_summary = unmet
         .iter()
@@ -368,6 +371,7 @@ pub async fn remediate(
             answer,
             &unmet_summary,
             attempt,
+            locale,
         ),
     )
     .await?;
@@ -393,11 +397,19 @@ pub async fn answer_question(
     node_context: &str,
     reading_context: Option<&str>,
     question: &str,
+    locale: crate::locale::Locale,
 ) -> Result<String, EngineError> {
     let html = collect(
         ai,
         Tier::Robust,
-        prompt::answer_question(topic, item_title, node_context, reading_context, question),
+        prompt::answer_question(
+            topic,
+            item_title,
+            node_context,
+            reading_context,
+            question,
+            locale,
+        ),
     )
     .await?;
     // Interaction layer, not assembled — same reason as `remediate`.
@@ -453,6 +465,7 @@ pub async fn decide_ask_response(
 /// once spliced inline — not a reply that only makes sense next to the
 /// question. Robust tier, same as `answer_question` (genuine explanatory
 /// prose, §12.1), same `PROSE_HTML_CONTRACT`.
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_subnode_prose(
     ai: &Ai,
     topic: &str,
@@ -461,6 +474,7 @@ pub async fn generate_subnode_prose(
     node_context: &str,
     reading_context: Option<&str>,
     question: &str,
+    locale: crate::locale::Locale,
 ) -> Result<String, EngineError> {
     collect(
         ai,
@@ -472,6 +486,7 @@ pub async fn generate_subnode_prose(
             node_context,
             reading_context,
             question,
+            locale,
         ),
     )
     .await
@@ -503,11 +518,12 @@ pub async fn generate_remediation_exercise(
     failed_exercise: &str,
     attempt: u32,
     sources: &str,
+    locale: crate::locale::Locale,
 ) -> Result<ExerciseAndRubric, EngineError> {
     let text = collect(
         ai,
         Tier::Fast,
-        prompt::remediation_exercise(item_title, failed_exercise, attempt, sources),
+        prompt::remediation_exercise(item_title, failed_exercise, attempt, sources, locale),
     )
     .await?;
     parse::exercise_rubric(&text)
@@ -1049,15 +1065,64 @@ mod tests {
         // Prose and remediation go to the app origin and are sanitized, so the
         // model must be told the contract (otherwise it generates something that
         // disappears).
-        let rem_sys = &prompt::remediation("c", "<p>chapter</p>", "<form></form>", "a", "o1: x", 2)
-            [0]
+        let rem_sys = &prompt::remediation(
+            "c",
+            "<p>chapter</p>",
+            "<form></form>",
+            "a",
+            "o1: x",
+            2,
+            crate::locale::Locale::En,
+        )[0]
         .content;
         assert!(rem_sys.contains(prompt::PROSE_HTML_CONTRACT));
 
         // The exercise runs in the sandbox: opposite contract (may use JS, must postMessage).
-        let ex_sys = &prompt::remediation_exercise("c", "<form></form>", 1, "")[0].content;
+        let ex_sys =
+            &prompt::remediation_exercise("c", "<form></form>", 1, "", crate::locale::Locale::En)
+                [0]
+            .content;
         assert!(ex_sys.contains("postMessage"));
         assert!(ex_sys.contains("sandbox"));
+    }
+
+    /// Live report (2026-08-20): the interaction-layer prose paths
+    /// (remediation, mid-reading Q&A, spawned sub-nodes) and grading feedback
+    /// had no language instruction at all, same gap as the move-generation
+    /// prompts — every one of them must now carry the `Locale`-derived
+    /// directive, for both locales.
+    #[test]
+    fn interaction_layer_prompts_carry_the_locale_directive() {
+        use crate::locale::Locale;
+
+        let rem_pt = &prompt::remediation(
+            "c",
+            "<p>chapter</p>",
+            "<form></form>",
+            "a",
+            "o1: x",
+            2,
+            Locale::PtBr,
+        )[0]
+        .content;
+        assert!(rem_pt.contains("Brazilian Portuguese"));
+
+        let ex_pt =
+            &prompt::remediation_exercise("c", "<form></form>", 1, "", Locale::PtBr)[0].content;
+        assert!(ex_pt.contains("Brazilian Portuguese"));
+
+        let ans_en = &prompt::answer_question("t", "c", "ctx", None, "why?", Locale::En)[0].content;
+        assert!(ans_en.contains("in English"));
+
+        let sub_pt =
+            &prompt::subnode_prose("t", "sub", "parent", "ctx", None, "why?", Locale::PtBr)[0]
+                .content;
+        assert!(sub_pt.contains("Brazilian Portuguese"));
+
+        let rubric = Rubric { objectives: vec![] };
+        let grading_pt =
+            &prompt::grading(&rubric, "<form></form>", "answer", Locale::PtBr)[0].content;
+        assert!(grading_pt.contains("Brazilian Portuguese"));
     }
 
     /// Shared by the live quality-iteration probes below: builds the REAL
@@ -1247,9 +1312,15 @@ mod tests {
                 transfer: false,
             }],
         };
-        let a = grade(&ai, &rubric, "<form></form>", "my answer")
-            .await
-            .unwrap();
+        let a = grade(
+            &ai,
+            &rubric,
+            "<form></form>",
+            "my answer",
+            crate::locale::Locale::En,
+        )
+        .await
+        .unwrap();
         assert!(a.all_demonstrated());
     }
 }

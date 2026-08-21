@@ -320,6 +320,7 @@ pub async fn ask_question(
                 &node_tail,
                 context.as_deref(),
                 question,
+                locale,
             )
             .await?;
 
@@ -361,6 +362,7 @@ pub async fn ask_question(
                 &node_tail,
                 context.as_deref(),
                 question,
+                locale,
             )
             .await?;
             let sub_node = engine::assemble_content_node(&doc_id, &sub_id, &prose)?;

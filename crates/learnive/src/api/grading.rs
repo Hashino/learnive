@@ -157,8 +157,14 @@ pub async fn answer(
     let node = state.store.read_node(&doc_id, &node_id)?;
 
     let ai = state.ai.load_full();
-    let assessment =
-        engine::grade(&ai, &sidecar.rubric, &sidecar.exercise_html, &body.answer).await?;
+    let assessment = engine::grade(
+        &ai,
+        &sidecar.rubric,
+        &sidecar.exercise_html,
+        &body.answer,
+        locale,
+    )
+    .await?;
 
     let event_log = state.store.event_log(&doc_id)?;
     if let Err(e) = event_log.append(
@@ -235,6 +241,7 @@ pub async fn answer(
         &body.answer,
         &assessment.unmet(),
         attempt,
+        locale,
     )
     .await?;
 
@@ -248,6 +255,7 @@ pub async fn answer(
         &sidecar.exercise_html,
         attempt,
         &grounding,
+        locale,
     )
     .await?;
 

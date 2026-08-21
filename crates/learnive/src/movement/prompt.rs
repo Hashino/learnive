@@ -3,6 +3,7 @@ use crate::ai::ChatMessage;
 use crate::engine::prompt::{
     CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
 };
+use crate::locale::language_directive;
 
 /// [`CITE_CONTRACT`], appended only when there is grounding to cite —
 /// otherwise the model would see an instruction about a SOURCES block that
@@ -216,6 +217,7 @@ pub fn decide_and_generate(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMe
         .collect::<Vec<_>>()
         .join(", ");
     let cite = cite_addendum(&ctx.grounding);
+    let lang = language_directive(ctx.locale);
 
     vec![
         ChatMessage::system(format!(
@@ -231,7 +233,7 @@ pub fn decide_and_generate(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMe
              - If you chose one of the other types, continue in the SAME \
              response with that move's full content, following the guidance \
              for whichever you picked:\n{streamed_purposes}\n\n\
-             {}\n\n{}\n\n{PROSE_HTML_CONTRACT}\n\n{ISLAND_CONTRACT}\n\n{cite}\n\n\
+             {}\n\n{}\n\n{lang}\n\n{PROSE_HTML_CONTRACT}\n\n{ISLAND_CONTRACT}\n\n{cite}\n\n\
              If you continued with content, after your HTML, on its own line, \
              append an HTML comment listing the tactic self-labels you used \
              (e.g. \"analogy\", \"worked-example\", \"interactive-visual\", \
@@ -425,6 +427,7 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
 /// (stripped server-side, never shown — see the module docs).
 pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
     let cite = cite_addendum(&ctx.grounding);
+    let lang = language_directive(ctx.locale);
     // A `plan` move's whole job is reasoning about the outline/topic as a
     // structural whole — the "don't teach the overall topic" framing below
     // would be irrelevant noise there, not a helpful constraint.
@@ -436,7 +439,8 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {}\n\n{}\n\n{scope_note}\n\n{PROSE_HTML_CONTRACT}\n\n\
+             for a living document. {}\n\n{}\n\n{scope_note}\n\n{lang}\n\n\
+             {PROSE_HTML_CONTRACT}\n\n\
              {ISLAND_CONTRACT}\n\n{cite}\n\n\
              After your HTML, on its own line, append an HTML comment \
              listing the tactic self-labels you used (e.g. \"analogy\", \
@@ -493,10 +497,12 @@ pub fn generate_move(
         AgentPolicy::L1 => "This move type was chosen from a closed menu.",
         AgentPolicy::L2 => "This move type was chosen freely.",
     };
+    let lang = language_directive(ctx.locale);
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {rung_note} {}\n\n{}\n\n{}\n\n{contract}\n\n{cite}\n\n\
+             for a living document. {rung_note} {}\n\n{}\n\n{}\n\n{lang}\n\n\
+             {contract}\n\n{cite}\n\n\
              Also emit the tactic self-labels you used (e.g. \"analogy\", \
              \"worked-example\", \"interactive-visual\", \"formal-first\") — \
              short kebab-case tags, in the SAME call (§7).\n\n\
@@ -660,5 +666,37 @@ mod tests {
         let profile_sys = &generate_move(AgentPolicy::L1, MoveType::Profile, &ctx)[0].content;
         assert!(profile_sys.contains("NOT an exercise"));
         assert!(profile_sys.contains("graded MUST be false"));
+    }
+
+    /// Live report (2026-08-20): a document requested in pt-BR, with the
+    /// outline/objective correctly in pt-BR, still drifted into English
+    /// mid-document because no move-generation prompt carried ANY language
+    /// instruction. Every content-producing prompt must now carry the
+    /// `Locale`-derived directive, on both the merged decide+generate path
+    /// and the two standalone paths, for both locales.
+    #[test]
+    fn every_content_prompt_carries_the_locale_directive() {
+        use crate::locale::Locale;
+
+        let en = MoveContext::default();
+        let pt = MoveContext {
+            locale: Locale::PtBr,
+            ..Default::default()
+        };
+
+        let decide_gen_en = &decide_and_generate(AgentPolicy::L1, &en)[0].content;
+        let decide_gen_pt = &decide_and_generate(AgentPolicy::L1, &pt)[0].content;
+        assert!(decide_gen_en.contains("in English"));
+        assert!(decide_gen_pt.contains("Brazilian Portuguese"));
+
+        let streamed_en = &generate_move_streamed(MoveType::Explain, &en)[0].content;
+        let streamed_pt = &generate_move_streamed(MoveType::Explain, &pt)[0].content;
+        assert!(streamed_en.contains("in English"));
+        assert!(streamed_pt.contains("Brazilian Portuguese"));
+
+        let structured_en = &generate_move(AgentPolicy::L1, MoveType::Test, &en)[0].content;
+        let structured_pt = &generate_move(AgentPolicy::L1, MoveType::Test, &pt)[0].content;
+        assert!(structured_en.contains("in English"));
+        assert!(structured_pt.contains("Brazilian Portuguese"));
     }
 }

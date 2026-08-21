@@ -115,6 +115,7 @@ pub async fn generate_node(
             later_titles: prep.later_titles.clone(),
             prior_moves: prep.resumed_moves.clone(),
             node_tail: resumed_tail,
+            locale,
             ..Default::default()
         };
         let mut graded: Option<(String, GeneratedMove)> = None;

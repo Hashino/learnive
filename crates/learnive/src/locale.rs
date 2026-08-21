@@ -41,6 +41,17 @@ impl Locale {
             Locale::PtBr => "pt-BR",
         }
     }
+
+    /// Human-readable target-language name for content directives sent to
+    /// the model — distinct from [`Locale::as_code`] (machine-facing
+    /// BCP-47), this is prose meant to be read by the model in a sentence
+    /// like "write everything in {name}".
+    fn language_name(self) -> &'static str {
+        match self {
+            Locale::En => "English",
+            Locale::PtBr => "Brazilian Portuguese (pt-BR)",
+        }
+    }
 }
 
 impl std::fmt::Display for Locale {
@@ -57,4 +68,29 @@ pub fn pick<'a>(locale: Locale, en: &'a str, pt: &'a str) -> &'a str {
         Locale::PtBr => pt,
         Locale::En => en,
     }
+}
+
+/// Deterministic content-language directive for agent prompts, threaded
+/// from the UI's selected locale rather than inferred from the request
+/// text. Before this existed, every move-generation prompt
+/// (`movement::prompt`) carried NO language instruction at all — only the
+/// cold-start prompts (`propose_objective`/`propose_outline`) told the
+/// model to match the request's language — so a document's outline could
+/// come out correctly in pt-BR while its nodes drifted into English mid-
+/// document (live report, 2026-08-20). Deliberately silent about anything
+/// that is a machine contract rather than learner-facing prose: move-type
+/// names, JSON keys/enum values, and literal sentinel markers a prompt
+/// specifies verbatim must never be translated, or the server-side parser
+/// for that prompt breaks.
+pub fn language_directive(locale: Locale) -> String {
+    format!(
+        "Write everything the learner will read — prose, headings, exercise \
+         text and options, feedback, citations' surrounding text — in {}. \
+         This does NOT apply to anything that is a literal marker, JSON key, \
+         enum value, CSS class name, or move-type name this prompt specifies \
+         verbatim (e.g. <!--move: ...-->, \"html\", \"graded\", \"objectives\", \
+         \"not_demonstrated\", \"callout\"): keep every one of those exactly \
+         as written, unchanged, regardless of this instruction.",
+        locale.language_name()
+    )
 }

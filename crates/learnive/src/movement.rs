@@ -274,6 +274,13 @@ pub struct MoveContext {
     /// for `parent_title` (§S15 decomposed sub-nodes); this field covers the
     /// general case, any outline shape.
     pub later_titles: Vec<String>,
+    /// UI-selected locale (`Locale::from_header`), request-scoped like every
+    /// other `Locale` use in the app — not persisted per-document. Drives
+    /// `locale::language_directive` on every move-generation prompt; see
+    /// that function's doc comment for the live bug this closes. Defaults to
+    /// `Locale::En`, so every `..Default::default()` test fixture keeps
+    /// compiling unchanged.
+    pub locale: crate::locale::Locale,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

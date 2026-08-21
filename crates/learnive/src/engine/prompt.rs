@@ -1,5 +1,6 @@
 use super::Rubric;
 use crate::ai::ChatMessage;
+use crate::locale::{Locale, language_directive};
 
 /// HTML contract for **sanitized** surfaces (prose, remediation): this content
 /// is inserted into the app origin and passes through the client `sanitizeHtml`
@@ -379,7 +380,9 @@ pub fn remediation(
     answer: &str,
     unmet_summary: &str,
     attempt: u32,
+    locale: Locale,
 ) -> Vec<ChatMessage> {
+    let lang = language_directive(locale);
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor. The student just got a check wrong. Write \
@@ -400,7 +403,7 @@ pub fn remediation(
              scaffolded the walkthrough should be. Do NOT pose a new problem \
              here and do NOT state the answer to any future exercise — a \
              separate practice problem follows.\n\n\
-             {PROSE_HTML_CONTRACT}"
+             {lang}\n\n{PROSE_HTML_CONTRACT}"
         )),
         ChatMessage::user(format!(
             "Concept: {item_title}\nChapter content already taught: {chapter_html}\n\
@@ -436,8 +439,10 @@ pub fn answer_question(
     node_context: &str,
     reading_context: Option<&str>,
     question: &str,
+    locale: Locale,
 ) -> Vec<ChatMessage> {
     let anchor_block = reading_context_block(reading_context);
+    let lang = language_directive(locale);
     vec![
         ChatMessage::system(format!(
             "The learner is reading a node of a living document and asked a \
@@ -453,7 +458,7 @@ pub fn answer_question(
              it (§7) — but only when there is actually a stance to engage with; a \
              plain clarifying question just gets a clear, honest answer. Do not \
              repeat the whole node; resolve the specific doubt.\n\n\
-             {PROSE_HTML_CONTRACT}"
+             {lang}\n\n{PROSE_HTML_CONTRACT}"
         )),
         ChatMessage::user(format!(
             "Topic: {topic}\nConcept of this node: {item_title}\n\
@@ -505,8 +510,10 @@ pub fn subnode_prose(
     node_context: &str,
     reading_context: Option<&str>,
     question: &str,
+    locale: Locale,
 ) -> Vec<ChatMessage> {
     let anchor_block = reading_context_block(reading_context);
+    let lang = language_directive(locale);
     vec![
         ChatMessage::system(format!(
             "The learner asked a question that warrants a real new section of \
@@ -517,7 +524,7 @@ pub fn subnode_prose(
              surrounding conversation, should still follow it. Answer the \
              question directly; if it states a position or disagreement, engage \
              dialectically rather than flattering or simply validating it (§7).\n\n\
-             {PROSE_HTML_CONTRACT}"
+             {lang}\n\n{PROSE_HTML_CONTRACT}"
         )),
         ChatMessage::user(format!(
             "Topic: {topic}\nParent concept: {parent_title}\nNew section title: \
@@ -537,7 +544,9 @@ pub fn remediation_exercise(
     failed_exercise: &str,
     attempt: u32,
     sources: &str,
+    locale: Locale,
 ) -> Vec<ChatMessage> {
+    let lang = language_directive(locale);
     vec![
         ChatMessage::system(format!(
             "Generate a NEW practice problem AND its grading rubric TOGETHER, \
@@ -549,7 +558,7 @@ pub fn remediation_exercise(
              {{\"exercise_html\":\"<form>...</form>\",\"objectives\":[{{\"id\":\"o1\",\
              \"kind\":\"knowledge|application|synthesis\",\"description\":\"...\",\
              \"criteria\":\"what counts as demonstrated\",\"transfer\":true|false}}]}}.\n\n\
-             {EXERCISE_HTML_CONTRACT}"
+             {lang}\n\n{EXERCISE_HTML_CONTRACT}"
         )),
         ChatMessage::user(format!(
             "Concept: {item_title}\nThe problem the student just failed:\n{failed_exercise}\
@@ -559,16 +568,22 @@ pub fn remediation_exercise(
     ]
 }
 
-pub fn grading(rubric: &Rubric, exercise_html: &str, answer: &str) -> Vec<ChatMessage> {
+pub fn grading(
+    rubric: &Rubric,
+    exercise_html: &str,
+    answer: &str,
+    locale: Locale,
+) -> Vec<ChatMessage> {
     let rubric_json = serde_json::to_string(rubric).unwrap_or_default();
+    let lang = language_directive(locale);
     vec![
-        ChatMessage::system(
+        ChatMessage::system(format!(
             "Grade the student's answer AGAINST the locked rubric, without leniency \
-             (§8). For each objective give the grade {not_demonstrated|partial|\
-             demonstrated} and short feedback. Respond ONLY with JSON: \
-             {\"grades\":[{\"objective_id\":\"o1\",\"grade\":\"...\",\
-             \"feedback\":\"...\"}]}.",
-        ),
+             (§8). For each objective give the grade {{not_demonstrated|partial|\
+             demonstrated}} and short feedback. Respond ONLY with JSON: \
+             {{\"grades\":[{{\"objective_id\":\"o1\",\"grade\":\"...\",\
+             \"feedback\":\"...\"}}]}}.\n\n{lang}"
+        )),
         ChatMessage::user(format!(
             "Rubric: {rubric_json}\nExercise: {exercise_html}\nStudent's answer: {answer}"
         )),
