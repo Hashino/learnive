@@ -25,21 +25,23 @@ pub struct SetupStatus {
     base_url: Option<String>,
     /// Whether a key is stored — the key itself is NEVER returned (§12).
     has_key: bool,
-    /// True when the app is actually falling back to offline demo content
-    /// right now — only possible for OpenRouter with no key stored yet
-    /// (`build_ai`'s only fallthrough path). An `OpenAiCompatible` provider
-    /// is always used for real once saved, keyed or not (keyless endpoints
-    /// are a legitimate BYOK shape), so it's never "demo".
-    demo: bool,
+    /// True when there is no working provider right now — only possible for
+    /// OpenRouter with no key stored yet (`build_ai`'s `Provider::Unconfigured`
+    /// path, §22). An `OpenAiCompatible` provider is always used for real
+    /// once saved, keyed or not (keyless endpoints are a legitimate BYOK
+    /// shape), so it's never this. Named `unconfigured`, not `demo`: the app
+    /// never shows a real user demo content (§22), so nothing here should
+    /// use that word — this just means "nothing to generate with yet".
+    unconfigured: bool,
     /// The derived active model pair, for display only.
     model_fast: String,
     model_robust: String,
     /// True when there is no working provider yet — drives the settings
     /// window auto-opening straight to the Provider section on boot.
-    /// Currently identical to `demo` (the only "not working yet" case is
-    /// the OpenRouter-without-a-key fallthrough), kept as a separate field
-    /// since the two questions ("is this real" vs "should we nag") could
-    /// diverge later without becoming the same computation again.
+    /// Currently identical to `unconfigured` (the only "not working yet"
+    /// case is the OpenRouter-without-a-key fallthrough), kept as a separate
+    /// field since the two questions ("is this real" vs "should we nag")
+    /// could diverge later without becoming the same computation again.
     needs_setup: bool,
 }
 
@@ -51,8 +53,8 @@ fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
         }
     };
     let has_key = secret.get(config.key_name()).is_some();
-    // Only OpenRouter ever falls through to demo (`build_ai`) when unkeyed.
-    let demo = matches!(config.provider, ProviderKind::OpenRouter) && !has_key;
+    // Only OpenRouter ever leaves `Provider::Unconfigured` in play (§22) when unkeyed.
+    let unconfigured = matches!(config.provider, ProviderKind::OpenRouter) && !has_key;
     let models = config.models();
     SetupStatus {
         provider,
@@ -63,10 +65,10 @@ fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
         .to_string(),
         base_url,
         has_key,
-        demo,
+        unconfigured,
         model_fast: models.for_tier(Tier::Fast).to_string(),
         model_robust: models.for_tier(Tier::Robust).to_string(),
-        needs_setup: demo,
+        needs_setup: unconfigured,
     }
 }
 
@@ -272,7 +274,7 @@ mod tests {
         let (_dir, secret) = tmp_secret();
         let unkeyed = AppConfig::default(); // OpenRouter, no key stored yet.
         assert!(status_of(&unkeyed, &secret).needs_setup);
-        assert!(status_of(&unkeyed, &secret).demo);
+        assert!(status_of(&unkeyed, &secret).unconfigured);
 
         secret.set("openrouter", "k").unwrap();
         assert!(!status_of(&unkeyed, &secret).needs_setup);
@@ -290,6 +292,6 @@ mod tests {
         // A keyless OpenAI-compatible endpoint (e.g. a free tier) is a
         // legitimate, already-validated BYOK shape — it must never nag.
         assert!(!status_of(&custom, &secret).needs_setup);
-        assert!(!status_of(&custom, &secret).demo);
+        assert!(!status_of(&custom, &secret).unconfigured);
     }
 }

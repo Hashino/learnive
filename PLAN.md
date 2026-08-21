@@ -370,7 +370,7 @@ As seções de frente abaixo são **agrupamentos por assunto, não etapas**: ava
 
 ---
 
-- [ ] **S22 — Modo demo deixa de ser fallback e vira só ferramenta de desenvolvimento (decisão do usuário, 2026-08-21).** Fatia pequena e independente das outras; surgiu da auditoria spec-vs-código da mesma data.
+- [x] **S22 — Modo demo deixa de ser fallback e vira só ferramenta de desenvolvimento (decisão do usuário, 2026-08-21).** Fatia pequena e independente das outras; surgiu da auditoria spec-vs-código da mesma data. **Construído e verificado (2026-08-21):** `Provider::Unconfigured` (`ai/provider.rs`) — `stream`/`complete` sempre falham com `ProviderError::Unconfigured`, nunca geram nada. `build_ai` (`api/provider.rs`) devolve isto no ramo "nada configurado" em vez de `demo_ai()`; a decisão de implementação anotada acima (variante de `Provider` vs. `AppState.ai` opcional) foi resolvida a favor da primeira, como previsto. `SetupStatus.demo` virou `SetupStatus.unconfigured`, e as duas strings de UI que diziam "Demo mode"/"Modo demonstração" viraram "não conectado" (`i18n.js`, os dois locales; `settings.js`). `LEARNIVE_DEMO` continua sendo o único caminho pro `MockProvider`, inalterado. `cargo test --workspace`: 173/173 (+1 teste novo, `unconfigured_provider_fails_both_stream_and_complete_without_generating`), `clippy --all-targets`/`fmt --check` limpos.
 
   **A regra:** *"o modo demo não deve nunca ser visível ao usuário, é apenas para desenvolvimento. apenas acessível por env var."*
 

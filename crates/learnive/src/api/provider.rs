@@ -2,7 +2,8 @@ use super::*;
 
 // ---------------------------------------------------------------------------
 // Provider selection (§12) — any OpenAI-compatible endpoint is swappable. Order:
-// a custom base URL (generic BYOK), else OpenRouter (default), else offline demo.
+// a custom base URL (generic BYOK), else OpenRouter (default), else settings,
+// else `Provider::Unconfigured` (never offline demo — that's dev-only, §22).
 // ---------------------------------------------------------------------------
 
 /// Builds the `Ai` from the environment (§12), together with the policy-ladder
@@ -10,15 +11,23 @@ use super::*;
 /// deriving the rung from `config` alone would desync from which `Ai` this
 /// function actually returns whenever an env-var override is active. Precedence:
 /// 1. `LEARNIVE_DEMO` (any non-empty value) — dev/test escape hatch, forces
-///    offline demo mode regardless of what's configured. Never a UI choice.
+///    offline demo mode regardless of what's configured. Never a UI choice,
+///    never reachable from anything a real user does in the app itself.
 /// 2. `LEARNIVE_API_BASE_URL` (+ optional `LEARNIVE_API_KEY`) — any OpenAI-compatible
 ///    `chat/completions` endpoint: a paid provider, OpenCode Zen, a local model.
 /// 3. `LEARNIVE_OPENROUTER_KEY` — the default OpenRouter path.
-/// 4. Otherwise, the provider configured in the settings window.
+/// 4. The provider configured in the settings window.
+/// 5. Nothing configured at all → `Provider::Unconfigured` (§22, user
+///    decision 2026-08-21): every call fails with `ProviderError::Unconfigured`
+///    instead of silently generating demo content for a real user. The
+///    settings window already auto-opens on boot for this case
+///    (`SetupStatus::needs_setup`, api/setup.rs).
 ///
-/// Rung: a real provider (any of the paths above) derives L1/L2 from the
-/// free/paid intent (§12.1); the demo fallback is always L0 (demo mode = L0,
-/// PLAN.md) — deterministic content, no AI call for `decide_move`.
+/// Rung: a real provider (paths 1-4) derives L1/L2 from the free/paid intent
+/// (§12.1) — except the `LEARNIVE_DEMO` escape hatch, which is always L0
+/// (deterministic content, no AI call for `decide_move`). Path 5 is also L0,
+/// but it doesn't matter: `Provider::Unconfigured` never returns anything for
+/// the rung to shape.
 pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
     let real_provider_policy = match config.intent {
         Intent::Free => AgentPolicy::L1,
@@ -83,12 +92,20 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
         }
     }
 
-    // Nothing configured → demo.
+    // Nothing configured, and LEARNIVE_DEMO not set → fail clearly instead
+    // of silently serving demo content to a real user (§22, user decision
+    // 2026-08-21: "o modo demo não deve nunca ser visível ao usuário").
+    // `needs_setup` (api/setup.rs) already opens the settings window on
+    // boot for this exact case; this just stops anything from generating
+    // behind that gate.
     eprintln!(
-        "No provider configured — DEMO MODE. Open the app and use the settings (⚙) \
-         button to configure a provider."
+        "No provider configured. Open the app and use the settings (⚙) \
+         button to configure one."
     );
-    (demo_ai(), AgentPolicy::L0)
+    (
+        Ai::new(Provider::Unconfigured, Models::single("unconfigured")),
+        AgentPolicy::L0,
+    )
 }
 
 /// Reads the fast/robust model pair from the environment (§12.1). Defaults are

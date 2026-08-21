@@ -95,6 +95,12 @@ pub enum ProviderError {
         body: String,
         retry_after: Option<Duration>,
     },
+    /// No provider is configured (§22 — the app must never silently fall
+    /// back to demo content for a real user). Distinct from `Http`/`Api` so
+    /// callers can tell "genuinely unreachable" apart from "nobody set this
+    /// up yet" and point the user at Settings instead of showing a raw
+    /// network error.
+    Unconfigured,
 }
 
 impl std::fmt::Display for ProviderError {
@@ -103,6 +109,9 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Http(e) => write!(f, "HTTP error: {e}"),
             ProviderError::Api { status, body, .. } => {
                 write!(f, "API error ({status}): {body}")
+            }
+            ProviderError::Unconfigured => {
+                write!(f, "no AI provider is configured — open Settings to add one")
             }
         }
     }
@@ -171,6 +180,10 @@ pub struct ChatRequest {
 pub enum Provider {
     OpenAiCompat(OpenAiCompat),
     Mock(MockProvider),
+    /// No real provider set up and `LEARNIVE_DEMO` not set (§22). Every call
+    /// fails fast with `ProviderError::Unconfigured` instead of generating
+    /// anything — a real user must never see demo content.
+    Unconfigured,
 }
 
 impl Provider {
@@ -178,6 +191,7 @@ impl Provider {
         match self {
             Provider::OpenAiCompat(p) => p.stream(req).await,
             Provider::Mock(m) => Ok(m.stream(req)),
+            Provider::Unconfigured => Err(ProviderError::Unconfigured),
         }
     }
 
@@ -193,6 +207,7 @@ impl Provider {
         match self {
             Provider::OpenAiCompat(p) => p.complete(req).await,
             Provider::Mock(m) => Ok(m.complete(req)),
+            Provider::Unconfigured => Err(ProviderError::Unconfigured),
         }
     }
 }
@@ -634,5 +649,22 @@ mod tests {
         let tokens: Vec<String> = stream.map(|r| r.unwrap()).collect().await;
         assert!(tokens.len() > 1, "should stream in multiple tokens");
         assert_eq!(tokens.concat(), "one two three");
+    }
+
+    #[tokio::test]
+    async fn unconfigured_provider_fails_both_stream_and_complete_without_generating() {
+        let req = || ChatRequest {
+            model: "unconfigured".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            temperature: None,
+        };
+        assert!(matches!(
+            Provider::Unconfigured.stream(req()).await,
+            Err(ProviderError::Unconfigured)
+        ));
+        assert!(matches!(
+            Provider::Unconfigured.complete(req()).await,
+            Err(ProviderError::Unconfigured)
+        ));
     }
 }

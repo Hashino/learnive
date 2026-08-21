@@ -127,8 +127,8 @@
     for (const r of document.getElementsByName("intent"))
       r.checked = r.value === s.intent;
     el("keyHint").textContent = s.has_key ? t("apikey.hint") : "";
-    el("derived").textContent = s.demo
-      ? t("derived.demo")
+    el("derived").textContent = s.unconfigured
+      ? t("derived.unconfigured")
       : t("derived.models", s.model_fast, s.model_robust);
     syncFields();
   }
@@ -180,8 +180,8 @@
       const s = await resp.json();
       el("apiKey").value = "";
       showStatus(s);
-      el("setupMsg").textContent = s.demo
-        ? t("status.demoSaved")
+      el("setupMsg").textContent = s.unconfigured
+        ? t("status.unconfiguredSaved")
         : t("status.saved");
       el("setupMsg").className = "ok";
     } catch (err) {
