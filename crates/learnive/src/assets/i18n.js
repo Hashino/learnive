@@ -64,6 +64,7 @@ const I18N = {
     "skip.failed": "skip failed: ",
     // Node / generation
     "status.generating": "generating…",
+    "continue.button": "Continue →",
     "gen.error": "generation error: ",
     "asked.prefix": "You asked:",
     "iframe.interactive": "Interactive content",
@@ -158,6 +159,7 @@ const I18N = {
     "skip.none": "Nada mais disponível por enquanto.",
     "skip.failed": "falha ao pular: ",
     "status.generating": "gerando…",
+    "continue.button": "Continuar →",
     "gen.error": "erro de geração: ",
     "asked.prefix": "Você perguntou:",
     "iframe.interactive": "Conteúdo interativo",

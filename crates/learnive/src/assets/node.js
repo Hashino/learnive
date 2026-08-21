@@ -42,6 +42,16 @@ function buildSection(nodeId) {
     exerciseFrame: null,
     readEndFired: false,
     readEndObserver: null,
+    // §S18: the trailing, always-relocated element holding only the
+    // CURRENTLY streaming move's raw, untagged text (`streamMoveRequest`).
+    // Reused across the several per-move `/generate` requests one node
+    // now spans, rather than left behind as dead DOM each time.
+    liveEl: null,
+    // §S18: true between a `move_paused` event and whatever ends the
+    // pause (the read-to-end sentinel firing, or the learner clicking
+    // "continue") — `armReadToEndWatcher`'s trigger for whether crossing
+    // the sentinel should reopen `/generate` for this node's next move.
+    generationPaused: false,
   };
   state.sections.set(nodeId, rec);
   return rec;
@@ -118,6 +128,19 @@ async function mountExistingSection(id, data) {
     // gate keeps it that way in practice, §S5) — whichever section that
     // is becomes the answer-routing target, main nav or background load.
     state.nodeId = id;
+  } else if (!data.exercise_block_id) {
+    // §S18: mounted mid-generation (via lazy neighbor-load, or a reload
+    // that landed here through a path other than `openNode`'s own
+    // `data.complete === false` → `generateNode` redirect) — no graded
+    // check yet, paused between moves rather than actually finished.
+    // Offer to pick it back up instead of silently stranding the learner
+    // with no exercise and no way to continue (`openNode`'s own resumed
+    // case handles this via a full `generateNode` retry instead; this is
+    // the path that doesn't go through `openNode` at all).
+    rec.exercise.innerHTML = "";
+    rec.exerciseFrame = null;
+    rec.controls.innerHTML = "";
+    renderContinueControl(rec, id);
   } else {
     rec.exercise.innerHTML = "";
     rec.exerciseFrame = null;
@@ -309,14 +332,17 @@ async function hydrateInteractions(interactions, interactionsEl) {
   }
 }
 
-// §S6 "Ritmo": crossing the sentinel after the exercise logs the
-// scroll-to-end signal once per node. A pure signal today — nothing
-// reacts to it yet (see the server's `EventKind::NodeReadToEnd` doc
-// comment for why gating the next move on it is a separate slice).
-// Per-section (§9): every mounted node arms its own observer against its
-// own sentinel, independent of whichever node the learner is currently
-// answering — sections are never torn down, so there is no single
-// "current" watcher to swap.
+// §S6 "Ritmo"/§S18: crossing the sentinel after the exercise (or, mid-
+// generation, after the most recently settled move — the exercise slot is
+// still empty then, so the sentinel reads as right after the prose) logs
+// the scroll-to-end signal. As of §S18 this is no longer a pure signal:
+// when the node is paused between moves (`rec.generationPaused`, set by
+// `streamMoveRequest` on `move_paused`), crossing it is also the trigger
+// that reopens `/generate` for the node's next move — the "test conditioned
+// on interactions" pacing §9 describes. Per-section: every mounted node
+// arms its own observer against its own sentinel, independent of whichever
+// node the learner is currently answering — sections are never torn down,
+// so there is no single "current" watcher to swap.
 function armReadToEndWatcher(rec) {
   rec.readEndFired = false;
   if (rec.readEndObserver) rec.readEndObserver.disconnect();
@@ -338,6 +364,10 @@ function armReadToEndWatcher(rec) {
           `/api/documents/${state.docId}/nodes/${rec.nodeId}/read-to-end`,
           {},
         ).catch(() => {});
+        if (rec.generationPaused) {
+          rec.generationPaused = false;
+          continueGeneration(rec, rec.nodeId);
+        }
       }
     },
     { threshold: 0.1 },
@@ -345,7 +375,19 @@ function armReadToEndWatcher(rec) {
   rec.readEndObserver.observe(rec.sentinel);
 }
 
-// --- Node generation with streaming (§6, §14) --------------------------
+// §S18: a node mounted with content but no graded exercise yet — paused
+// between per-move requests, not actually finished. Offers to pick
+// generation back up (`continueGeneration`) rather than leaving the
+// learner with an empty controls area and nothing to click.
+function renderContinueControl(rec, id) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = t("continue.button");
+  btn.addEventListener("click", () => continueGeneration(rec, id));
+  rec.controls.appendChild(btn);
+}
+
+// --- Node generation with streaming (§6, §14, §S18) ---------------------
 // `instant` controls the initial scroll to the new section: instant for
 // the view "arriving" (an outline click on a never-generated node), smooth
 // when it's auto-advance appending the next node right after a live grade
@@ -365,6 +407,8 @@ async function generateNode(id, { instant = true } = {}) {
   rec.interactions.innerHTML = "";
   rec.result.innerHTML = "";
   rec.controls.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
+  rec.liveEl = null;
+  rec.generationPaused = false;
   // Deliberately NOT disabling reading tools here (§9 continuous document):
   // every OTHER mounted section is fully readable right now, and the very
   // first call ever made (cold start, nothing mounted yet) leaves
@@ -376,19 +420,52 @@ async function generateNode(id, { instant = true } = {}) {
   // node's `done`.
   clearReadingLine();
   scrollToSection(rec, instant);
+  await streamMoveRequest(rec, id);
+}
 
+// §S18: resumes an already-mounted node's generation for its next move —
+// triggered off the read-to-end sentinel (`armReadToEndWatcher`) once the
+// learner has read the move that just paused it, or off the "continue"
+// control a reload/reopen shows for a node caught mid-generation
+// (`mountExistingSection`). Deliberately does none of `generateNode`'s DOM
+// reset/rescroll: the section is already mounted and already has content
+// the learner is in the middle of reading.
+async function continueGeneration(rec, id) {
+  rec.generationPaused = false;
+  if (rec.readEndObserver) {
+    rec.readEndObserver.disconnect();
+    rec.readEndObserver = null;
+  }
+  rec.controls.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
+  await streamMoveRequest(rec, id);
+}
+
+// §S18: performs exactly ONE `/generate` request. The server now settles at
+// most one real move per request, ending the stream with `move_paused`
+// (more moves remain — pause and let the learner read) or `done`/
+// `plan_proposal` (node finished, one way or another) — see
+// `api::generation::generate_node`'s doc comment for the full event
+// vocabulary. Shared by `generateNode` (the node's first move, after DOM
+// reset) and `continueGeneration` (every later move).
+async function streamMoveRequest(rec, id) {
   // A settled move becomes real, permanent DOM siblings inside `rec.prose`
   // (below) rather than a string folded into one big re-render: an earlier
   // move's interactive island, once hydrated (`hydrateIslands`), holds a
   // live iframe with its own state — rebuilding the whole subtree from a
   // string on every later move's settle would tear that iframe down and
-  // recreate it. `live` is the one exception: a trailing, always-emptied
-  // element holding only the CURRENT move's raw, still-streaming, untagged
-  // text, replaced wholesale on every `token` (cheap — it's never held
-  // more than one move's worth of text, and it has no `data-block-id` yet
-  // for anything to anchor to or hydrate).
-  const live = document.createElement("div");
-  live.className = "streaming-move";
+  // recreate it. `rec.liveEl` is the one exception: a trailing, always-
+  // emptied element holding only the CURRENT move's raw, still-streaming,
+  // untagged text, replaced wholesale on every `token` (cheap — it's never
+  // held more than one move's worth of text, and it has no `data-block-id`
+  // yet for anything to anchor to or hydrate). Reused (relocated to the end
+  // of `rec.prose`, not recreated) across the several per-move requests one
+  // node now spans, so a paused node doesn't accumulate one dead empty div
+  // per move.
+  if (!rec.liveEl) {
+    rec.liveEl = document.createElement("div");
+    rec.liveEl.className = "streaming-move";
+  }
+  const live = rec.liveEl;
   rec.prose.appendChild(live);
 
   let prose = "";
@@ -420,6 +497,15 @@ async function generateNode(id, { instant = true } = {}) {
         hydrateIslands(rec.prose, id);
         setReadingToolsEnabled(true);
         scheduleReadingLine();
+      } else if (event === "move_paused") {
+        // §S18: this move settled but the node isn't done — no graded
+        // check yet, and the server ended the request on purpose. Pause
+        // here: clear the "generating…" status and arm the sentinel so
+        // crossing it (reading to the end of what's here) is what reopens
+        // `/generate` for the next move, not a timer or an immediate loop.
+        rec.controls.innerHTML = "";
+        rec.generationPaused = true;
+        armReadToEndWatcher(rec);
       } else if (event === "research") {
         // §S13: the agent is fetching grounding for this concept before
         // writing it — surfaced as status text over the existing
@@ -486,6 +572,7 @@ async function generateNode(id, { instant = true } = {}) {
       }
     });
   } catch (err) {
+    rec.generationPaused = false;
     rec.controls.innerHTML =
       '<p class="error">' +
       t("gen.error") +
