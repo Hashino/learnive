@@ -396,6 +396,24 @@ pub(crate) fn l0_next_move(prior: &[MoveRecord]) -> Result<MoveType, EngineError
     }
 }
 
+/// S18 minor correction 2 — a Rust-enforced structural floor, not a menu
+/// restriction: `Test` is never withheld from `candidate_types` (a check
+/// can legitimately be the right move later), but choosing it as a node's
+/// very first move produces a node that never teaches anything before
+/// grading it. Live bug (§S8): a node shipped as `exercise`+`done` with
+/// zero prose because L1 picked `Test` at move-index 0. This can't be
+/// caught by `calibrate_rung`'s ladder telemetry — a `Test` at position 0
+/// is schema-valid and type-diverse, so nothing there sees a problem.
+/// Sibling of the "every node ends in a check" invariant Rust already
+/// owns — this is "every node opens with teaching".
+fn enforce_teaching_before_test(move_type: MoveType, ctx: &MoveContext) -> MoveType {
+    if move_type == MoveType::Test && ctx.prior_moves.is_empty() {
+        MoveType::Explain
+    } else {
+        move_type
+    }
+}
+
 async fn decide_move_ai(
     ai: &Ai,
     policy: AgentPolicy,
@@ -404,11 +422,11 @@ async fn decide_move_ai(
     let messages = prompt::decide_move(policy, ctx);
     let text = engine::collect(ai, Tier::Fast, messages.clone()).await?;
     if let Ok(mt) = parse::move_type(&text) {
-        return Ok(mt);
+        return Ok(enforce_teaching_before_test(mt, ctx));
     }
     let repair = repair_messages(messages, &text, "expected JSON {\"move_type\":\"...\"}");
     let text = engine::collect(ai, Tier::Fast, repair).await?;
-    parse::move_type(&text)
+    parse::move_type(&text).map(|mt| enforce_teaching_before_test(mt, ctx))
 }
 
 /// Outcome of [`decide_and_generate`] — see the module docs' "merged
@@ -504,13 +522,27 @@ pub async fn decide_and_generate(
         Err(e) => Err(e.into()),
     };
     match outcome {
-        Ok((move_type, rest)) => Ok(match move_type.render() {
-            MoveRender::Streamed => DecidedMove::Streamed {
-                move_type,
-                stream: rest,
-            },
-            MoveRender::Structured => DecidedMove::Structured { move_type },
-        }),
+        Ok((move_type, rest)) => {
+            let effective = enforce_teaching_before_test(move_type, ctx);
+            if effective != move_type {
+                // The guard overrode the model's choice (`Test` at
+                // move-index 0) — `rest` is a `Structured` type's empty
+                // tail (the model was told to write nothing else), not
+                // usable content for `effective`'s `Streamed` contract, so
+                // this is the one path that pays for a second call.
+                return Ok(DecidedMove::Streamed {
+                    move_type: effective,
+                    stream: generate_move_stream(ai, effective, ctx).await?,
+                });
+            }
+            Ok(match move_type.render() {
+                MoveRender::Streamed => DecidedMove::Streamed {
+                    move_type,
+                    stream: rest,
+                },
+                MoveRender::Structured => DecidedMove::Structured { move_type },
+            })
+        }
         Err(_) => decide_only_fallback(ai, policy, ctx).await,
     }
 }
@@ -1005,11 +1037,32 @@ mod tests {
 
     #[tokio::test]
     async fn l1_decide_move_parses_ai_json() {
+        // Non-empty `prior_moves` so the S18 teaching-before-test guard
+        // (below) doesn't shadow what this test actually checks — JSON
+        // parsing of the model's choice.
+        let ctx = MoveContext {
+            prior_moves: vec![MoveRecord {
+                move_type: MoveType::Explain,
+                graded: false,
+            }],
+            ..Default::default()
+        };
         let ai = mock_ai(r#"{"move_type":"test","rationale":"time to check"}"#);
+        let mt = decide_move(&ai, AgentPolicy::L1, &ctx).await.unwrap();
+        assert_eq!(mt, MoveType::Test);
+    }
+
+    /// S18 minor correction 2: a `Test` chosen as a node's very first move
+    /// (live bug, §S8 — a node shipped as `exercise`+`done` with zero prose)
+    /// is overridden to `Explain` in Rust, not left to the model or to
+    /// ladder telemetry (which can't see this failure mode at all).
+    #[tokio::test]
+    async fn decide_move_forces_a_teaching_move_before_test_at_position_zero() {
+        let ai = mock_ai(r#"{"move_type":"test","rationale":"skip straight to grading"}"#);
         let mt = decide_move(&ai, AgentPolicy::L1, &MoveContext::default())
             .await
             .unwrap();
-        assert_eq!(mt, MoveType::Test);
+        assert_eq!(mt, MoveType::Explain);
     }
 
     #[tokio::test]
@@ -1095,13 +1148,48 @@ mod tests {
     #[tokio::test]
     async fn decide_and_generate_returns_structured_with_no_content_call() {
         let ai = mock_ai("<!--move: test-->");
-        let ctx = MoveContext::default();
+        // Non-empty `prior_moves` so the S18 teaching-before-test guard
+        // doesn't override `test` here — that override has its own test
+        // below.
+        let ctx = MoveContext {
+            prior_moves: vec![MoveRecord {
+                move_type: MoveType::Explain,
+                graded: false,
+            }],
+            ..Default::default()
+        };
         let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
             .await
             .unwrap();
         match outcome {
             DecidedMove::Structured { move_type } => assert_eq!(move_type, MoveType::Test),
             DecidedMove::Streamed { .. } => panic!("expected structured"),
+        }
+    }
+
+    /// S18 minor correction 2, merged-call path: the marker names `test` at
+    /// move-index 0, so the guard overrides it to `explain` — and since the
+    /// merged call's own stream was a `Structured` type's empty tail (the
+    /// model was told to write nothing else), the override must fetch real
+    /// `explain` content via a fresh call rather than reusing it.
+    #[tokio::test]
+    async fn decide_and_generate_forces_teaching_before_test_at_position_zero() {
+        let ai = mock_ai("<!--move: test-->");
+        let ctx = MoveContext::default();
+        let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
+            .await
+            .unwrap();
+        match outcome {
+            DecidedMove::Streamed { move_type, stream } => {
+                assert_eq!(move_type, MoveType::Explain);
+                let text: String = stream
+                    .map(|r| r.unwrap())
+                    .collect::<Vec<_>>()
+                    .await
+                    .concat();
+                assert!(!text.is_empty());
+            }
+            DecidedMove::Structured { .. } => panic!("expected streamed explain"),
         }
     }
 
@@ -1154,6 +1242,22 @@ mod tests {
         };
         let user = &prompt::decide_move(AgentPolicy::L1, &ctx)[1].content;
         assert!(user.contains("worked-example: 3 demonstrated, 0 partial"));
+    }
+
+    #[test]
+    fn decide_move_prompt_carries_outline_context_and_grounding() {
+        // S18 minor correction 1: both fields already existed and were
+        // populated on `ctx`, but `decide_move`'s prompt omitted them —
+        // the tutor chose the next move blind to what earlier nodes had
+        // already taught and to what sources were available to ground in.
+        let ctx = MoveContext {
+            outline_context: "Fractions: numerator/denominator already taught".to_string(),
+            grounding: "[src1] OpenStax, ch. 3".to_string(),
+            ..Default::default()
+        };
+        let user = &prompt::decide_move(AgentPolicy::L1, &ctx)[1].content;
+        assert!(user.contains("numerator/denominator already taught"));
+        assert!(user.contains("OpenStax, ch. 3"));
     }
 
     #[test]

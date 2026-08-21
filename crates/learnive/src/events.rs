@@ -77,10 +77,17 @@ pub enum EventKind {
     /// answer") — via a text selection or, with no selection, the current
     /// reading line (itself never persisted, §9 — only the resulting
     /// anchor is). `move_id` joins to the `InteractionItem::Thread` of the
-    /// same id, the same pattern `RubricSidecar.move_id` uses.
+    /// same id, the same pattern `RubricSidecar.move_id` uses. `question`
+    /// (S18 precondition) carries the actual text, not just the anchor —
+    /// §7 calls the question the highest-signal input in the system, and
+    /// an anchor alone can't feed `ObservationFrame.questions` or steer the
+    /// next `decide_move`. `#[serde(default)]` so event logs written before
+    /// this field existed still deserialize (empty string, not an error).
     QuestionAsked {
         move_id: String,
         anchor_block: String,
+        #[serde(default)]
+        question: String,
     },
     /// A user-authored note was added to the living document (§S6, §9/§11:
     /// the document is the only place for notes — the source viewer is
@@ -679,6 +686,7 @@ mod tests {
             EventKind::QuestionAsked {
                 move_id: "m1".into(),
                 anchor_block: "b1".into(),
+                question: "why?".into(),
             },
         )
         .unwrap();

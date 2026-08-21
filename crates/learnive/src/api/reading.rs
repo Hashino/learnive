@@ -306,6 +306,7 @@ pub async fn ask_question(
         EventKind::QuestionAsked {
             move_id: move_id.clone(),
             anchor_block: body.anchor.block_id.clone(),
+            question: question.to_string(),
         },
     ) {
         eprintln!("event log append failed: {e}");

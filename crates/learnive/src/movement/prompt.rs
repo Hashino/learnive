@@ -166,7 +166,12 @@ fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
     }
 }
 
-/// Prompt for `decide_move` (L1/L2 only — L0 never calls this).
+/// Prompt for `decide_move` (L1/L2 only — L0 never calls this). Carries
+/// `outline_context`/grounding in the user message (S18 minor correction 1)
+/// — both fields were already populated on `ctx` and used by
+/// `generate_move_streamed`, but this prompt omitted them, so the tutor
+/// picked the next move blind to what earlier nodes already taught or what
+/// sources are available to ground in.
 pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(format!(
@@ -179,13 +184,17 @@ pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
-             Curriculum objective: {}\nLearner profile: {}\n\
+             Context of what has been taught so far: {}{}\n\
+             Curriculum objective: {}\nLearner profile: {}{}\n\
              Moves already in this node: {}\n\
              Node content so far (tail): {}",
             ctx.topic,
             ctx.item_title,
+            non_empty(&ctx.outline_context),
+            not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
             non_empty(&ctx.profile),
+            sources_block(&ctx.grounding),
             describe_prior(&ctx.prior_moves),
             non_empty(tail_chars(&ctx.node_tail, 1500)),
         )),
