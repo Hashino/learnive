@@ -3,11 +3,13 @@ use super::*;
 use super::generation::NODE_TAIL_BUDGET;
 // ---------------------------------------------------------------------------
 // §S6 — reading interactions ("the document is the answer", §9). All three
-// endpoints below only operate on an already-finalized node: the frozen
-// content layer they anchor against, and the interaction layer they append
-// to, both require the node file to already exist (`store::append_interaction`
-// is read-then-write against it). A node still mid-generation has neither yet
-// — scoped out of this slice, see `EventKind::NodeReadToEnd`'s doc comment.
+// endpoints below anchor against the node file on disk, which since the §S6
+// follow-up (progressive per-move persistence) can be a partial, still
+// mid-generation node just as well as a finalized one — `write_node_content`
+// preserves whatever interaction layer already exists across the next move's
+// write. A mid-draft `/ask` (or annotation, or the read-to-end sentinel
+// below) is exactly what §S18's `ObservationFrame` reads back on the node's
+// next per-move `/generate` call (`events::aggregate::observation_frame`).
 // ---------------------------------------------------------------------------
 
 /// Minimal HTML-escaper for embedding user-authored plain text inside
@@ -619,6 +621,16 @@ pub(super) struct NodePrep {
     /// counts differ and why the loop must start at this one, not
     /// `resumed_moves.len()`.
     pub(super) resumed_move_index: usize,
+    /// §S18: what the learner did since the last move settled in this node
+    /// (`events::aggregate::observation_frame`) — empty on a node's first
+    /// move, or when this `/generate` call reopened before anything new
+    /// happened. Feeds `MoveContext.observation`.
+    pub(super) observation: crate::events::aggregate::ObservationFrame,
+    /// §S18: whether `research` has ever been logged for this node —
+    /// reconstructed the same way `resumed_move_index` is, so the one-
+    /// attempt-per-node cap (`MoveContext::research_attempted`'s doc
+    /// comment) survives across per-move requests, not just within one.
+    pub(super) research_attempted: bool,
 }
 
 /// §14 resilience: reconstructs the ungraded moves a prior, interrupted
@@ -793,6 +805,14 @@ pub(super) async fn prepare(
             .map(|node| engine::strip_build_marker(&node.content.html).to_string())
             .unwrap_or_default()
     };
+    let observation = crate::events::aggregate::observation_frame(
+        event_log.iter().map_err(|e| e.to_string())?,
+        &item.id,
+    );
+    let research_attempted = crate::events::aggregate::research_attempted(
+        event_log.iter().map_err(|e| e.to_string())?,
+        &item.id,
+    );
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -809,6 +829,8 @@ pub(super) async fn prepare(
         resumed_moves,
         resumed_content_html,
         resumed_move_index,
+        observation,
+        research_attempted,
     })
 }
 

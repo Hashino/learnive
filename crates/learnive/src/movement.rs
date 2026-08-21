@@ -246,11 +246,16 @@ pub struct MoveContext {
     /// fed to `decide_move` only — the caller keeps this updated as moves are
     /// generated. Empty for the node's first move.
     pub node_tail: String,
-    /// Set once a `research` move has run for this node-generation call
-    /// (§S13) — withholds `research` from the menu on any further
-    /// `decide_move` call in the same request, the cap on repeated
-    /// acquisition attempts. Not persisted; scoped to one `generate_node`
-    /// call, same lifetime as `prior_moves`.
+    /// Set once a `research` move has run for this NODE (§S13) — withholds
+    /// `research` from the menu on any further `decide_move` call, the cap
+    /// on repeated acquisition attempts. Seeded from the event log by
+    /// `prepare` (`events::aggregate::research_attempted`) on every
+    /// per-move `/generate` request (§S18), not just set true in-process —
+    /// each request gets a fresh `ctx`, so an in-process-only flag would
+    /// only cap research within a single request, not across the several a
+    /// node's generation now spans. Still also set `true` mid-loop the
+    /// moment a request's OWN research attempt runs, exactly as before, so
+    /// a second pick can't happen later in that same request either.
     pub research_attempted: bool,
     /// §S15: titles of this node's own children in the outline tree
     /// (`OutlineItem::parent_id` pointing back at it) — a prerequisite
@@ -329,6 +334,13 @@ pub struct MoveContext {
     /// difficulty ramps back up. Mirrors `remediate`/`generate_remediation_
     /// exercise`'s `attempt` param.
     pub remediation_attempt: Option<u32>,
+    /// §S18: what the learner did since the last move settled in this node
+    /// (`events::aggregate::observation_frame`) — reconstructed by `prepare`
+    /// on every per-move `/generate` call, the same way `prior_moves`/
+    /// `node_tail` are. Fed only to `decide_move`'s prompt
+    /// (`movement/prompt.rs::observation_line`): the log is now a
+    /// perception channel, not just an audit trail (PLAN.md's S18).
+    pub observation: crate::events::aggregate::ObservationFrame,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

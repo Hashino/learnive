@@ -8,27 +8,51 @@ use super::*;
 
 // ---------------------------------------------------------------------------
 // Node generation (§6): decide → generate → stream, move by move (§14).
+//
+// §S18: the loop closes by MOVE, not by node. One `/generate` request
+// produces at most one real (non-`research`) move, then ends the stream —
+// see `generate_node`'s doc comment for the event that signals this
+// (`move_paused`) vs. node-complete (`done`). The client reopens the request
+// once the learner has read that move (today: crossing the read-to-end
+// sentinel, `node.js`'s `armReadToEndWatcher`). State that used to live in
+// the loop's local `ctx` across iterations — `prior_moves`, `node_tail`, the
+// move-loop index — is now reconstructed on every call by `prepare` from the
+// event log + persisted `content.html` (the same resume machinery §14 built
+// for crash recovery; see `resumed_move_index`'s doc comment), not carried
+// forward in memory. `research` is the one exception: it produces nothing
+// the learner reads, so it still loops internally within the same request
+// (capped at one attempt via `ctx.research_attempted`) before the request's
+// one real move happens.
 // ---------------------------------------------------------------------------
 
-/// Hard cap on moves generated for one node in one request (§12.2 cost
-/// control): the node must still close in a graded check even if L1/L2 keeps
-/// picking ungraded moves, so the last allowed iteration forces `test`
-/// instead of asking `decide_move` again. L0 never gets close to this (it
-/// always closes at move 2: explain, then test).
+/// Hard cap on moves generated for one node, now enforced ACROSS requests
+/// (§S18) rather than within a single one (§12.2 cost control): the node
+/// must still close in a graded check even if L1/L2 keeps picking ungraded
+/// moves, so once `prepare`'s reconstructed index reaches the last allowed
+/// slot, that request forces `test` instead of asking `decide_move` again.
+/// L0 never gets close to this (it always closes at move 2: explain, then
+/// test).
 const MAX_MOVES_PER_NODE: usize = 4;
 
 /// Verbatim §14 context budget fed to `decide_move` (~1.5k chars).
 pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 
-/// Streams the SSE format over a POST. Events: `token` (prose — both streamed
-/// moves and, as one full frame, ungraded structured moves, which share the
-/// same prose contract §4.4/`movement.rs`), `move_settled` (§S6 follow-up —
-/// fires once per ungraded move, right after `token`, carrying that move's
-/// HTML re-tagged with real, permanent `data-block-id`s and progressively
-/// persisted; the client swaps it in for the untagged version it just
-/// streamed and can enable reading/asking against it immediately, without
-/// waiting for the whole node), `exercise` (the graded move's form,
-/// sandboxed), `done` (node_id), `error`.
+/// Streams the SSE format over a POST — one real move per request as of
+/// §S18 (module docs above). Events: `token` (prose — both streamed moves
+/// and, as one full frame, ungraded structured moves, which share the same
+/// prose contract §4.4/`movement.rs`), `move_settled` (§S6 follow-up — fires
+/// once, right after `token`, carrying this move's HTML re-tagged with real,
+/// permanent `data-block-id`s and progressively persisted; the client swaps
+/// it in for the untagged version it just streamed and can enable reading/
+/// asking against it immediately), `move_paused` (§S18 — node_id; this
+/// move settled but the node isn't done: no graded check yet, and this
+/// request is ending here on purpose so the learner can read/interact before
+/// the client reopens `/generate` for the next move), `exercise` (the graded
+/// move's form, sandboxed), `done` (node_id — the node's graded move landed
+/// and `finalize` wrote its complete content layer; ALSO fires, with an
+/// empty payload, when a `plan` move paused this request on a proposed
+/// outline revision instead — `node.js`'s `done` handler distinguishes the
+/// two by payload emptiness, unchanged by this slice), `error`.
 ///
 /// Block-level interactive islands (§4.4/§S11) — a `<figure data-interactive>`
 /// the model opens mid-move's HTML, not the whole-move `interactive` flag
@@ -116,6 +140,8 @@ pub async fn generate_node(
             prior_moves: prep.resumed_moves.clone(),
             node_tail: resumed_tail,
             locale,
+            observation: prep.observation.clone(),
+            research_attempted: prep.research_attempted,
             ..Default::default()
         };
         let mut graded: Option<(String, GeneratedMove)> = None;
@@ -375,11 +401,20 @@ pub async fn generate_node(
                 "move_settled",
                 &learnive_core::redact_interactive_blocks(&tagged),
             ));
-            ctx.prior_moves.push(MoveRecord {
-                move_type,
-                graded: false,
-            });
-            ctx.node_tail = tail_chars(&content_html, NODE_TAIL_BUDGET);
+            // §S18: the loop now closes by MOVE, not by node — one real
+            // (non-`research`) move settles per request, then the request
+            // ends here. The learner reads it, can ask/annotate/scroll to
+            // its end, all of which `events::aggregate::observation_frame`
+            // folds back into `MoveContext.observation` for the next
+            // `decide_move` call — the event log is a perception channel
+            // now, not just an audit trail. `prepare`'s resume machinery
+            // (already built for §14 crash recovery) reconstructs
+            // `prior_moves`/`node_tail`/the loop index from the event log +
+            // persisted content on that next `/generate` call for this same
+            // node, so updating `ctx` further here would be dead code —
+            // nothing reads it again in this request.
+            yield Ok(sse_frame("move_paused", &prep.node_id));
+            return;
         }
 
         let Some((move_id, graded)) = graded else {

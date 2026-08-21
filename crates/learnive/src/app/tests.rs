@@ -58,6 +58,49 @@ fn authed(method: &str, uri: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// §S18: `/generate` now settles at most one real move per request and ends
+/// the stream with `event: move_paused` when more moves remain — a test
+/// that wants a node's FULL generation (through its graded exercise, or
+/// through a `plan` proposal pausing it) drives that loop the same way
+/// `node.js`'s `armReadToEndWatcher` does live: reopen `/generate` on the
+/// same node until a terminal event (`event: done` or `event: error`)
+/// appears. Concatenates every request's SSE body so existing
+/// `body.contains("event: ...")` assertions keep working unchanged. Capped
+/// at 8 requests (well above `MAX_MOVES_PER_NODE`'s 4) so a genuine bug that
+/// produces neither a terminal nor a `move_paused` event panics instead of
+/// hanging the test.
+async fn generate_to_completion<F, Fut>(
+    call: &F,
+    doc_id: &str,
+    node_id: &str,
+) -> (StatusCode, String)
+where
+    F: Fn(Request<Body>) -> Fut,
+    Fut: std::future::Future<Output = (StatusCode, String)>,
+{
+    let mut combined = String::new();
+    for _ in 0..8 {
+        let (status, body) = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/nodes/{node_id}/generate"),
+            "",
+        ))
+        .await;
+        if status != StatusCode::OK {
+            return (status, body);
+        }
+        combined.push_str(&body);
+        if body.contains("event: done") || body.contains("event: error") {
+            return (status, combined);
+        }
+        assert!(
+            body.contains("event: move_paused"),
+            "expected a move_paused pause point, got: {body}"
+        );
+    }
+    panic!("generation did not terminate within 8 requests: {combined}");
+}
+
 #[tokio::test]
 async fn index_ok_with_query_token() {
     let req = Request::builder()
@@ -392,13 +435,9 @@ async fn full_loop_closes_in_demo_mode() {
     }
     let node0 = items[0]["id"].as_str().unwrap().to_string();
 
-    // 2. First node's generation — streams and ends with `done`.
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
+    // 2. First node's generation — one move per request (§S18); drive it
+    // through to its graded exercise.
+    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("event: token"), "should stream prose");
     assert!(body.contains("event: done"), "should finish generation");
@@ -526,14 +565,10 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     let doc_id = created["doc_id"].as_str().unwrap().to_string();
     let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
 
-    // Generate once.
-    let (status, _) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
+    // Generate through to the graded exercise (§S18: one move per request).
+    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
     assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: done"));
 
     // Regenerating the same node is refused, not silently overwritten.
     let (status, body) = call(authed(
@@ -659,13 +694,9 @@ async fn a_partial_node_from_an_interrupted_generation_may_be_retried() {
     state.store.write_node(&partial).unwrap();
 
     // Retrying is allowed — not refused as "already generated" — and
-    // completes a real node this time.
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
+    // completes a real node this time (§S18: possibly across several
+    // per-move requests).
+    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!body.contains("already generated"), "{body}");
     assert!(body.contains("event: done"));
@@ -855,14 +886,22 @@ async fn csp_default_is_strict_but_exercise_frame_gets_its_own() {
     let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
 
     // The generate response is an SSE stream that only actually runs
-    // (and writes the `.rubric.json` sidecar) once its body is drained.
-    let resp = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
-    to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    // (and writes the `.rubric.json` sidecar) once its body is drained —
+    // and now settles at most one move per request (§S18), so drive it to
+    // its graded exercise before checking anything downstream.
+    loop {
+        let resp = call(authed(
+            "POST",
+            &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+            "",
+        ))
+        .await;
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        if body.contains("event: done") || body.contains("event: error") {
+            break;
+        }
+    }
 
     // A normal API route: the default strict app CSP.
     let resp = call(authed(
@@ -1323,13 +1362,9 @@ async fn profile_evidence_and_distillation_flow_in_demo_mode() {
     assert!(profile["traits"].as_array().unwrap().is_empty());
 
     // Generate + answer node0 for real (demo grades non-blank content as
-    // demonstrated) — the node closing is the distillation trigger.
-    call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
+    // demonstrated) — the node closing is the distillation trigger. §S18:
+    // one move per request, so drive it to its graded exercise first.
+    generate_to_completion(&call, &doc_id, &node0).await;
     let (status, body) = call(authed(
         "POST",
         &format!("/api/documents/{doc_id}/nodes/{node0}/answer"),
@@ -1716,12 +1751,11 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
     let doc_id = created["doc_id"].as_str().unwrap().to_string();
     let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
 
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
+    // §S18: research still resolves within its own request (the loop-back
+    // to a real decision happens in-process, before that request's one real
+    // move settles and ends the stream) — but the node as a whole may now
+    // take several per-move requests to reach its graded check.
+    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
     assert_eq!(status, StatusCode::OK);
 
     // Both research status frames reached the client...

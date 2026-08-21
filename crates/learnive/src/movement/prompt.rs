@@ -98,6 +98,35 @@ fn not_yet_taught_line(ctx: &MoveContext) -> String {
     }
 }
 
+/// Renders `MoveContext::observation` (§S18) as a user-message line — the
+/// event log's fold of what the learner did between the last move settling
+/// and this `decide_move` call. Empty when nothing happened (a request
+/// reopened immediately, e.g. right after a `research` pick with nothing to
+/// read yet), so a quiet window adds no noise to the prompt.
+fn observation_line(ctx: &MoveContext) -> String {
+    let o = &ctx.observation;
+    if !o.reached_end && o.questions.is_empty() && o.annotations.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if o.reached_end {
+        parts.push("read to the end of the last move's content".to_string());
+    }
+    if !o.questions.is_empty() {
+        parts.push(format!("asked: {}", o.questions.join(" | ")));
+    }
+    if !o.annotations.is_empty() {
+        parts.push(format!(
+            "annotated near block(s): {}",
+            o.annotations.join(", ")
+        ));
+    }
+    format!(
+        "\nWhat the learner did since the last move: {}",
+        parts.join("; ")
+    )
+}
+
 fn describe_prior(prior: &[MoveRecord]) -> String {
     if prior.is_empty() {
         return "(none — this is the first move)".to_string();
@@ -187,7 +216,7 @@ pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
              Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}\nLearner profile: {}{}\n\
              Moves already in this node: {}\n\
-             Node content so far (tail): {}",
+             Node content so far (tail): {}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
@@ -197,6 +226,7 @@ pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
             sources_block(&ctx.grounding),
             describe_prior(&ctx.prior_moves),
             non_empty(tail_chars(&ctx.node_tail, 1500)),
+            observation_line(ctx),
         )),
     ]
 }

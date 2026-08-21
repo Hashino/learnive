@@ -94,11 +94,11 @@ pub enum EventKind {
     /// read-only).
     AnnotationAdded { anchor_block: String },
     /// The learner scrolled a node's content to the end (§S6 "Ritmo":
-    /// content → reading interactions → scroll-to-end). Captured now as a
-    /// pure signal; nothing consumes it yet — gating the next `decide_move`
-    /// on it needs the per-node move loop split across requests (draft
-    /// persistence + `finalize` merging interactions accumulated mid-draft),
-    /// deferred to its own slice, not part of §S6.
+    /// content → reading interactions → scroll-to-end). Consumed as of S18:
+    /// `events::aggregate::observation_frame` folds this into
+    /// `ObservationFrame.reached_end`, and the client (`node.js`) uses
+    /// crossing the sentinel as the trigger to reopen `/generate` for the
+    /// node's next move, now that the move loop is split across requests.
     NodeReadToEnd,
     /// `finalize` (api/reading.rs) has written the node's complete content
     /// layer (prose through the graded move) — the explicit completion

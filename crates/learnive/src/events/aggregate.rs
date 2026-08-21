@@ -300,6 +300,71 @@ pub fn node_generated(mut events: impl Iterator<Item = Event>, node_id: &str) ->
     })
 }
 
+/// Whether a `research` move has EVER been logged for `node_id` — §S18's
+/// cross-request counterpart to `MoveContext::research_attempted`. Before
+/// the per-move-request split, that cap lived entirely in one request's
+/// in-memory `ctx` (never reset across the move loop's iterations), which
+/// was enough because the whole node generated in one request. Now each
+/// `/generate` call gets a fresh `ctx`, so `prepare` reconstructs the cap
+/// from the log the same way it reconstructs `resumed_moves`/
+/// `resumed_move_index` — otherwise a model that re-picks `research` on
+/// every request it's still offered (nothing else caps it in-process) could
+/// burn through `MAX_MOVES_PER_NODE`'s whole budget on research alone,
+/// forcing the last slot's `Test` with zero teaching content — exactly the
+/// zero-prose bug `MoveContext::observation`'s sibling guard,
+/// `movement::enforce_teaching_before_test`, was built to prevent, except
+/// that guard doesn't run on the forced-last-slot path at all.
+pub fn research_attempted(mut events: impl Iterator<Item = Event>, node_id: &str) -> bool {
+    events.any(|e| {
+        e.node_id.as_deref() == Some(node_id)
+            && matches!(&e.kind, EventKind::MoveGenerated { move_type, .. } if move_type == "research")
+    })
+}
+
+/// What the learner did **since the last move settled** for `node_id` (§S18)
+/// — folded from the event log, the "perception channel" PLAN.md's S18
+/// describes, not a new sidecar. A single pass: the accumulator resets every
+/// time a `MoveGenerated` for this node is seen, so only events after the
+/// most recent one survive to the end — exactly the window between "a move
+/// was persisted" and "the next `/generate` call for this node arrived",
+/// which is what a per-move-request `decide_move` needs to react to.
+///
+/// Deliberately narrower than PLAN.md's S18 sketch (`dwell_ms_per_block`,
+/// `selections`): neither has a supporting event yet — a selection only
+/// becomes an event once it turns into a question, and dwell time needs a
+/// new client-reporting channel that doesn't exist — so an always-empty
+/// field would be prompt noise `decide_move` has to ignore, not signal.
+/// `annotations` carries anchor block ids, not text: `AnnotationAdded`
+/// itself never logged the note's content (`events.rs`'s doc comment), only
+/// where it landed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservationFrame {
+    pub reached_end: bool,
+    pub questions: Vec<String>,
+    pub annotations: Vec<String>,
+}
+
+pub fn observation_frame(events: impl Iterator<Item = Event>, node_id: &str) -> ObservationFrame {
+    let mut frame = ObservationFrame::default();
+    for e in events {
+        if e.node_id.as_deref() != Some(node_id) {
+            continue;
+        }
+        match e.kind {
+            EventKind::MoveGenerated { .. } => frame = ObservationFrame::default(),
+            EventKind::QuestionAsked { question, .. } => {
+                if !question.is_empty() {
+                    frame.questions.push(question);
+                }
+            }
+            EventKind::AnnotationAdded { anchor_block } => frame.annotations.push(anchor_block),
+            EventKind::NodeReadToEnd => frame.reached_end = true,
+            _ => {}
+        }
+    }
+    frame
+}
+
 /// §S5's revisit scheduler: which currently-`Skipped` node has been
 /// deferred longest. A pure spacing heuristic (least-recently-touched
 /// wins), not a full spaced-repetition algorithm — PLAN.md's S5 bullet
