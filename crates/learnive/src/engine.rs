@@ -183,22 +183,6 @@ impl Assessment {
     }
 }
 
-/// Exercise + rubric generated together (§8), in a separate call from the prose (§14).
-#[derive(Debug, Clone)]
-pub struct ExerciseAndRubric {
-    pub exercise_html: String,
-    pub rubric: Rubric,
-    /// The model's own worked-out solution to the exact task it just wrote
-    /// (S16) — server-only, never sent to the client. Grading against this
-    /// instead of the rubric alone closes the leniency gap `EXERCISE_HTML_
-    /// CONTRACT` already half-solved: the model was already computing this
-    /// to write correct criteria, just discarding it afterward. May be
-    /// empty for model output that predates this field (defaulted, not
-    /// required, in the parser) — `grade()` degrades to rubric-only grading
-    /// in that case, same as before this slice.
-    pub reference_solution: String,
-}
-
 /// Engine errors.
 #[derive(Debug)]
 pub enum EngineError {
@@ -360,80 +344,6 @@ pub async fn grade(
     parse::assessment(&text)
 }
 
-/// Remediation conversation on failure (§8.2): explains the concept in the
-/// exercise's context and proposes a new similar problem whose similarity grows
-/// with each attempt (`attempt`). Robust tier (it is teaching/prose). Returns HTML.
-#[allow(clippy::too_many_arguments)]
-pub async fn remediate(
-    ai: &Ai,
-    item_title: &str,
-    chapter_html: &str,
-    exercise_html: &str,
-    answer: &str,
-    unmet: &[&ObjectiveGrade],
-    attempt: u32,
-    locale: crate::locale::Locale,
-) -> Result<String, EngineError> {
-    let unmet_summary = unmet
-        .iter()
-        .map(|g| format!("- {}: {}", g.objective_id, g.feedback))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let html = collect(
-        ai,
-        Tier::Robust,
-        prompt::remediation(
-            item_title,
-            chapter_html,
-            exercise_html,
-            answer,
-            &unmet_summary,
-            attempt,
-            locale,
-        ),
-    )
-    .await?;
-    // Rendered here, not at assembly: this prose goes straight into the
-    // append-only interaction layer (§4.3) as `body_html` and never passes
-    // through `assemble_node`, which is where every other path picks up math
-    // rendering. Applying it in both places would be a wasted second pass.
-    Ok(render_math(&html))
-}
-
-/// Answers a question asked mid-reading (§S6, §9 "the document is the
-/// answer"): either about a text selection or, with no selection, the
-/// current reading line — the caller resolves which block/quote either way,
-/// this only needs the resulting text. Robust tier: a genuine question gets
-/// the same explanatory-prose treatment as `explain`/`confront` (§12.1), not
-/// the fast tier reserved for cheap/structured tasks. Returns sanitized-at-
-/// render HTML (`PROSE_HTML_CONTRACT`), landed in the interaction layer by
-/// the caller — never in the frozen content layer.
-pub async fn answer_question(
-    ai: &Ai,
-    topic: &str,
-    item_title: &str,
-    node_context: &str,
-    reading_context: Option<&str>,
-    question: &str,
-    locale: crate::locale::Locale,
-) -> Result<String, EngineError> {
-    let html = collect(
-        ai,
-        Tier::Robust,
-        prompt::answer_question(
-            topic,
-            item_title,
-            node_context,
-            reading_context,
-            question,
-            locale,
-        ),
-    )
-    .await?;
-    // Interaction layer, not assembled — same reason as `remediate`.
-    Ok(render_math(&html))
-}
-
 /// What the tutor decided about a question asked mid-reading (§7/§S8): answer
 /// it in place (today's `/ask`, unchanged), or spawn a real sub-node because
 /// the question needs more than a paragraph — a self-contained elaboration
@@ -478,38 +388,6 @@ pub async fn decide_ask_response(
     parse::ask_decision(&text)
 }
 
-/// Generates a spawned sub-node's prose (§7/§S8): a self-contained
-/// elaboration answering the question directly, written to stand on its own
-/// once spliced inline — not a reply that only makes sense next to the
-/// question. Robust tier, same as `answer_question` (genuine explanatory
-/// prose, §12.1), same `PROSE_HTML_CONTRACT`.
-#[allow(clippy::too_many_arguments)]
-pub async fn generate_subnode_prose(
-    ai: &Ai,
-    topic: &str,
-    sub_title: &str,
-    parent_title: &str,
-    node_context: &str,
-    reading_context: Option<&str>,
-    question: &str,
-    locale: crate::locale::Locale,
-) -> Result<String, EngineError> {
-    collect(
-        ai,
-        Tier::Robust,
-        prompt::subnode_prose(
-            topic,
-            sub_title,
-            parent_title,
-            node_context,
-            reading_context,
-            question,
-            locale,
-        ),
-    )
-    .await
-}
-
 /// Repair round for a bare `collect` call outside `movement.rs`'s own
 /// `repair_messages` (kept private there) — same one-bounded-retry
 /// convention (§14).
@@ -524,27 +402,6 @@ fn repair_messages(
          corrected JSON, nothing else."
     )));
     messages
-}
-
-/// Generates the NEW gradeable practice problem for the remediation loop (§8.2):
-/// a sandboxed exercise + freshly locked rubric, similar to the failed one with
-/// similarity increasing per `attempt`. Light tier (§12.1). This *replaces* the
-/// node's active rubric so the next submission grades the new problem.
-pub async fn generate_remediation_exercise(
-    ai: &Ai,
-    item_title: &str,
-    failed_exercise: &str,
-    attempt: u32,
-    sources: &str,
-    locale: crate::locale::Locale,
-) -> Result<ExerciseAndRubric, EngineError> {
-    let text = collect(
-        ai,
-        Tier::Fast,
-        prompt::remediation_exercise(item_title, failed_exercise, attempt, sources, locale),
-    )
-    .await?;
-    parse::exercise_rubric(&text)
 }
 
 /// Wraps an already-processed content section (blocks already carrying
@@ -854,32 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_exercise_rubric_with_fences() {
-        let text = r#"```json
-{"exercise_html":"<form><input name=\"a\"></form>",
- "objectives":[{"id":"o1","kind":"application","description":"apply","criteria":"gets a new case right","transfer":true}]}
-```"#;
-        let er = parse::exercise_rubric(text).unwrap();
-        assert!(er.exercise_html.contains("<form>"));
-        assert_eq!(er.rubric.objectives.len(), 1);
-        assert_eq!(er.rubric.objectives[0].kind, ObjectiveType::Application);
-        assert!(er.rubric.objectives[0].transfer);
-        // S16: missing reference_solution (model output that predates the
-        // field, or a repair round that dropped it) degrades to empty
-        // rather than a parse failure.
-        assert_eq!(er.reference_solution, "");
-    }
-
-    /// S16: the field the leniency fix depends on actually round-trips.
-    #[test]
-    fn parse_exercise_rubric_captures_reference_solution() {
-        let text = r#"{"exercise_html":"<form></form>","reference_solution":"x = 42",
- "objectives":[{"id":"o1","kind":"application","description":"apply","criteria":"c"}]}"#;
-        let er = parse::exercise_rubric(text).unwrap();
-        assert_eq!(er.reference_solution, "x = 42");
-    }
-
-    #[test]
     fn parse_assessment_json() {
         let a = parse::assessment(
             r#"{"grades":[{"objective_id":"o1","grade":"demonstrated","feedback":"ok"}]}"#,
@@ -1091,64 +922,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sanitized_surfaces_carry_the_prose_contract() {
-        // Prose and remediation go to the app origin and are sanitized, so the
-        // model must be told the contract (otherwise it generates something that
-        // disappears).
-        let rem_sys = &prompt::remediation(
-            "c",
-            "<p>chapter</p>",
-            "<form></form>",
-            "a",
-            "o1: x",
-            2,
-            crate::locale::Locale::En,
-        )[0]
-        .content;
-        assert!(rem_sys.contains(prompt::PROSE_HTML_CONTRACT));
-
-        // The exercise runs in the sandbox: opposite contract (may use JS, must postMessage).
-        let ex_sys =
-            &prompt::remediation_exercise("c", "<form></form>", 1, "", crate::locale::Locale::En)
-                [0]
-            .content;
-        assert!(ex_sys.contains("postMessage"));
-        assert!(ex_sys.contains("sandbox"));
-    }
-
     /// Live report (2026-08-20): the interaction-layer prose paths
     /// (remediation, mid-reading Q&A, spawned sub-nodes) and grading feedback
     /// had no language instruction at all, same gap as the move-generation
-    /// prompts — every one of them must now carry the `Locale`-derived
-    /// directive, for both locales.
+    /// prompts. §S17 moved remediation/Q&A/spawn generation onto the move
+    /// ABI (`movement::prompt`, covered by its own
+    /// `every_content_prompt_carries_the_locale_directive`); `grading` is
+    /// the one interaction-layer prompt still living here.
     #[test]
     fn interaction_layer_prompts_carry_the_locale_directive() {
         use crate::locale::Locale;
-
-        let rem_pt = &prompt::remediation(
-            "c",
-            "<p>chapter</p>",
-            "<form></form>",
-            "a",
-            "o1: x",
-            2,
-            Locale::PtBr,
-        )[0]
-        .content;
-        assert!(rem_pt.contains("Brazilian Portuguese"));
-
-        let ex_pt =
-            &prompt::remediation_exercise("c", "<form></form>", 1, "", Locale::PtBr)[0].content;
-        assert!(ex_pt.contains("Brazilian Portuguese"));
-
-        let ans_en = &prompt::answer_question("t", "c", "ctx", None, "why?", Locale::En)[0].content;
-        assert!(ans_en.contains("in English"));
-
-        let sub_pt =
-            &prompt::subnode_prose("t", "sub", "parent", "ctx", None, "why?", Locale::PtBr)[0]
-                .content;
-        assert!(sub_pt.contains("Brazilian Portuguese"));
 
         let rubric = Rubric { objectives: vec![] };
         let grading_pt =

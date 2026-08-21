@@ -354,28 +354,25 @@ fn scope_addendum(parent_title: Option<&str>, item_title: &str) -> String {
 }
 
 fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
-    let base = match move_type {
-        MoveType::Explain => {
-            "Write short, atomic explanatory prose for this concept. Do \
+    let base: String = match move_type {
+        MoveType::Explain => "Write short, atomic explanatory prose for this concept. Do \
              not include an exercise or ask a question — those are separate \
              moves."
-        }
-        MoveType::Confront => {
-            "Build the STRONGEST counter-argument to the learner's stated \
+            .to_string(),
+        MoveType::Confront => "Build the STRONGEST counter-argument to the learner's stated \
              position: be adversarial, not flattering. Distinguish \
              legitimate disagreement from a misconception — if it looks like \
              the latter, say so and explain why, gently but plainly."
-        }
-        MoveType::Test => {
-            "This move MUST be graded: produce a comprehension check AND its \
+            .to_string(),
+        MoveType::Respond => respond_purpose(ctx),
+        MoveType::Test => "This move MUST be graded: produce a comprehension check AND its \
              rubric, locked together. Every 'application' objective needs \
              at least one transfer=true item for a scenario not covered in the \
              text. If \"Context of what has been taught so far\" shows a prior \
              node's exercise, this check must probe something genuinely new — \
              not the same operation on cosmetically different numbers/names."
-        }
-        MoveType::Profile => {
-            "Investigate ONE of the open hypotheses about the learner listed in \
+            .to_string(),
+        MoveType::Profile => "Investigate ONE of the open hypotheses about the learner listed in \
              the profile context: ONE short conversational question about HOW \
              the learner thinks about or approaches this concept. If none is \
              listed (L2 may still pick this move off-menu), ask one short \
@@ -386,9 +383,8 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              emit a form — that is what the \"test\" move is for. graded MUST \
              be false. NEVER write about the absence of a hypothesis: \
              whatever you produce is what the learner reads."
-        }
-        MoveType::Integrate => {
-            "Connect this node's concept to concept(s) the learner has \
+            .to_string(),
+        MoveType::Integrate => "Connect this node's concept to concept(s) the learner has \
              ALREADY been taught — named in \"Context of what has been \
              taught so far\" or earlier in \"Moves already in this node\". \
              Never integrate forward into \"Curriculum objective\" or a \
@@ -396,9 +392,8 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              curriculum's final definition/destination, even to foreshadow \
              where the material is headed. If nothing has been taught yet to \
              integrate with, pick a different move instead of forcing one."
-        }
-        MoveType::Plan => {
-            "Revise the outline non-destructively ONLY if you have a concrete \
+            .to_string(),
+        MoveType::Plan => "Revise the outline non-destructively ONLY if you have a concrete \
              structural change to propose (reordering, adding, splitting, or \
              removing concepts) — write your rationale as short prose in \"html\" \
              and put the COMPLETE revised ordered list of outline item titles \
@@ -406,8 +401,8 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              the \"outline\" field. If you have nothing structural to propose \
              right now, just remark in \"html\" and leave \"outline\" empty — the \
              learner is never asked to approve a non-change."
-        }
-        _ => "Produce this move's content, atomic and focused on its stated purpose.",
+            .to_string(),
+        _ => "Produce this move's content, atomic and focused on its stated purpose.".to_string(),
     };
     let integration = if move_type == MoveType::Test {
         integration_addendum(&ctx.children_titles)
@@ -415,10 +410,102 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         String::new()
     };
     format!(
-        "{base}{integration}{}{}",
+        "{base}{integration}{}{}{}",
         review_addendum(ctx.review_mode, move_type),
-        scope_addendum(ctx.parent_title.as_deref(), &ctx.item_title)
+        scope_addendum(ctx.parent_title.as_deref(), &ctx.item_title),
+        remediation_addendum(ctx, move_type),
     )
+}
+
+/// §S17: `Respond`'s purpose text, ported verbatim from `engine::prompt`'s
+/// old `answer_question`/`subnode_prose` system messages — branches on
+/// `MoveContext::spawned_section_title` to tell the two `AskDecision`
+/// outcomes apart, same distinction `api::reading::ask_question` already
+/// made before this slice, just now expressed as prompt text instead of two
+/// separate functions.
+fn respond_purpose(ctx: &MoveContext) -> String {
+    let question = ctx.question.as_deref().unwrap_or("(no question given)");
+    match ctx.spawned_section_title.as_deref() {
+        Some(sub_title) => format!(
+            "The learner asked a question that warrants a real new section of \
+             the living document (§7/§9), not a short inline reply — it will be \
+             spliced permanently into the document, right after the paragraph \
+             where they asked. Write it as a self-contained elaboration titled \
+             \"{sub_title}\": someone reading only this section, without the \
+             surrounding conversation, should still follow it. Answer the \
+             question directly; if it states a position or disagreement, engage \
+             dialectically rather than flattering or simply validating it (§7). \
+             The learner's question: {question}"
+        ),
+        None => format!(
+            "Answer the learner's question directly and completely — do not \
+             repeat the whole node's content, resolve the specific doubt. If \
+             it states a position or disagreement, engage dialectically rather \
+             than flattering or simply validating it (§7); a plain clarifying \
+             question just gets a clear, honest answer. The learner's \
+             question: {question}"
+        ),
+    }
+}
+
+/// §8.2 remediation addendum for `Explain`/`Test`, the only two move types
+/// `api::grading::answer` ever forces — `None` (empty string) for every
+/// other type/caller, same withhold pattern as `review_addendum`/
+/// `scope_addendum`. Ported from `engine::prompt::remediation`/
+/// `remediation_exercise`'s old system messages: `Explain` gets the
+/// worked-solution framing, `Test` gets the new-but-similar-instance
+/// framing, both scaled by `attempt` (scaffolding converges toward the
+/// worked example, then difficulty ramps back up, §8.2).
+fn remediation_addendum(ctx: &MoveContext, move_type: MoveType) -> String {
+    let (Some(failed), Some(unmet), Some(attempt)) = (
+        ctx.failed_attempt.as_deref(),
+        ctx.unmet_objectives.as_deref(),
+        ctx.remediation_attempt,
+    ) else {
+        return String::new();
+    };
+    // Internal bookkeeping words ("remediation", "attempt N") below are for
+    // the MODEL's own calibration only — never write them, or any other
+    // aside naming this moment as a "session"/"attempt", into the HTML the
+    // learner sees. Fixed live 2026-08-15 (pre-§S17, `engine::prompt::
+    // remediation`): the model opened an explanation with a heading quoting
+    // this prompt's own "(§8.2)" back at the learner — the instruction
+    // moved here verbatim so the same failure can't reappear now that this
+    // framing is shared prompt text instead of its own function.
+    let no_echo = " Write ONLY the tutor's/exercise's own words, continuing \
+                    naturally — never a heading, label, or aside naming this \
+                    moment as \"remediation\", a \"session\", or an \
+                    \"attempt\"; the learner sees a tutor/exercise, never the \
+                    machinery behind it.";
+    match move_type {
+        MoveType::Explain => format!(
+            " This is a REMEDIATION explanation (attempt {attempt}) — \
+             internal framing only, see note below — not a first-pass \
+             explain: walk through the worked solution to the SPECIFIC \
+             problem the learner just missed, step by step, pointing at \
+             exactly where their reasoning likely went wrong given what they \
+             submitted. Higher attempt numbers should be more heavily \
+             scaffolded — spell out more of the steps directly rather than \
+             prompting the learner to find them. Do NOT pose a new problem \
+             here and do NOT state the answer to the exercise that follows — \
+             a separate practice problem is generated as its own move.{no_echo}\n\
+             The problem they missed:\n{failed}\n\
+             Objectives not yet demonstrated:\n{unmet}"
+        ),
+        MoveType::Test => format!(
+            " This is a REMEDIATION check (attempt {attempt}) — internal \
+             framing only, see note below — not a first-pass test: it must \
+             probe the SAME objective(s) as the problem the learner just \
+             failed, but be a DIFFERENT instance (new numbers/scenario) — \
+             never a copy. The higher the attempt number, the closer this \
+             instance should sit to the worked example just explained (more \
+             scaffolding); difficulty ramps back up only once the learner \
+             demonstrates the concept.{no_echo}\n\
+             The problem they missed:\n{failed}\n\
+             Objectives not yet demonstrated:\n{unmet}"
+        ),
+        _ => String::new(),
+    }
 }
 
 /// Prompt for the **streamed** path (`MoveRender::Streamed` types): pure
@@ -454,7 +541,7 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
              Context of what has been taught so far: {}{}\n\
-             Curriculum objective: {}\nLearner profile: {}{}{}",
+             Curriculum objective: {}\nLearner profile: {}{}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
@@ -463,8 +550,22 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
             non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
             node_so_far_line(ctx),
+            reading_selection_line(ctx),
         )),
     ]
+}
+
+/// §S17: renders `MoveContext::reading_context` (a `Respond` move's
+/// selection/reading-line anchor) as a user-message line — mirrors
+/// `engine::prompt`'s old `reading_context_block`, just folded into the
+/// shared streamed-path builder instead of a separate `answer_question`
+/// prompt function. Empty for every move type/caller with no reading
+/// context set.
+fn reading_selection_line(ctx: &MoveContext) -> String {
+    match ctx.reading_context.as_deref() {
+        Some(t) if !t.trim().is_empty() => format!("\nWhere the learner is reading: {t}"),
+        _ => String::new(),
+    }
 }
 
 /// Prompt for the **structured** path (`MoveRender::Structured` types):
@@ -703,5 +804,88 @@ mod tests {
         let structured_pt = &generate_move(AgentPolicy::L1, MoveType::Test, &pt)[0].content;
         assert!(structured_en.contains("in English"));
         assert!(structured_pt.contains("Brazilian Portuguese"));
+    }
+
+    /// §S17: `Respond` is Rust-forced (`/ask`) — it must never appear in a
+    /// menu a model can pick from, on either rung that has a real menu.
+    #[test]
+    fn respond_never_offered_in_the_menu() {
+        let ctx = MoveContext::default();
+        assert!(!menu_text(&ctx).contains("respond"));
+        let l2 = decide_move(AgentPolicy::L2, &ctx)[0].content.clone();
+        assert!(!l2.contains("respond"));
+    }
+
+    /// §S17: the two `AskDecision` outcomes must produce distinguishable
+    /// prompt text — inline answers stay a direct reply, a spawn gets the
+    /// "self-contained elaboration titled X" framing carrying the new
+    /// section's own title, not the parent node's.
+    #[test]
+    fn respond_purpose_distinguishes_inline_from_spawn() {
+        let inline = MoveContext {
+            question: Some("why does this converge?".into()),
+            ..Default::default()
+        };
+        let sys = &generate_move_streamed(MoveType::Respond, &inline)[0].content;
+        assert!(sys.contains("why does this converge?"));
+        assert!(!sys.contains("self-contained elaboration"));
+
+        let spawn = MoveContext {
+            question: Some("why does this converge?".into()),
+            spawned_section_title: Some("Convergence criteria".into()),
+            ..Default::default()
+        };
+        let sys = &generate_move_streamed(MoveType::Respond, &spawn)[0].content;
+        assert!(sys.contains("self-contained elaboration"));
+        assert!(sys.contains("Convergence criteria"));
+    }
+
+    /// §S17: a `Respond` move's user message carries the reading-context
+    /// anchor when the caller set one, and stays silent when it didn't —
+    /// same optional-context contract every other `MoveContext` field uses.
+    #[test]
+    fn respond_user_message_carries_reading_context_when_present() {
+        let with_ctx = MoveContext {
+            question: Some("q".into()),
+            reading_context: Some("the paragraph about limits".into()),
+            ..Default::default()
+        };
+        let user = &generate_move_streamed(MoveType::Respond, &with_ctx)[1].content;
+        assert!(user.contains("the paragraph about limits"));
+
+        let without = MoveContext {
+            question: Some("q".into()),
+            ..Default::default()
+        };
+        let user = &generate_move_streamed(MoveType::Respond, &without)[1].content;
+        assert!(!user.contains("Where the learner is reading"));
+    }
+
+    /// §8.2: `remediation_addendum` only fires when the caller set the full
+    /// remediation trio (`failed_attempt`/`unmet_objectives`/
+    /// `remediation_attempt`) — a normal, non-remediation `Explain`/`Test`
+    /// move must see none of this framing. Also guards the 2026-08-15 live
+    /// fix ported into this addendum: the internal words "remediation"/
+    /// "attempt" must never reach the learner unescorted by the no-echo
+    /// instruction.
+    #[test]
+    fn remediation_addendum_only_fires_with_full_context_and_never_bare() {
+        let bare = MoveContext::default();
+        let sys = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
+        assert!(!sys.to_lowercase().contains("remediation"));
+
+        let remediating = MoveContext {
+            failed_attempt: Some("Exercise: 2+2=?\nStudent's answer: 5".into()),
+            unmet_objectives: Some("- o1: arithmetic wrong".into()),
+            remediation_attempt: Some(2),
+            ..Default::default()
+        };
+        let explain_sys = &generate_move_streamed(MoveType::Explain, &remediating)[0].content;
+        assert!(explain_sys.contains("2+2=?"));
+        assert!(explain_sys.contains("never a heading, label, or aside"));
+
+        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &remediating)[0].content;
+        assert!(test_sys.contains("arithmetic wrong"));
+        assert!(test_sys.contains("DIFFERENT instance"));
     }
 }

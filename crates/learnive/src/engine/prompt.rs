@@ -367,58 +367,6 @@ pub fn sources_block(sources: &str) -> String {
     }
 }
 
-/// Remediation EXPLANATION only (§8.2): a worked, step-by-step solution of the
-/// problem the student just got wrong. It deliberately does NOT propose the
-/// next problem (that is a separate, gradeable sandbox exercise) and must not
-/// leak the answer to that upcoming problem. The system message must read as
-/// pure pedagogy — no internal terminology ("remediation", a spec citation,
-/// "attempt N") in text the model might echo back into its own output: seen
-/// live, 2026-08-15, the model opened its explanation with a heading quoting
-/// this prompt's own former "(§8.2)" back at the learner. `chapter_html` (the
-/// node's own already-taught content, §4.3) is what lets the model tell
-/// "already explained, don't repeat" apart from "genuinely missing, explain
-/// it now" — without it this call had no way to know what the learner had
-/// already read, and would routinely re-teach the whole concept from scratch.
-pub fn remediation(
-    item_title: &str,
-    chapter_html: &str,
-    exercise_html: &str,
-    answer: &str,
-    unmet_summary: &str,
-    attempt: u32,
-    locale: Locale,
-) -> Vec<ChatMessage> {
-    let lang = language_directive(locale);
-    vec![
-        ChatMessage::system(format!(
-            "You are a personal tutor. The student just got a check wrong. Write \
-             ONLY the tutor's own next words, continuing the conversation \
-             naturally — never a heading, label, or aside naming this moment \
-             as \"remediation\", a \"session\", an \"attempt\", or any other \
-             internal bookkeeping term; the learner sees a tutor talking to \
-             them, never the machinery behind it.\n\n\
-             Walk through a worked, step-by-step solution OF THE EXACT PROBLEM \
-             THEY JUST MISSED, naming the misconception their answer suggests. \
-             \"Chapter content already taught\" below is what the learner \
-             already read — do NOT re-explain anything it already covers; stay \
-             tightly focused on correcting THIS mistake. Only add new \
-             conceptual explanation for the specific point behind the \
-             student's error if the chapter did not cover it, or covered it \
-             too thinly to account for this particular mistake. The higher \
-             the attempt number below, the more concrete and closely \
-             scaffolded the walkthrough should be. Do NOT pose a new problem \
-             here and do NOT state the answer to any future exercise — a \
-             separate practice problem follows.\n\n\
-             {lang}\n\n{PROSE_HTML_CONTRACT}"
-        )),
-        ChatMessage::user(format!(
-            "Concept: {item_title}\nChapter content already taught: {chapter_html}\n\
-             Exercise: {exercise_html}\nStudent's answer: {answer}\n\
-             Objectives not demonstrated:\n{unmet_summary}\nAttempt number: {attempt}"
-        )),
-    ]
-}
-
 /// Formats the caller's reading context (`api::reading_context`) — the
 /// passage the question is about plus its neighbours, and the selected
 /// span when there was a selection — as its own labelled block. Shared by
@@ -430,47 +378,6 @@ fn reading_context_block(reading_context: Option<&str>) -> String {
         Some(t) => format!("\n\nWHERE THE LEARNER IS READING:\n{t}"),
         None => String::new(),
     }
-}
-
-/// A question asked mid-reading (§S6, §9). `reading_context` locates the
-/// question in the document — the passage it was asked from, what
-/// surrounds it, and the exact selected span if there was one; `None`
-/// only when the anchor names no block. Same adversarial-not-flattering
-/// instruction `confront` uses (§7), but scoped to only when the question
-/// actually states a position — a plain clarifying question just gets a
-/// clear answer.
-pub fn answer_question(
-    topic: &str,
-    item_title: &str,
-    node_context: &str,
-    reading_context: Option<&str>,
-    question: &str,
-    locale: Locale,
-) -> Vec<ChatMessage> {
-    let anchor_block = reading_context_block(reading_context);
-    let lang = language_directive(locale);
-    vec![
-        ChatMessage::system(format!(
-            "The learner is reading a node of a living document and asked a \
-             question, in place. Your answer is not a reply in a chat — it is \
-             spliced into the document itself, immediately after the passage \
-             they asked about (§9). Write it as the explanation that passage \
-             was missing for this learner: it has to read as part of the text \
-             at that point. Do not open with pleasantries, do not restate the \
-             question, do not sign off. Answer directly and honestly, grounded \
-             in the node's content. If the question states a position or \
-             disagreement, engage with it dialectically — build the strongest \
-             honest counter-argument rather than flattering or simply validating \
-             it (§7) — but only when there is actually a stance to engage with; a \
-             plain clarifying question just gets a clear, honest answer. Do not \
-             repeat the whole node; resolve the specific doubt.\n\n\
-             {lang}\n\n{PROSE_HTML_CONTRACT}"
-        )),
-        ChatMessage::user(format!(
-            "Topic: {topic}\nConcept of this node: {item_title}\n\
-             Node content so far: {node_context}{anchor_block}\n\nQuestion: {question}"
-        )),
-    ]
 }
 
 /// Decides whether a question gets answered inline or spawns a sub-node
@@ -502,75 +409,6 @@ pub fn decide_ask_response(
         ChatMessage::user(format!(
             "Topic: {topic}\nConcept of this node: {item_title}\n\
              Node content so far: {node_context}{anchor_block}\n\nQuestion: {question}"
-        )),
-    ]
-}
-
-/// A spawned sub-node's prose (§7/§S8): a self-contained elaboration, not
-/// a reply — it must make sense read on its own, spliced permanently
-/// into the document right after the paragraph that prompted it.
-pub fn subnode_prose(
-    topic: &str,
-    sub_title: &str,
-    parent_title: &str,
-    node_context: &str,
-    reading_context: Option<&str>,
-    question: &str,
-    locale: Locale,
-) -> Vec<ChatMessage> {
-    let anchor_block = reading_context_block(reading_context);
-    let lang = language_directive(locale);
-    vec![
-        ChatMessage::system(format!(
-            "The learner asked a question that warrants a real new section of \
-             the living document (§7/§9), not a short inline reply — it will be \
-             spliced permanently into the document, right after the paragraph \
-             where they asked. Write it as a self-contained elaboration titled \
-             \"{sub_title}\": someone reading only this section, without the \
-             surrounding conversation, should still follow it. Answer the \
-             question directly; if it states a position or disagreement, engage \
-             dialectically rather than flattering or simply validating it (§7).\n\n\
-             {lang}\n\n{PROSE_HTML_CONTRACT}"
-        )),
-        ChatMessage::user(format!(
-            "Topic: {topic}\nParent concept: {parent_title}\nNew section title: \
-             {sub_title}\nParent node content so far: {node_context}{anchor_block}\n\n\
-             Question: {question}"
-        )),
-    ]
-}
-
-/// A NEW practice problem for the remediation loop (§8.2): a fresh, gradeable
-/// exercise + locked rubric (same JSON contract as [`exercise_rubric`]),
-/// *similar* to the failed one with similarity growing per `attempt`
-/// (scaffolding converges toward the worked example, then ramps back up). Runs
-/// sandboxed and never reveals its answer.
-pub fn remediation_exercise(
-    item_title: &str,
-    failed_exercise: &str,
-    attempt: u32,
-    sources: &str,
-    locale: Locale,
-) -> Vec<ChatMessage> {
-    let lang = language_directive(locale);
-    vec![
-        ChatMessage::system(format!(
-            "Generate a NEW practice problem AND its grading rubric TOGETHER, \
-             for a student who just failed a check and was given a worked example. \
-             It must test the SAME objective but be a DIFFERENT instance (new \
-             numbers/scenario), similar to the failed one — attempt {attempt}: the \
-             higher it is, the closer to the worked example (more scaffolding). \
-             Respond ONLY with JSON: \
-             {{\"exercise_html\":\"<form>...</form>\",\"reference_solution\":\"...\",\
-             \"objectives\":[{{\"id\":\"o1\",\
-             \"kind\":\"knowledge|application|synthesis\",\"description\":\"...\",\
-             \"criteria\":\"what counts as demonstrated\",\"transfer\":true|false}}]}}.\n\n\
-             {lang}\n\n{EXERCISE_HTML_CONTRACT}"
-        )),
-        ChatMessage::user(format!(
-            "Concept: {item_title}\nThe problem the student just failed:\n{failed_exercise}\
-             {}",
-            sources_block(sources)
         )),
     ]
 }

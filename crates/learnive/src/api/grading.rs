@@ -230,49 +230,77 @@ pub async fn answer(
         })
         .count() as u32
         + 1;
-    // (a) Explanation: a worked solution of the problem they just missed (§8.2),
-    // sanitized prose — it does NOT contain the next problem and must not leak it.
-    // `node.content.html` (the chapter already read) lets it tell "already
-    // explained, don't repeat" apart from "genuinely never covered".
-    let explanation = engine::remediate(
-        &ai,
-        &sidecar.title,
-        &node.content.html,
-        &sidecar.exercise_html,
-        &body.answer,
-        &assessment.unmet(),
-        attempt,
+    // §S17: remediation now generates through the move ABI
+    // (`movement::generate_move_complete`/`generate_move`) instead of the
+    // standalone `engine::remediate`/`generate_remediation_exercise` calls —
+    // same profile/grounding/citations context and real tactic self-labels
+    // any other move gets, joined to this node's evidence table via the
+    // `MoveGenerated` events appended below. WHICH move type fires stays a
+    // Rust decision either way (§8.2: never the model's choice) — this
+    // slice only unifies the generation path, not who decides.
+    let unmet_summary = assessment
+        .unmet()
+        .iter()
+        .map(|g| format!("- {}: {}", g.objective_id, g.feedback))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let failed_attempt = format!(
+        "Exercise:\n{}\n\nStudent's answer:\n{}",
+        sidecar.exercise_html, body.answer
+    );
+    let grounding = grounding_for(&state, &sidecar.title).await;
+    let policy = *state.policy.load_full();
+    let ctx = MoveContext {
+        topic: sidecar.topic.clone(),
+        item_title: sidecar.title.clone(),
+        // The chapter already read (§8.2: lets a move tell "already
+        // explained, don't repeat" apart from "genuinely never covered"),
+        // same source `engine::remediate` used to take as `chapter_html` —
+        // `node_tail` truncates to the same §14 budget every other move's
+        // tail already uses.
+        node_tail: node.content.html.clone(),
+        objective: objective_for(&state, &doc_id),
+        profile: profile_for(&state, &doc_id),
+        grounding,
         locale,
-    )
-    .await?;
+        failed_attempt: Some(failed_attempt),
+        unmet_objectives: Some(unmet_summary),
+        remediation_attempt: Some(attempt),
+        ..Default::default()
+    };
+
+    // (a) Explanation: a worked solution of the problem they just missed
+    // (§8.2), sanitized prose — it does NOT contain the next problem and
+    // must not leak it (`remediation_addendum`'s instruction).
+    let explain_move_id = engine::new_id();
+    let explain_move = movement::generate_move_complete(&ai, MoveType::Explain, &ctx).await?;
+    if let Err(e) = event_log.append(
+        Some(&node_id),
+        EventKind::MoveGenerated {
+            move_id: explain_move_id,
+            move_type: MoveType::Explain.to_string(),
+            tactics: explain_move.tactics.clone(),
+            rung: format!("{policy:?}"),
+        },
+    ) {
+        eprintln!("event log append failed: {e}");
+    }
+    let explanation = explain_move.html;
 
     // (b) A NEW gradeable problem in the sandbox, similar to the failed one and
     // grounded in the same sources (§8/§8.2). Its rubric is freshly locked and the
-    // answer is never revealed (EXERCISE_HTML_CONTRACT).
-    let grounding = grounding_for(&state, &sidecar.title).await;
-    let er = engine::generate_remediation_exercise(
-        &ai,
-        &sidecar.title,
-        &sidecar.exercise_html,
-        attempt,
-        &grounding,
-        locale,
-    )
-    .await?;
-
-    // The new problem is a fresh graded artifact — its own move_id, so a future
-    // submission's MoveGraded joins onto it and not the one just graded above.
-    // It stays on the legacy remediation path (not `decide_move`/`generate_move`):
-    // L0's rule has no slot for a second graded move in one node, and the new
-    // problem is required by construction (§8.2), never a model choice.
+    // answer is never revealed (EXERCISE_HTML_CONTRACT). Its own move_id, so a
+    // future submission's MoveGraded joins onto it and not the one just graded
+    // above.
+    let new_move = movement::generate_move(&ai, policy, MoveType::Test, &ctx).await?;
     let new_move_id = engine::new_id();
     if let Err(e) = event_log.append(
         Some(&node_id),
         EventKind::MoveGenerated {
             move_id: new_move_id.clone(),
             move_type: MoveType::Test.to_string(),
-            tactics: Vec::new(),
-            rung: format!("{:?}", *state.policy.load_full()),
+            tactics: new_move.tactics.clone(),
+            rung: format!("{policy:?}"),
         },
     ) {
         eprintln!("event log append failed: {e}");
@@ -284,9 +312,11 @@ pub async fn answer(
     // interaction layer, which retains the full attempt/remediation trajectory.
     let new_sidecar = RubricSidecar {
         move_id: new_move_id,
-        rubric: er.rubric,
-        exercise_html: er.exercise_html.clone(),
-        reference_solution: er.reference_solution.clone(),
+        rubric: new_move
+            .rubric
+            .expect("MoveType::Test always parses with graded=true and a rubric"),
+        exercise_html: new_move.html.clone(),
+        reference_solution: new_move.reference_solution.clone(),
         title: sidecar.title.clone(),
         topic: sidecar.topic.clone(),
     };

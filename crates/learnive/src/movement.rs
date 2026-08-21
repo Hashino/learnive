@@ -120,6 +120,20 @@ pub enum MoveType {
     Revisit,
     Plan,
     Other,
+    /// Answers a question the learner asked mid-reading (§S6/§9/§S17) —
+    /// distinct from `Ask` (the TUTOR asking the student). Forced by Rust
+    /// only, exactly like `Research`: never listed in `candidate_types`, so
+    /// `decide_move`/`decide_and_generate` can never pick it — §8.2's
+    /// unification is of the generation PATH (profile/grounding/citations/
+    /// tactics/`MoveGenerated`), not of who decides to answer a question.
+    /// Streamed (`render()`), Robust tier (genuine explanatory prose,
+    /// §12.1) — same as the `answer_question`/`generate_subnode_prose`
+    /// calls it replaces. Used for both the inline-answer and the
+    /// spawn-a-sub-node cases (`MoveContext::spawned_section_title`
+    /// distinguishes them for `purpose()`); `api::reading::ask_question`
+    /// still decides which case via `engine::decide_ask_response`, unchanged
+    /// — only the generation call itself moved onto the ABI.
+    Respond,
     /// Acquires grounding for a concept the current corpus has nothing on
     /// (§S13, `api::cold_start::acquire`) — chosen exactly like any other
     /// move (offered in the menu only when `MoveContext::grounding` is
@@ -148,7 +162,7 @@ impl MoveType {
     /// for the rest (exercises, questions, short moves).
     pub fn tier(self) -> Tier {
         match self {
-            MoveType::Explain | MoveType::Confront => Tier::Robust,
+            MoveType::Explain | MoveType::Confront | MoveType::Respond => Tier::Robust,
             _ => Tier::Fast,
         }
     }
@@ -181,6 +195,7 @@ impl std::fmt::Display for MoveType {
             MoveType::Revisit => "revisit",
             MoveType::Plan => "plan",
             MoveType::Other => "other",
+            MoveType::Respond => "respond",
             MoveType::Research => "research",
         };
         write!(f, "{s}")
@@ -281,6 +296,39 @@ pub struct MoveContext {
     /// `Locale::En`, so every `..Default::default()` test fixture keeps
     /// compiling unchanged.
     pub locale: crate::locale::Locale,
+    /// §S17: the learner's question text, set only for a Rust-forced
+    /// `Respond` move (`api::reading::ask_question`) — `None` for every
+    /// other move type/caller. Mirrors what `engine::answer_question`'s
+    /// `question` param used to carry directly.
+    pub question: Option<String>,
+    /// §S17: where in the document the question was asked from (selection
+    /// or reading line), when there was one — mirrors `answer_question`'s
+    /// `reading_context` param. `None` when the anchor named no block, same
+    /// as before.
+    pub reading_context: Option<String>,
+    /// §S17: set only when a `Respond` move is spawning a new sub-node
+    /// rather than answering inline (`engine::AskDecision::Spawn`) — the new
+    /// section's own title, mirroring `generate_subnode_prose`'s `sub_title`
+    /// param. `item_title`/`topic` stay the PARENT node's own scope in this
+    /// case (unlike a §S15 prerequisite sub-node); only this field switches
+    /// `purpose()`'s framing from "answer inline" to "write a self-contained
+    /// elaboration titled X, spliced right after where it was asked".
+    pub spawned_section_title: Option<String>,
+    /// §8.2 remediation, forced in Rust the same way `question` is (never
+    /// `decide_move`'s choice): the exercise the learner just got wrong,
+    /// paired with their answer — mirrors `engine::remediate`'s
+    /// `exercise_html`/`answer` params, pre-formatted into one block by the
+    /// caller. Set together with `unmet_objectives`/`remediation_attempt` or
+    /// not at all.
+    pub failed_attempt: Option<String>,
+    /// §8.2: which rubric objectives the failed attempt didn't demonstrate,
+    /// pre-formatted the same way `engine::remediate`'s `unmet` summary was.
+    pub unmet_objectives: Option<String>,
+    /// §8.2: how many remediation attempts on this same objective so far —
+    /// scaffolding converges toward the worked example as this grows, then
+    /// difficulty ramps back up. Mirrors `remediate`/`generate_remediation_
+    /// exercise`'s `attempt` param.
+    pub remediation_attempt: Option<u32>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.
@@ -523,6 +571,31 @@ pub fn finish_streamed_move(move_type: MoveType, accumulated: &str) -> Generated
         proposed_outline: Vec::new(),
         repaired: false,
     }
+}
+
+/// Generates a **streamed-contract** move without actually streaming (§S17):
+/// same prose contract [`generate_move_stream`]/[`finish_streamed_move`]
+/// use, but collected as one call — for callers whose own response isn't
+/// itself an SSE frame (`/ask`'s JSON reply, remediation's explanation: both
+/// pre-existing non-streaming endpoints unified onto the move ABI in this
+/// slice) and so have no stream to pump token-by-token. `engine::collect`
+/// (== `ai.complete`) is the same non-streaming path every other non-SSE
+/// prompt call in this codebase already uses — see its doc comment for why
+/// `stream: false` is also the more reliable of the two against a
+/// reasoning-heavy model, not just simpler here.
+pub async fn generate_move_complete(
+    ai: &Ai,
+    move_type: MoveType,
+    ctx: &MoveContext,
+) -> Result<GeneratedMove, EngineError> {
+    debug_assert_eq!(
+        move_type.render(),
+        MoveRender::Streamed,
+        "generate_move_complete is only for MoveRender::Streamed types"
+    );
+    let messages = prompt::generate_move_streamed(move_type, ctx);
+    let text = engine::collect(ai, move_type.tier(), messages).await?;
+    Ok(finish_streamed_move(move_type, &text))
 }
 
 const ISLAND_OPEN: &str = "<figure data-interactive>";

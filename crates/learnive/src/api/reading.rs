@@ -311,25 +311,46 @@ pub async fn ask_question(
         eprintln!("event log append failed: {e}");
     }
 
+    // §S17: both outcomes below now generate through the move ABI
+    // (`movement::generate_move_complete`) instead of the standalone
+    // `engine::answer_question`/`generate_subnode_prose` calls — the same
+    // context (profile/grounding/citations) and tactic self-labels any
+    // other move gets, joined to this node's evidence table via the
+    // `MoveGenerated` event appended right below.
+    let mut ctx = MoveContext {
+        topic: topic.clone(),
+        item_title: title.clone(),
+        node_tail,
+        objective: objective_for(&state, &doc_id),
+        profile: profile_for(&state, &doc_id),
+        grounding: grounding_for(&state, &title).await,
+        locale,
+        question: Some(question.to_string()),
+        reading_context: context.clone(),
+        ..Default::default()
+    };
+
     match decision {
         AskDecision::Inline => {
-            let answer_html = engine::answer_question(
-                &ai,
-                &topic,
-                &title,
-                &node_tail,
-                context.as_deref(),
-                question,
-                locale,
-            )
-            .await?;
+            let generated = movement::generate_move_complete(&ai, MoveType::Respond, &ctx).await?;
+            if let Err(e) = event_log.append(
+                Some(&node_id),
+                EventKind::MoveGenerated {
+                    move_id: move_id.clone(),
+                    move_type: MoveType::Respond.to_string(),
+                    tactics: generated.tactics.clone(),
+                    rung: format!("{:?}", *state.policy.load_full()),
+                },
+            ) {
+                eprintln!("event log append failed: {e}");
+            }
 
             // Each paragraph of the answer gets its own `data-block-id`, on
             // the same `{id}-b{n}` scheme the content layer uses: an answer is
             // several paragraphs and the learner asks about *one* of them, so
             // it has to be addressable at that grain (§4.3) rather than as one
             // undifferentiated blob.
-            let answer_html = ensure_block_ids(&answer_html, &format!("{move_id}-b"));
+            let answer_html = ensure_block_ids(&generated.html, &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
                 question_header(question, &body.anchor, locale)
@@ -354,18 +375,20 @@ pub async fn ask_question(
         }
         AskDecision::Spawn { title: sub_title } => {
             let sub_id = engine::new_id();
-            let prose = engine::generate_subnode_prose(
-                &ai,
-                &topic,
-                &sub_title,
-                &title,
-                &node_tail,
-                context.as_deref(),
-                question,
-                locale,
-            )
-            .await?;
-            let sub_node = engine::assemble_content_node(&doc_id, &sub_id, &prose)?;
+            ctx.spawned_section_title = Some(sub_title.clone());
+            let generated = movement::generate_move_complete(&ai, MoveType::Respond, &ctx).await?;
+            if let Err(e) = event_log.append(
+                Some(&node_id),
+                EventKind::MoveGenerated {
+                    move_id: move_id.clone(),
+                    move_type: MoveType::Respond.to_string(),
+                    tactics: generated.tactics.clone(),
+                    rung: format!("{:?}", *state.policy.load_full()),
+                },
+            ) {
+                eprintln!("event log append failed: {e}");
+            }
+            let sub_node = engine::assemble_content_node(&doc_id, &sub_id, &generated.html)?;
             state.store.write_node(&sub_node)?;
             state.store.update_outline_file(&doc_id, |json| {
                 let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;

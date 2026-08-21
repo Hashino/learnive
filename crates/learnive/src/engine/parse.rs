@@ -1,8 +1,4 @@
-use super::{
-    AskDecision, Assessment, EngineError, ExerciseAndRubric, ObjectiveProposal,
-    ProposedOutlineNode, Rubric, RubricObjective,
-};
-use learnive_core::ObjectiveType;
+use super::{AskDecision, Assessment, EngineError, ObjectiveProposal, ProposedOutlineNode};
 use serde::Deserialize;
 
 /// Cold-start objective proposal (§S4): `{"text":"...","title":"..."}`.
@@ -57,50 +53,6 @@ pub(crate) fn extract_json(text: &str) -> Option<&str> {
     } else {
         None
     }
-}
-
-pub fn exercise_rubric(text: &str) -> Result<ExerciseAndRubric, EngineError> {
-    #[derive(Deserialize)]
-    struct Raw {
-        exercise_html: String,
-        #[serde(default)]
-        reference_solution: String,
-        objectives: Vec<RawObjective>,
-    }
-    #[derive(Deserialize)]
-    struct RawObjective {
-        id: String,
-        #[serde(default = "knowledge")]
-        kind: ObjectiveType,
-        description: String,
-        #[serde(default)]
-        criteria: String,
-        #[serde(default)]
-        transfer: bool,
-    }
-    fn knowledge() -> ObjectiveType {
-        ObjectiveType::Knowledge
-    }
-
-    let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
-    let raw: Raw = serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
-    Ok(ExerciseAndRubric {
-        exercise_html: raw.exercise_html,
-        reference_solution: raw.reference_solution,
-        rubric: Rubric {
-            objectives: raw
-                .objectives
-                .into_iter()
-                .map(|o| RubricObjective {
-                    id: o.id,
-                    kind: o.kind,
-                    description: o.description,
-                    criteria: o.criteria,
-                    transfer: o.transfer,
-                })
-                .collect(),
-        },
-    })
 }
 
 pub fn assessment(text: &str) -> Result<Assessment, EngineError> {
