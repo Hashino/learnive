@@ -193,6 +193,25 @@ pub struct FetchedSource {
     pub sections: Vec<Section>,
 }
 
+/// A section's locator+title, without its body — what a table of contents is
+/// made of (§11.1 item 4, S19).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SectionSummary {
+    pub locator: String,
+    pub title: String,
+}
+
+/// A source's metadata + table of contents, without any section body (§11.1
+/// item 4) — the cheap thing `GET /api/sources/{id}` returns instead of the
+/// whole [`FetchedSource`], so opening the source panel or reading the
+/// sumário doesn't ship a whole book. A section's body comes separately,
+/// addressed by locator (`Corpus::load_section`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceIndex {
+    pub meta: SourceMeta,
+    pub toc: Vec<SectionSummary>,
+}
+
 impl FetchedSource {
     /// Total extracted characters — a cheap proxy for "did we get real content".
     pub fn char_len(&self) -> usize {

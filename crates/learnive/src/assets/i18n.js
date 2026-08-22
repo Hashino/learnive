@@ -76,6 +76,7 @@ const I18N = {
     "review.try": "Now try this one:",
     "source.loading": "Loading…",
     "source.unavailable": "Source unavailable",
+    "source.sectionLoading": "Loading section…",
     // Status
     "status.objective": "thinking about the objective…",
     "error.failed": "failed: ",
@@ -171,6 +172,7 @@ const I18N = {
     "review.try": "Agora tente este:",
     "source.loading": "Carregando…",
     "source.unavailable": "Fonte indisponível",
+    "source.sectionLoading": "Carregando seção…",
     "status.objective": "pensando no objetivo…",
     "error.failed": "falhou: ",
     "status.curriculum": "planejando o currículo…",

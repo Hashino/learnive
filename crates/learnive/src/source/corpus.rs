@@ -8,17 +8,41 @@
 //! <data>/corpus/
 //!   SOURCES.md            # human-readable manifest (esp. required for web sources, §11)
 //!   <source-id>/
-//!     source.json         # normalized: SourceMeta + Section[] (§11.1)
+//!     source.json         # meta + table of contents only (§11.1 item 4, S19)
+//!     sections/
+//!       <locator-hash>.json  # one Section (locator, title, text, html) per file
 //! ```
+//!
+//! Split on purpose (§11.1 item 4): before this, `source.json` held every
+//! section's full text+html, so `GET /api/sources/{id}` shipped a whole book
+//! per citation click. Now the addressable unit is one section, loadable on
+//! its own (`load_section`) — the reader navigates and loads on demand, the
+//! agent reads the table of contents instead of the whole book (S21's
+//! prerequisite), and a citation resolves against one file, not a megabyte
+//! JSON blob.
+//!
+//! `source.json` is still the commit marker: `store` writes every section
+//! file first, `source.json` last, so `has`/the no-op-if-exists guard below
+//! only ever see a source as "acquired" once every section is actually on
+//! disk — an interruption mid-fetch leaves no `source.json` and a retry
+//! starts clean.
 //!
 //! A source id is written **once**: `store` is a no-op if the id already exists,
 //! so re-acquiring the same source is free and never clobbers it (§5 non-destructive).
+//!
+//! **Backward compatibility**: every source acquired before this split has a
+//! monolithic `source.json` (`{meta, sections: [full Section, ...]}`, no
+//! `toc` key, no `sections/` dir). `load`/`load_index`/`load_section` all
+//! detect this shape (presence of a top-level `"sections"` key) and read it
+//! as-is rather than failing — non-destructive (§5): nothing here silently
+//! rewrites an old source into the new layout. A future completion/re-ingest
+//! pass (§11.1 item 6) is the explicit migration path.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{FetchedSource, Origin, SourceMeta};
+use super::{FetchedSource, Origin, Section, SectionSummary, SourceIndex, SourceMeta};
 
 #[derive(Debug)]
 pub enum CorpusError {
@@ -74,7 +98,9 @@ impl Corpus {
 
     /// Persists a normalized source **once**. If the id already exists this is a
     /// no-op (the corpus is immutable — fetched once, reused). Returns whether it
-    /// was newly written.
+    /// was newly written. Writes every section body first, `source.json`
+    /// (meta+toc) last — see the module doc comment on why `source.json`'s
+    /// existence is the commit marker.
     pub fn store(&self, source: &FetchedSource) -> Result<bool> {
         let id = safe_id(&source.meta.id)?;
         let dir = self.root.join(id);
@@ -82,11 +108,33 @@ impl Corpus {
         if path.is_file() {
             return Ok(false);
         }
-        fs::create_dir_all(&dir)?;
+        let sections_dir = dir.join("sections");
+        fs::create_dir_all(&sections_dir)?;
+
+        for section in &source.sections {
+            let stem = locator_filename(&section.locator);
+            let sec_path = sections_dir.join(format!("{stem}.json"));
+            let sec_json = serde_json::to_string_pretty(section)
+                .map_err(|e| CorpusError::Decode(e.to_string()))?;
+            let sec_tmp = sections_dir.join(format!("{stem}.json.tmp"));
+            fs::write(&sec_tmp, sec_json.as_bytes())?;
+            fs::rename(&sec_tmp, &sec_path)?;
+        }
+
+        let index = SourceIndex {
+            meta: source.meta.clone(),
+            toc: source
+                .sections
+                .iter()
+                .map(|s| SectionSummary {
+                    locator: s.locator.clone(),
+                    title: s.title.clone(),
+                })
+                .collect(),
+        };
         let json =
-            serde_json::to_string_pretty(source).map_err(|e| CorpusError::Decode(e.to_string()))?;
-        // Atomic write (tmp + rename), mirroring `store.rs`, so an interrupted
-        // fetch never leaves a half-written source.json.
+            serde_json::to_string_pretty(&index).map_err(|e| CorpusError::Decode(e.to_string()))?;
+        // Atomic write (tmp + rename), mirroring `store.rs`.
         let tmp = dir.join("source.json.tmp");
         fs::write(&tmp, json.as_bytes())?;
         fs::rename(&tmp, &path)?;
@@ -94,22 +142,82 @@ impl Corpus {
         Ok(true)
     }
 
-    /// Loads a normalized source from the corpus.
+    /// Loads a normalized source **in full** — every section's body, assembled
+    /// from `sections/` (or read as-is from a pre-split, monolithic
+    /// `source.json`, see the module doc comment). Prefer [`Corpus::load_index`]
+    /// or [`Corpus::load_section`] when the whole book isn't actually needed
+    /// (§10 index rebuild is the one caller that legitimately wants everything).
     pub fn load(&self, id: &str) -> Result<FetchedSource> {
         let id = safe_id(id)?;
-        let path = self.root.join(id).join("source.json");
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(CorpusError::NotFound(id.to_string()));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        serde_json::from_slice(&bytes).map_err(|e| CorpusError::Decode(e.to_string()))
+        let dir = self.root.join(id);
+        let value = read_source_json(&dir, id)?;
+        if value.get("sections").is_some() {
+            return serde_json::from_value(value).map_err(|e| CorpusError::Decode(e.to_string()));
+        }
+        let index: SourceIndex =
+            serde_json::from_value(value).map_err(|e| CorpusError::Decode(e.to_string()))?;
+        let sections_dir = dir.join("sections");
+        let mut sections = Vec::with_capacity(index.toc.len());
+        for summary in &index.toc {
+            sections.push(read_section_file(&sections_dir, &summary.locator)?);
+        }
+        Ok(FetchedSource {
+            meta: index.meta,
+            sections,
+        })
+    }
+
+    /// Loads just the metadata + table of contents (§11.1 item 4) — what the
+    /// source panel, the reader's navigation, and the S21 agent-reads-a-sumário
+    /// path use instead of loading every section's body.
+    pub fn load_index(&self, id: &str) -> Result<SourceIndex> {
+        let id = safe_id(id)?;
+        let dir = self.root.join(id);
+        let value = read_source_json(&dir, id)?;
+        if value.get("sections").is_some() {
+            // Pre-split monolithic source: no cheap path yet (the whole file
+            // has to be read either way), derive a TOC from it in memory.
+            let full: FetchedSource =
+                serde_json::from_value(value).map_err(|e| CorpusError::Decode(e.to_string()))?;
+            return Ok(SourceIndex {
+                meta: full.meta,
+                toc: full
+                    .sections
+                    .iter()
+                    .map(|s| SectionSummary {
+                        locator: s.locator.clone(),
+                        title: s.title.clone(),
+                    })
+                    .collect(),
+            });
+        }
+        serde_json::from_value(value).map_err(|e| CorpusError::Decode(e.to_string()))
+    }
+
+    /// Loads one section's body by locator (§11.1 item 4) — what a citation
+    /// resolves against and what the reader loads on demand instead of the
+    /// whole book.
+    pub fn load_section(&self, id: &str, locator: &str) -> Result<Section> {
+        let id = safe_id(id)?;
+        let dir = self.root.join(id);
+        let sections_dir = dir.join("sections");
+        if sections_dir.is_dir() {
+            return read_section_file(&sections_dir, locator);
+        }
+        // Pre-split monolithic source: the section lives inline.
+        let value = read_source_json(&dir, id)?;
+        let full: FetchedSource =
+            serde_json::from_value(value).map_err(|e| CorpusError::Decode(e.to_string()))?;
+        full.sections
+            .into_iter()
+            .find(|s| s.locator == locator)
+            .ok_or_else(|| CorpusError::NotFound(format!("{id}#{locator}")))
     }
 
     /// Lists metadata for every source in the corpus (for the §10 index rebuild
-    /// and the read-only source viewer §11).
+    /// and the read-only source viewer §11). Reads only the `meta` field, which
+    /// has the same shape whether `source.json` is the new split layout or an
+    /// old monolithic one — no format branching needed here.
     pub fn list(&self) -> Result<Vec<SourceMeta>> {
         let mut out = Vec::new();
         let entries = match fs::read_dir(&self.root) {
@@ -124,8 +232,14 @@ impl Corpus {
             }
             let path = entry.path().join("source.json");
             let Ok(bytes) = fs::read(&path) else { continue };
-            if let Ok(src) = serde_json::from_slice::<FetchedSource>(&bytes) {
-                out.push(src.meta);
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(meta_value) = value.get("meta").cloned() else {
+                continue;
+            };
+            if let Ok(meta) = serde_json::from_value::<SourceMeta>(meta_value) {
+                out.push(meta);
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -166,6 +280,47 @@ impl Corpus {
         )?;
         Ok(())
     }
+}
+
+/// Reads and parses `<dir>/source.json` as a raw JSON value — the shared first
+/// step for `load`/`load_index`/`load_section`, which each then branch on
+/// whether it's the new split layout (`toc` key) or an old monolithic one
+/// (`sections` key present).
+fn read_source_json(dir: &Path, id: &str) -> Result<serde_json::Value> {
+    let path = dir.join("source.json");
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(CorpusError::NotFound(id.to_string()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    serde_json::from_slice(&bytes).map_err(|e| CorpusError::Decode(e.to_string()))
+}
+
+/// Reads one section's file out of `sections_dir`, addressed by locator.
+fn read_section_file(sections_dir: &Path, locator: &str) -> Result<Section> {
+    let path = sections_dir.join(format!("{}.json", locator_filename(locator)));
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(CorpusError::NotFound(locator.to_string()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    serde_json::from_slice(&bytes).map_err(|e| CorpusError::Decode(e.to_string()))
+}
+
+/// Deterministic filesystem-safe filename for a section's locator (§11.1 item
+/// 4). Locators carry `:`/`;` (e.g. `"chap:2;sec:1"`) that aren't safe path
+/// segments, and are otherwise backend-controlled text — hashed rather than
+/// escaped (mirrors `corpus_id`'s slug+hash idiom in `source/mod.rs`), so
+/// there's no path-traversal surface no matter what a backend puts in a
+/// locator string.
+fn locator_filename(locator: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(locator.as_bytes());
+    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Path-traversal defense: an id may contain only `[A-Za-z0-9._-]` and no `..`.
@@ -236,6 +391,71 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// §S19 item 4: `store` actually splits meta+toc from section bodies on
+    /// disk (not just via the API) — the whole point being that
+    /// `source.json` stays small regardless of how much text a source has.
+    #[test]
+    fn store_splits_meta_toc_from_section_bodies_on_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-corpus-split-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+        let src = sample("calculus-v1-split1234");
+        corpus.store(&src).unwrap();
+
+        let source_json =
+            fs::read_to_string(dir.join("corpus/calculus-v1-split1234/source.json")).unwrap();
+        assert!(
+            !source_json.contains("A limit describes"),
+            "section body must not be inlined in source.json anymore: {source_json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&source_json).unwrap();
+        assert!(value.get("toc").is_some(), "new layout has a toc key");
+        assert!(
+            value.get("sections").is_none(),
+            "new layout has no sections key"
+        );
+
+        let sections_dir = dir.join("corpus/calculus-v1-split1234/sections");
+        let entries: Vec<_> = fs::read_dir(&sections_dir).unwrap().collect();
+        assert_eq!(entries.len(), 1, "one file per section");
+        let section_file = fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
+        assert!(section_file.contains("A limit describes"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §S19 item 4: `load_index`/`load_section` against the split layout —
+    /// the cheap paths the reader/agent/citation are meant to use instead of
+    /// `load`'s whole-book read.
+    #[test]
+    fn load_index_and_load_section_work_against_split_layout() {
+        let dir = std::env::temp_dir().join(format!("learnive-corpus-idx-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+        let src = sample("calculus-v1-idx1234");
+        corpus.store(&src).unwrap();
+
+        let index = corpus.load_index(&src.meta.id).unwrap();
+        assert_eq!(index.meta.title, "Calculus, Volume 1");
+        assert_eq!(index.toc.len(), 1);
+        assert_eq!(index.toc[0].locator, "chap:2;sec:1");
+        assert_eq!(index.toc[0].title, "The Limit of a Function");
+
+        let section = corpus.load_section(&src.meta.id, "chap:2;sec:1").unwrap();
+        assert_eq!(
+            section.text,
+            "A limit describes the value a function approaches."
+        );
+
+        assert!(matches!(
+            corpus.load_section(&src.meta.id, "no:such:locator"),
+            Err(CorpusError::NotFound(_))
+        ));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// §S19 item 1 regression: `Section` gained `html` with `#[serde(default)]`
     /// specifically so every `source.json` already on disk (written before this
     /// field existed) keeps loading — a source is fetched once and reused
@@ -276,6 +496,56 @@ mod tests {
             loaded.sections[0].html, "",
             "missing key defaults to empty, not a decode error"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §S19 item 4 backward compat: `load_index`/`load_section` (new in this
+    /// item) must also work against a pre-split monolithic `source.json`, not
+    /// just `load` — a legacy source is still a valid target for a citation
+    /// or the reader's TOC, just without the cheap-read path.
+    #[test]
+    fn load_index_and_load_section_work_against_legacy_monolithic_layout() {
+        let dir = std::env::temp_dir().join(format!(
+            "learnive-corpus-oldshape-idx-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        let corpus_dir = dir.join("corpus").join("old-source-5678");
+        fs::create_dir_all(&corpus_dir).unwrap();
+        fs::write(
+            corpus_dir.join("source.json"),
+            r#"{
+                "meta": {
+                    "id": "old-source-5678",
+                    "title": "Integral",
+                    "authors": ["Wikipedia contributors"],
+                    "kind": "article",
+                    "license": "CC BY-SA 4.0",
+                    "origin": {"backend": "wikipedia"}
+                },
+                "sections": [
+                    {"locator": "sec:1", "title": "Introduction", "text": "An integral sums infinitesimal pieces."}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let corpus = Corpus::open(&dir).unwrap();
+
+        let index = corpus.load_index("old-source-5678").unwrap();
+        assert_eq!(index.meta.title, "Integral");
+        assert_eq!(index.toc.len(), 1);
+        assert_eq!(index.toc[0].locator, "sec:1");
+        assert_eq!(index.toc[0].title, "Introduction");
+
+        let section = corpus.load_section("old-source-5678", "sec:1").unwrap();
+        assert_eq!(section.text, "An integral sums infinitesimal pieces.");
+
+        assert!(matches!(
+            corpus.load_section("old-source-5678", "sec:99"),
+            Err(CorpusError::NotFound(_))
+        ));
 
         fs::remove_dir_all(&dir).ok();
     }

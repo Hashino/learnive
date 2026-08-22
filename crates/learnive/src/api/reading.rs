@@ -25,22 +25,42 @@ pub(super) fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Read-only source viewer (§11): serves the corpus's already-normalized text
-/// for a citation's `data-source-id`, so `<cite>` has somewhere real to point
-/// — the minimal version of the eventual PDF split-view (§11.1), which needs
-/// the original file and page-level locations neither acquisition backend nor
-/// the corpus currently stores. GET, mutates nothing: the source viewer is
-/// read-only by design (§9/§11) — any note the learner wants to make lands in
-/// the living document, never on the source itself. Not document-scoped: the
-/// corpus (`state.corpus`) is one shared, global store (§4/§11), so this sits
-/// beside `/api/documents/...` rather than under it.
+/// Read-only source viewer (§11): serves the corpus's meta + table of
+/// contents for a citation's `data-source-id`, so `<cite>` has somewhere real
+/// to point — the minimal version of the eventual PDF split-view (§11.1),
+/// which needs the original file and page-level locations neither
+/// acquisition backend nor the corpus currently stores. **Deliberately not
+/// the whole book** (§11.1 item 4, S19): this used to return the entire
+/// `FetchedSource` — every section's text+html — which meant opening the
+/// panel on a full book shipped megabytes of JSON per click. A section's body
+/// now comes separately, on demand, from `get_source_section`. GET, mutates
+/// nothing: the source viewer is read-only by design (§9/§11) — any note the
+/// learner wants to make lands in the living document, never on the source
+/// itself. Not document-scoped: the corpus (`state.corpus`) is one shared,
+/// global store (§4/§11), so this sits beside `/api/documents/...` rather
+/// than under it.
 pub async fn get_source(
     State(state): State<AppState>,
     Path(source_id): Path<String>,
-) -> Result<Json<crate::source::FetchedSource>, ApiError> {
+) -> Result<Json<crate::source::SourceIndex>, ApiError> {
     state
         .corpus
-        .load(&source_id)
+        .load_index(&source_id)
+        .map(Json)
+        .map_err(|e| ApiError::NotFound(e.to_string()))
+}
+
+/// One section's full body (text + sanitized HTML), addressed by locator
+/// (§11.1 item 4, S19) — what a citation click loads once it knows which
+/// section it's pointing at, and what the reader loads as the learner
+/// navigates the table of contents. Read-only, same rationale as `get_source`.
+pub async fn get_source_section(
+    State(state): State<AppState>,
+    Path((source_id, locator)): Path<(String, String)>,
+) -> Result<Json<crate::source::Section>, ApiError> {
+    state
+        .corpus
+        .load_section(&source_id, &locator)
         .map(Json)
         .map_err(|e| ApiError::NotFound(e.to_string()))
 }

@@ -209,8 +209,13 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Read-only source viewer (§11) — the corpus is global, not per-document
         // (§4), so this lives outside the `/api/documents/{doc}` tree; a citation
-        // click resolves here for its `data-source-id`.
+        // click resolves here for its `data-source-id`. Meta+toc only (§11.1
+        // item 4, S19); a section's body is a separate on-demand fetch below.
         .route("/api/sources/{id}", get(api::get_source))
+        .route(
+            "/api/sources/{id}/sections/{locator}",
+            get(api::get_source_section),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security::guard,

@@ -790,11 +790,17 @@ async function advanceAfterGrading() {
 // the new problem and either advances or remediates again.
 // --- Source viewer (§11) -----------------------------------------------
 // A citation (`<cite data-source-id data-locator>`, §4.3/§10) opens the
-// corpus's already-normalized text on the right (`#sourcePanel`) — the seam
+// corpus's meta+table-of-contents on the right (`#sourcePanel`) — the seam
 // the eventual PDF split-view (§11.1) will occupy once the acquisition
 // layer stores original files and page locations. Read-only: nothing here
 // is ever written back.
-const sourceCache = new Map();
+//
+// §11.1 item 4 (S19): `GET /api/sources/{id}` used to return every section's
+// full text — a whole book per citation click. It now returns meta+toc only;
+// a section's body is fetched separately, on demand, as the learner opens it
+// (starting with whichever one the citation points at).
+const sourceIndexCache = new Map();
+const sourceSectionCache = new Map();
 
 // Delegated, not bound per-citation: citations arrive incrementally as
 // prose streams in (§14), so binding at insert time would miss most of them.
@@ -810,48 +816,81 @@ async function openSourcePanel(sourceId, locator) {
   el("sourceMeta").textContent = "";
   el("sourceBody").innerHTML = "";
   try {
-    let source = sourceCache.get(sourceId);
-    if (!source) {
+    let index = sourceIndexCache.get(sourceId);
+    if (!index) {
       const resp = await api(
         `/api/sources/${encodeURIComponent(sourceId)}`,
       );
       if (!resp.ok) throw new Error(await resp.text());
-      source = await resp.json();
-      sourceCache.set(sourceId, source);
+      index = await resp.json();
+      sourceIndexCache.set(sourceId, index);
     }
-    renderSource(source, locator);
+    renderSourceIndex(sourceId, index, locator);
+    if (locator) await loadSourceSection(sourceId, locator);
   } catch (err) {
     el("sourceTitle").textContent = t("source.unavailable");
     el("sourceMeta").textContent = String(err);
   }
 }
 
-function renderSource(source, locator) {
-  el("sourceTitle").textContent = source.meta.title;
+function renderSourceIndex(sourceId, index, locator) {
+  el("sourceTitle").textContent = index.meta.title;
   const bits = [];
-  if (source.meta.authors && source.meta.authors.length) {
-    bits.push(source.meta.authors.join(", "));
+  if (index.meta.authors && index.meta.authors.length) {
+    bits.push(index.meta.authors.join(", "));
   }
-  if (source.meta.license) bits.push(source.meta.license);
+  if (index.meta.license) bits.push(index.meta.license);
   el("sourceMeta").textContent = bits.join(" · ");
 
   const body = el("sourceBody");
+  body.innerHTML = "";
   let current = null;
-  for (const section of source.sections || []) {
+  for (const summary of index.toc || []) {
     const sec = document.createElement("section");
-    if (section.locator === locator) {
+    sec.dataset.locator = summary.locator;
+    if (summary.locator === locator) {
       sec.className = "current";
       current = sec;
     }
     const h = document.createElement("h3");
-    h.textContent = section.title || section.locator;
+    h.textContent = summary.title || summary.locator;
+    h.addEventListener("click", () => loadSourceSection(sourceId, summary.locator));
     const p = document.createElement("p");
-    p.textContent = section.text;
+    p.className = "sourceSectionBody";
+    p.textContent = "";
     sec.appendChild(h);
     sec.appendChild(p);
     body.appendChild(sec);
   }
   (current || body.firstElementChild)?.scrollIntoView({ block: "start" });
+}
+
+// Loads (and caches) one section's body on demand and fills it into the
+// already-rendered TOC entry — never the whole book, per §11.1 item 4.
+async function loadSourceSection(sourceId, locator) {
+  const container = el("sourceBody").querySelector(
+    `section[data-locator="${CSS.escape(locator)}"]`,
+  );
+  if (!container) return;
+  const body = container.querySelector(".sourceSectionBody");
+  const key = `${sourceId} ${locator}`;
+  try {
+    let section = sourceSectionCache.get(key);
+    if (!section) {
+      body.textContent = t("source.sectionLoading");
+      const resp = await api(
+        `/api/sources/${encodeURIComponent(sourceId)}/sections/${encodeURIComponent(locator)}`,
+      );
+      if (!resp.ok) throw new Error(await resp.text());
+      section = await resp.json();
+      sourceSectionCache.set(key, section);
+    }
+    body.textContent = section.text;
+    container.classList.add("current");
+    container.scrollIntoView({ block: "start" });
+  } catch (err) {
+    body.textContent = t("source.unavailable");
+  }
 }
 
 function closeSourcePanel() {
