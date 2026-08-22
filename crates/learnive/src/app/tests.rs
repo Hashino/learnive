@@ -2498,3 +2498,184 @@ async fn source_section_highlight_survives_multibyte_prefix() {
         "the em dash before the match must not shift the split"
     );
 }
+
+/// §S15b — shared node, steps 1+2 (`source_doc_id`/`owner_of` + write
+/// convergence): the acceptance criterion from PLAN.md is literal — the
+/// same node appears in two documents, and a question/annotation made from
+/// either is visible from the other. This drives the real router for both
+/// documents against the SAME `AppState`/store, exactly the shape a
+/// two-tab session would produce, and never touches the cross-document
+/// embedding matcher (`propose_prerequisites`) — the `known` pointer is
+/// crafted directly in the `POST /api/documents` body, the same shape
+/// `resolve_outline_node` would have produced, so this test is independent
+/// of retrieval/embeddings being configured.
+#[tokio::test]
+async fn a_referenced_node_converges_qa_and_annotations_across_documents() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    // Owner document: one node, generated and demonstrated for real.
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"algebra basics"}"#,
+    ))
+    .await;
+    let owner_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let owner_doc_id = owner_doc["doc_id"].as_str().unwrap().to_string();
+    let shared_node_id = owner_doc["items"][0]["id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &owner_doc_id, &shared_node_id).await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{owner_doc_id}/nodes/{shared_node_id}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    // Visiting document: confirms the SAME node as a `skip`+`known`
+    // reference instead of generating a local one — same wire shape
+    // `resolve_outline_node`'s `KnownMatch` produces, hand-built here since
+    // no embedder is configured in the test harness.
+    let visit_body = serde_json::json!({
+        "topic": "integration",
+        "nodes": [
+            {
+                "id": "prereq-slot",
+                "title": "Algebra basics",
+                "action": "skip",
+                "known": {
+                    "doc_id": owner_doc_id,
+                    "doc_name": "Algebra basics",
+                    "node_id": shared_node_id,
+                },
+                "children": [],
+            },
+            {
+                "id": "obj-slot",
+                "title": "Integration",
+                "action": "learn",
+                "children": [],
+            },
+        ],
+    });
+    let (status, body) = call(authed("POST", "/api/documents", &visit_body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "create_document failed: {body}");
+    let visit_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let visit_doc_id = visit_doc["doc_id"].as_str().unwrap().to_string();
+
+    // The reference materialized under the SAME id as the owner's real
+    // node — not a freshly-minted local id — which is the whole point: one
+    // node, one identity, two outlines.
+    let visited_ids: Vec<&str> = visit_doc["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        visited_ids.contains(&shared_node_id.as_str()),
+        "expected the reference to carry the owner's real node id, got {visited_ids:?}"
+    );
+
+    // Reading the reference from the visiting document resolves to the
+    // owner's real content, not an empty/local stub.
+    let (status, owner_view) = call(authed(
+        "GET",
+        &format!("/api/documents/{owner_doc_id}/nodes/{shared_node_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, visited_view) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/nodes/{shared_node_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_json: serde_json::Value = serde_json::from_str(&owner_view).unwrap();
+    let visited_json: serde_json::Value = serde_json::from_str(&visited_view).unwrap();
+    assert_eq!(
+        owner_json["content_html"], visited_json["content_html"],
+        "the reference must resolve to the SAME node file as the owner"
+    );
+    let block_id = owner_json["content_html"]
+        .as_str()
+        .unwrap()
+        .split("data-block-id=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("a real block id in the demonstrated node's content")
+        .to_string();
+
+    // A question asked from the VISITING document must land on the
+    // owner's interaction layer, visible when the OWNER reads the node.
+    let (status, ask_body) = call(authed(
+        "POST",
+        &format!("/api/documents/{visit_doc_id}/nodes/{shared_node_id}/ask"),
+        &format!(
+            r#"{{"question":"why does this step work?","anchor":{{"block_id":"{block_id}"}}}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ask_body}");
+
+    // An annotation from the OWNER must be visible reading through the
+    // VISITING reference too (both directions, per the acceptance
+    // criterion: "idem para anotações").
+    let (status, annotate_body) = call(authed(
+        "POST",
+        &format!("/api/documents/{owner_doc_id}/nodes/{shared_node_id}/annotate"),
+        &format!(r#"{{"body":"note to self","anchor":{{"block_id":"{block_id}"}}}}"#),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{annotate_body}");
+
+    let (status, owner_after) = call(authed(
+        "GET",
+        &format!("/api/documents/{owner_doc_id}/nodes/{shared_node_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_after_json: serde_json::Value = serde_json::from_str(&owner_after).unwrap();
+    let owner_interaction = owner_after_json["interactions"].to_string();
+    assert!(
+        owner_interaction.contains("why does this step work"),
+        "question asked from the VISITING doc must appear reading the OWNER: {owner_interaction}"
+    );
+    assert!(
+        owner_interaction.contains("note to self"),
+        "annotation added on the OWNER must be present too: {owner_interaction}"
+    );
+
+    let (status, visit_after) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/nodes/{shared_node_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let visit_after_json: serde_json::Value = serde_json::from_str(&visit_after).unwrap();
+    let visit_interaction = visit_after_json["interactions"].to_string();
+    assert!(
+        visit_interaction.contains("why does this step work"),
+        "question asked from the VISITING doc must also show up reading through the SAME reference: {visit_interaction}"
+    );
+    assert!(
+        visit_interaction.contains("note to self"),
+        "annotation added on the OWNER must be visible reading through the VISITING reference: {visit_interaction}"
+    );
+}

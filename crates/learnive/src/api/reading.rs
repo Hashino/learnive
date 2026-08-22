@@ -366,6 +366,52 @@ pub(super) fn topic_and_title(
     Ok((outline.topic, title))
 }
 
+/// Parses `doc_id`'s `outline.json` (§S15b) — the one place every owner-
+/// resolution call site below goes through, so a parse-shape change never
+/// has to be repeated at each call site.
+pub(super) fn read_outline(state: &AppState, doc_id: &str) -> Result<Outline, ApiError> {
+    let outline_json = state.store.read_doc_file(doc_id, "outline.json")?;
+    serde_json::from_str(&outline_json).map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+/// Resolves which document actually owns `node_id` (§S15b) before any node
+/// read/write/interaction-append: a plain local node resolves to `doc_id`
+/// itself, a referenced item (`OutlineItem::source_doc_id: Some`) resolves
+/// to the owner. Every call site that used to pass `&doc_id` straight into
+/// `read_node`/`write_node`/`append_interaction`/`update_annotation` must
+/// resolve through this first, so Q&A/annotation/exercise on a reference
+/// converge onto the SAME file the owning document reads, instead of
+/// silently forking a second, local copy of the node's interaction layer.
+///
+/// A second case (§S15b step 5): `node_id` may not be a local item at all
+/// but a sub-node spawned, mid-question, under a REFERENCED item — those
+/// are written straight into the owner's own outline (never the visitor's,
+/// see `ask_question`'s `Spawn` arm), so they never appear in `doc_id`'s
+/// own `outline.json`. When a direct lookup misses, every local reference's
+/// owner outline is checked in turn for the id — one hop only, since a
+/// reference always points at the true owner directly, never at another
+/// reference (`Node.doc_id` is never rewritten).
+pub(super) fn owner_of_node(state: &AppState, doc_id: &str, node_id: &str) -> String {
+    let Ok(outline) = read_outline(state, doc_id) else {
+        return doc_id.to_string();
+    };
+    if outline.items.iter().any(|i| i.id == node_id) {
+        return engine::owner_of(&outline, doc_id, node_id);
+    }
+    for owner in outline
+        .items
+        .iter()
+        .filter_map(|i| i.source_doc_id.as_deref())
+    {
+        if let Ok(owner_outline) = read_outline(state, owner)
+            && owner_outline.items.iter().any(|i| i.id == node_id)
+        {
+            return owner.to_string();
+        }
+    }
+    doc_id.to_string()
+}
+
 /// A question asked from a selection inside the read-only source panel
 /// (§11.1 item 9), rather than from the living document itself. The panel
 /// has no `data-block-id`s to anchor to (§4.3 anchoring is block-based, and
@@ -439,7 +485,8 @@ pub async fn ask_question(
             "question must not be empty".to_string(),
         ));
     }
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let owner_id = owner_of_node(&state, &doc_id, &node_id);
+    let node = state.store.read_node(&owner_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
     let context = reading_context(&node, &body.anchor);
     // §11.1 item 9: a source-panel selection has no block in this node to
@@ -549,7 +596,7 @@ pub async fn ask_question(
                 question_header(question, &body.anchor, body.source.as_ref(), locale)
             );
             state.store.append_interaction(
-                &doc_id,
+                &owner_id,
                 &node_id,
                 InteractionItem::Thread {
                     id: move_id.clone(),
@@ -581,9 +628,17 @@ pub async fn ask_question(
             ) {
                 eprintln!("event log append failed: {e}");
             }
-            let sub_node = engine::assemble_content_node(&doc_id, &sub_id, &generated.html)?;
+            // §S15b step 5: written under the OWNER's doc_id, not the
+            // document the question was asked from — `node_id`'s own
+            // interaction-layer append (below) already resolves to the
+            // owner, and a sub-node stamped with the visitor's doc_id would
+            // leave a `child_node_id` pointer the owner's own outline (and
+            // any third document referencing the same node) can never
+            // reach: reading the owner would show a thread pointing at a
+            // node file that doesn't exist there.
+            let sub_node = engine::assemble_content_node(&owner_id, &sub_id, &generated.html)?;
             state.store.write_node(&sub_node)?;
-            state.store.update_outline_file(&doc_id, |json| {
+            state.store.update_outline_file(&owner_id, |json| {
                 let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
                 outline.items.push(OutlineItem {
                     id: sub_id.clone(),
@@ -591,6 +646,7 @@ pub async fn ask_question(
                     prerequisites: Vec::new(),
                     parent_id: Some(node_id.clone()),
                     mode: NodeMode::Learn,
+                    source_doc_id: None,
                 });
                 serde_json::to_string(&outline).map_err(|e| e.to_string())
             })?;
@@ -604,7 +660,7 @@ pub async fn ask_question(
                 escape_html(&sub_title)
             );
             state.store.append_interaction(
-                &doc_id,
+                &owner_id,
                 &node_id,
                 InteractionItem::Thread {
                     id: move_id,
@@ -651,7 +707,8 @@ pub async fn annotate(
             "annotation must not be empty".to_string(),
         ));
     }
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let owner_id = owner_of_node(&state, &doc_id, &node_id);
+    let node = state.store.read_node(&owner_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
 
     let event_log = state.store.event_log(&doc_id)?;
@@ -667,7 +724,7 @@ pub async fn annotate(
     let body_html = format!("<p>{}</p>", escape_html(text));
     let id = engine::new_id();
     state.store.append_interaction(
-        &doc_id,
+        &owner_id,
         &node_id,
         InteractionItem::Annotation {
             id: id.clone(),
@@ -700,9 +757,10 @@ pub async fn update_annotation(
         ));
     }
     let body_html = format!("<p>{}</p>", escape_html(text));
+    let owner_id = owner_of_node(&state, &doc_id, &node_id);
     state
         .store
-        .update_annotation(&doc_id, &node_id, &annotation_id, body_html.clone())?;
+        .update_annotation(&owner_id, &node_id, &annotation_id, body_html.clone())?;
     Ok(Json(AnnotateResp {
         id: annotation_id,
         body_html,
@@ -1023,9 +1081,10 @@ pub(super) async fn prepare(
     let resumed_content_html = if resumed_moves.is_empty() {
         String::new()
     } else {
+        let owner = item.source_doc_id.as_deref().unwrap_or(doc_id);
         state
             .store
-            .read_node(doc_id, &item.id)
+            .read_node(owner, &item.id)
             .map(|node| engine::strip_build_marker(&node.content.html).to_string())
             .unwrap_or_default()
     };
@@ -1085,7 +1144,8 @@ fn prior_content_context(
         .join("; ");
     let mut covered = String::new();
     for i in prior_items {
-        if let Ok(node) = state.store.read_node(doc_id, &i.id) {
+        let owner = i.source_doc_id.as_deref().unwrap_or(doc_id);
+        if let Ok(node) = state.store.read_node(owner, &i.id) {
             covered.push_str("\n## ");
             covered.push_str(&i.title);
             covered.push('\n');

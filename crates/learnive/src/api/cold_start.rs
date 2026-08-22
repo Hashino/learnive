@@ -127,18 +127,17 @@ pub struct ProposeOutlineReq {
 }
 
 /// Where an already-`Demonstrated` match was found (§S15 "review" default).
-/// Informational only in this slice — the confirm step below always
-/// generates a fresh, local, abbreviated review node regardless of `known`;
-/// it does not read from or write into the matched document. A true shared
-/// node (`{owner_doc_id, node_id}` pointer, edits visible in both documents)
-/// is PLAN.md's S15b, deliberately deferred — the riskiest, most invasive
-/// part of this slice (a `Store` read/write indirection touching every
-/// existing document), sequenced after the tree+toggle mechanism is proven
-/// end to end on its own.
-#[derive(Serialize, Clone)]
+/// `review` still generates a fresh, local, abbreviated node regardless of
+/// `known` (recap, not reference). `skip` on a matched node materializes a
+/// real reference instead (§S15b, `materialize_outline_node`'s `Skip` arm):
+/// `node_id` is the id of the ALREADY-EXISTING node in `doc_id`, round-
+/// tripped back by the client on confirm so the server never has to re-
+/// resolve the match a second time.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct KnownMatch {
     doc_id: String,
     doc_name: String,
+    node_id: String,
 }
 
 /// One node of the proposed outline tree, resolved against known concepts
@@ -209,6 +208,7 @@ pub async fn propose_outline(
 struct KnownConcept {
     doc_id: String,
     doc_name: String,
+    node_id: String,
     title: String,
 }
 
@@ -240,6 +240,7 @@ fn known_concepts(state: &AppState) -> Result<Vec<KnownConcept>, ApiError> {
                 out.push(KnownConcept {
                     doc_id: doc_id.clone(),
                     doc_name: doc_name.clone(),
+                    node_id: item.id.clone(),
                     title: item.title.clone(),
                 });
             }
@@ -310,6 +311,7 @@ fn resolve_outline_node(
             Some(KnownMatch {
                 doc_id: k.doc_id.clone(),
                 doc_name: k.doc_name.clone(),
+                node_id: k.node_id.clone(),
             }),
         ),
         None => ("learn", None),
@@ -335,6 +337,14 @@ pub struct ConfirmedNode {
     id: String,
     title: String,
     action: PrereqAction,
+    /// Echoed back verbatim from `ProposedNode::known` (§S15b) — only
+    /// consulted when `action == Skip`: that combination materializes a
+    /// REFERENCE to the already-existing node instead of discarding, using
+    /// `known.node_id` as the reference item's own id (see
+    /// `materialize_outline_node`). Ignored for `Learn`/`Review`, which
+    /// still generate fresh local content regardless of a match.
+    #[serde(default)]
+    known: Option<KnownMatch>,
     #[serde(default)]
     children: Vec<ConfirmedNode>,
 }
@@ -415,6 +425,28 @@ fn materialize_outline_node(
     to_skip: &mut Vec<String>,
 ) -> String {
     match node.action {
+        // §S15b: a `skip` on a node WITH a known match materializes a
+        // REFERENCE to the already-existing node instead of discarding it —
+        // `source_doc_id` points at the owner, and the item's own `id` is
+        // the owner's real node id (not the freshly-minted proposal id),
+        // since a reference must resolve to the exact same node file
+        // `owner_of`/`read_node` would find. Children are never
+        // materialized here (own step, §S15b step 5: they follow the owner
+        // via `parent_id`, not this tree). A plain `skip` (no match) keeps
+        // today's behavior: discarded, whole branch queued for
+        // `NodeSkipped`.
+        PrereqAction::Skip if node.known.is_some() => {
+            let known = node.known.as_ref().expect("checked by guard");
+            items.push(OutlineItem {
+                id: known.node_id.clone(),
+                title: node.title.clone(),
+                prerequisites: incoming_gate.into_iter().collect(),
+                parent_id: parent_id.map(String::from),
+                mode: NodeMode::Learn,
+                source_doc_id: Some(known.doc_id.clone()),
+            });
+            return known.node_id.clone();
+        }
         PrereqAction::Skip => {
             to_skip.push(node.id.clone());
             queue_skip_subtree(&node.children, to_skip);
@@ -426,6 +458,7 @@ fn materialize_outline_node(
                 prerequisites: incoming_gate.into_iter().collect(),
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Review,
+                source_doc_id: None,
             });
         }
         PrereqAction::Learn => {
@@ -442,6 +475,7 @@ fn materialize_outline_node(
                 prerequisites: child_exit.or(incoming_gate).into_iter().collect(),
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Learn,
+                source_doc_id: None,
             });
         }
     }
@@ -472,6 +506,7 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             id: engine::new_id(),
             title: n.title.clone(),
             action: PrereqAction::Learn,
+            known: None,
             children: auto_confirm_learn(&n.children),
         })
         .collect()
@@ -1214,6 +1249,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             action: PrereqAction::Learn,
+            known: None,
             children,
         }
     }
@@ -1223,6 +1259,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             action,
+            known: None,
             children: Vec::new(),
         }
     }
@@ -1318,6 +1355,7 @@ mod tests {
             id: "p1".to_string(),
             title: "Limits".to_string(),
             action: PrereqAction::Skip,
+            known: None,
             children: vec![leaf("c1", "Epsilon-delta", PrereqAction::Learn)],
         }];
         let mut items = Vec::new();
@@ -1332,6 +1370,38 @@ mod tests {
         assert_eq!(skipped, vec!["c1".to_string(), "p1".to_string()]);
     }
 
+    /// §S15b: `skip` on a node WITH a known match materializes a REFERENCE
+    /// instead of discarding — the acceptance-criterion mechanism. The
+    /// item's own id must be the OWNER's real node id (`known.node_id`),
+    /// not the freshly-minted proposal id, since a reference has to resolve
+    /// to the exact node file `owner_of`/`read_node` would find; children
+    /// are never materialized locally (they follow the owner, §S15b step
+    /// 5, a separate mechanism).
+    #[test]
+    fn skip_on_a_known_match_materializes_a_reference_not_a_discard() {
+        let tree = vec![ConfirmedNode {
+            id: "proposal-id".to_string(),
+            title: "Algebra basics".to_string(),
+            action: PrereqAction::Skip,
+            known: Some(KnownMatch {
+                doc_id: "other-doc".to_string(),
+                doc_name: "Other document".to_string(),
+                node_id: "real-node-id".to_string(),
+            }),
+            children: vec![leaf("c1", "Factoring", PrereqAction::Learn)],
+        }];
+        let mut items = Vec::new();
+        let mut to_skip = Vec::new();
+        let exit = materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
+
+        assert_eq!(items.len(), 1, "a reference IS materialized, not discarded");
+        assert!(to_skip.is_empty(), "a reference is not a NodeSkipped event");
+        assert_eq!(items[0].id, "real-node-id");
+        assert_eq!(items[0].source_doc_id.as_deref(), Some("other-doc"));
+        // whatever follows gates on the real node id, not the proposal id
+        assert_eq!(exit, Some("real-node-id".to_string()));
+    }
+
     /// §S15: `review` cascades the opposite way — the branch's descendants
     /// are never materialized at all, only the node itself, in
     /// `NodeMode::Review`.
@@ -1341,6 +1411,7 @@ mod tests {
             id: "p1".to_string(),
             title: "Algebra basics".to_string(),
             action: PrereqAction::Review,
+            known: None,
             children: vec![leaf("c1", "Factoring", PrereqAction::Learn)],
         }];
         let mut items = Vec::new();

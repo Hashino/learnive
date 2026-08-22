@@ -147,9 +147,14 @@ pub async fn answer(
     Json(body): Json<AnswerReq>,
 ) -> Result<Json<AnswerResp>, ApiError> {
     let locale = crate::locale::Locale::from_header(&headers);
+    // §S15b: exercise state (the sidecar, the node file, every attempt/
+    // remediation append below) lives with the OWNER, exactly like Q&A and
+    // annotation — a reference must grade against and record onto the same
+    // node the owning document itself reads, not fork a second, local copy.
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
     let sidecar_json = state
         .store
-        .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))?;
+        .read_doc_file(&owner_id, &format!("{node_id}.rubric.json"))?;
     let sidecar: RubricSidecar =
         serde_json::from_str(&sidecar_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     // Grabbed before any sidecar overwrite below (§8.2 replaces it on failure) —
@@ -158,7 +163,7 @@ pub async fn answer(
     // Read before this submission's own interaction append below, so the
     // remediation-attempt count a few lines down still reflects only PRIOR
     // attempts.
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let node = state.store.read_node(&owner_id, &node_id)?;
 
     let ai = state.ai.load_full();
     let assessment = engine::grade(
@@ -197,7 +202,7 @@ pub async fn answer(
         locale,
     );
     state.store.append_interaction(
-        &doc_id,
+        &owner_id,
         &node_id,
         InteractionItem::Thread {
             id: engine::new_id(),
@@ -373,7 +378,7 @@ pub async fn answer(
         topic: sidecar.topic.clone(),
     };
     state.store.write_doc_file(
-        &doc_id,
+        &owner_id,
         &format!("{node_id}.rubric.json"),
         &serde_json::to_string(&new_sidecar).unwrap_or_default(),
     )?;
@@ -381,7 +386,7 @@ pub async fn answer(
     // Append the explanation to the interaction layer (append-only, §4.3),
     // anchored to the original exercise.
     state.store.append_interaction(
-        &doc_id,
+        &owner_id,
         &node_id,
         InteractionItem::Thread {
             id: engine::new_id(),
@@ -441,9 +446,12 @@ pub async fn practice_node(
     // The very first practice call after demonstration doesn't hit this: the
     // sidecar still holds the ORIGINAL passing move, which is graded by
     // definition (that grade is what made the node `Demonstrated`).
+    // §S15b: sidecar/node state for a referenced item lives with the owner —
+    // same convergence `answer`/`ask_question`/`annotate` already apply.
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
     if let Ok(existing_json) = state
         .store
-        .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))
+        .read_doc_file(&owner_id, &format!("{node_id}.rubric.json"))
         && let Ok(existing) = serde_json::from_str::<RubricSidecar>(&existing_json)
     {
         let graded = event_log
@@ -455,7 +463,7 @@ pub async fn practice_node(
         }
     }
 
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let node = state.store.read_node(&owner_id, &node_id)?;
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let ai = state.ai.load_full();
     let policy = *state.policy.load_full();
@@ -499,7 +507,7 @@ pub async fn practice_node(
         topic,
     };
     state.store.write_doc_file(
-        &doc_id,
+        &owner_id,
         &format!("{node_id}.rubric.json"),
         &serde_json::to_string(&sidecar).unwrap_or_default(),
     )?;

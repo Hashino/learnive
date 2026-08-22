@@ -101,6 +101,30 @@ pub struct OutlineItem {
     /// nodes the learner had explicitly marked skip).
     #[serde(default)]
     pub mode: NodeMode,
+    /// The owning document's id, when this item is a **reference** to a node
+    /// that actually lives in another document (§S15b) — `None` for every
+    /// local node (still the overwhelming majority: every item that isn't a
+    /// materialized `KnownMatch` skip). Resolve with [`owner_of`], never by
+    /// reading this field directly, since the local case needs the caller's
+    /// own `doc_id` as the fallback. `Node.doc_id` on disk is always the
+    /// owner and is never rewritten — this pointer is the only new state.
+    #[serde(default)]
+    pub source_doc_id: Option<String>,
+}
+
+/// Resolves which document actually owns a node's file/event-log (§S15b) —
+/// the item's own document unless it's a reference (`source_doc_id: Some`),
+/// in which case the pointed-to document. Every call site that turns
+/// `(doc_id, node_id)` into a node read/write/event-log operation must
+/// resolve through this first; `write_node` itself stays untouched; it
+/// already writes to `node.doc_id`, which is the owner by construction.
+pub fn owner_of(outline: &Outline, doc_id: &str, node_id: &str) -> String {
+    outline
+        .items
+        .iter()
+        .find(|i| i.id == node_id)
+        .and_then(|i| i.source_doc_id.clone())
+        .unwrap_or_else(|| doc_id.to_string())
 }
 
 /// See [`OutlineItem::mode`].
@@ -670,6 +694,47 @@ pub mod parse;
 mod tests {
     use super::*;
     use crate::ai::{MockProvider, Models, Provider};
+
+    fn outline_item(id: &str, source_doc_id: Option<&str>) -> OutlineItem {
+        OutlineItem {
+            id: id.to_string(),
+            title: id.to_string(),
+            prerequisites: Vec::new(),
+            parent_id: None,
+            mode: NodeMode::Learn,
+            source_doc_id: source_doc_id.map(String::from),
+        }
+    }
+
+    #[test]
+    fn owner_of_resolves_local_items_to_the_calling_document() {
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![outline_item("n1", None)],
+        };
+        assert_eq!(owner_of(&outline, "doc-a", "n1"), "doc-a");
+    }
+
+    #[test]
+    fn owner_of_resolves_a_reference_to_its_source_document() {
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![outline_item("n1", Some("doc-owner"))],
+        };
+        assert_eq!(owner_of(&outline, "doc-visitor", "n1"), "doc-owner");
+    }
+
+    #[test]
+    fn owner_of_falls_back_to_the_caller_for_an_unknown_id() {
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![outline_item("n1", Some("doc-owner"))],
+        };
+        assert_eq!(
+            owner_of(&outline, "doc-visitor", "no-such-id"),
+            "doc-visitor"
+        );
+    }
 
     fn mock_ai(reply: &str) -> Ai {
         Ai::new(

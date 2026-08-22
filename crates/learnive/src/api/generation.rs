@@ -568,6 +568,7 @@ pub async fn decide_plan_proposal(
                     },
                     parent_id: None,
                     mode: NodeMode::Learn,
+                    source_doc_id: None,
                 })
                 .collect();
             outline.items.extend(sub_nodes);
@@ -741,7 +742,8 @@ pub async fn get_node(
     State(state): State<AppState>,
     Path((doc_id, node_id)): Path<(String, String)>,
 ) -> Result<Json<NodeView>, ApiError> {
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
+    let node = state.store.read_node(&owner_id, &node_id)?;
     let event_log = state.store.event_log(&doc_id)?;
     let states = node_states(
         event_log
@@ -865,9 +867,10 @@ pub async fn exercise_frame(
     Path((doc_id, node_id)): Path<(String, String)>,
     Query(query): Query<FrameQuery>,
 ) -> Result<Response, ApiError> {
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
     let sidecar_json = state
         .store
-        .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))?;
+        .read_doc_file(&owner_id, &format!("{node_id}.rubric.json"))?;
     let sidecar: RubricSidecar =
         serde_json::from_str(&sidecar_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
@@ -894,7 +897,8 @@ pub async fn block_frame(
     Path((doc_id, node_id, block_id)): Path<(String, String, String)>,
     Query(query): Query<FrameQuery>,
 ) -> Result<Response, ApiError> {
-    let node = state.store.read_node(&doc_id, &node_id)?;
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
+    let node = state.store.read_node(&owner_id, &node_id)?;
     let block_html = learnive_core::extract_block_by_id(&node.content.html, &block_id)
         .ok_or_else(|| ApiError::BadRequest("block not found".to_string()))?;
 
