@@ -56,6 +56,9 @@ pub enum ApiError {
     BadRequest(String),
     Internal(String),
     NotFound(String),
+    /// §S15b step 6: a refused action, not a malformed request or a server
+    /// fault — e.g. deleting a document other documents still reference.
+    Conflict(String),
 }
 
 impl IntoResponse for ApiError {
@@ -73,6 +76,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
         };
         (status, msg).into_response()
     }

@@ -2752,3 +2752,101 @@ async fn a_referenced_node_converges_qa_and_annotations_across_documents() {
          MoveGraded event, not just the visiting document's own (empty) log: {visit_item}"
     );
 }
+
+#[tokio::test]
+async fn deleting_a_referenced_owner_is_refused_until_the_reference_is_gone() {
+    // §S15b step 6: `Store::delete_document` is a plain `remove_dir_all` —
+    // with a live reference that silently strands a `source_doc_id`
+    // pointing at nothing. The endpoint must refuse, name the referencing
+    // document, and only allow the delete once nothing points at the owner
+    // anymore.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"algebra basics"}"#,
+    ))
+    .await;
+    let owner_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let owner_doc_id = owner_doc["doc_id"].as_str().unwrap().to_string();
+    let shared_node_id = owner_doc["items"][0]["id"].as_str().unwrap().to_string();
+
+    let visit_body = serde_json::json!({
+        "topic": "integration",
+        "nodes": [
+            {
+                "id": "prereq-slot",
+                "title": "Algebra basics",
+                "action": "skip",
+                "known": {
+                    "doc_id": owner_doc_id,
+                    "doc_name": "Algebra basics",
+                    "node_id": shared_node_id,
+                },
+                "children": [],
+            },
+            {
+                "id": "obj-slot",
+                "title": "Integration",
+                "action": "learn",
+                "children": [],
+            },
+        ],
+    });
+    let (status, body) = call(authed("POST", "/api/documents", &visit_body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "create_document failed: {body}");
+    let visit_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let visit_doc_id = visit_doc["doc_id"].as_str().unwrap().to_string();
+
+    // Refused while the reference is live — and the body names the
+    // referencing document, not just a bare "no" (the learner has to be
+    // able to act on it: which document do I delete or edit first?).
+    let (status, delete_body) = call(authed(
+        "DELETE",
+        &format!("/api/documents/{owner_doc_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{delete_body}");
+    assert!(
+        delete_body.contains("integration") || delete_body.contains(&visit_doc_id),
+        "refusal must name the referencing document: {delete_body}"
+    );
+
+    // The owner must still be there — a refused delete is a true no-op.
+    let (status, _) = call(authed(
+        "GET",
+        &format!("/api/documents/{owner_doc_id}/outline"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleting the referencing document first removes the only pointer —
+    // the owner is now free to go.
+    let (status, _) = call(authed(
+        "DELETE",
+        &format!("/api/documents/{visit_doc_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, delete_body) = call(authed(
+        "DELETE",
+        &format!("/api/documents/{owner_doc_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{delete_body}");
+}

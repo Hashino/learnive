@@ -787,8 +787,51 @@ pub async fn delete_document(
     Path(doc_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.store.read_doc_file(&doc_id, "outline.json")?;
+
+    // §S15b step 6: a reference (`source_doc_id`) only stays resolvable
+    // because `Node::doc_id` is never rewritten — the owner's files ARE the
+    // node. Deleting the owner out from under a live reference would leave
+    // it pointing at nothing, silently, the next time anyone reads it.
+    // Refusing is the correct behavior at the cost this slice is willing to
+    // pay; promoting ownership to a referent is the expensive version and
+    // isn't needed yet.
+    let referencing = referencing_documents(&state, &doc_id)?;
+    if !referencing.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "cannot delete: still referenced by {}",
+            referencing.join(", ")
+        )));
+    }
+
     state.store.delete_document(&doc_id)?;
     Ok(Json(serde_json::json!({ "deleted": doc_id })))
+}
+
+/// Documents (other than `doc_id` itself) whose outline references a node
+/// owned by `doc_id` — §S15b step 6's delete guard. Best-effort: a sibling
+/// document with an unreadable/unparsable `outline.json` is skipped rather
+/// than blocking the delete on an unrelated corruption.
+fn referencing_documents(state: &AppState, doc_id: &str) -> Result<Vec<String>, ApiError> {
+    let mut names = Vec::new();
+    for other_id in state.store.list_documents()? {
+        if other_id == doc_id {
+            continue;
+        }
+        let Ok(outline_json) = state.store.read_doc_file(&other_id, "outline.json") else {
+            continue;
+        };
+        let Ok(outline) = serde_json::from_str::<Outline>(&outline_json) else {
+            continue;
+        };
+        let references = outline
+            .items
+            .iter()
+            .any(|i| i.source_doc_id.as_deref() == Some(doc_id));
+        if references {
+            names.push(document_name(state, &other_id, ""));
+        }
+    }
+    Ok(names)
 }
 
 /// One living document as shown on the cold-start screen (§S12).
