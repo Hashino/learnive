@@ -648,6 +648,7 @@ pub async fn ask_question(
                     anchor_block: Some(body.anchor.block_id.clone()),
                     body_html: body_html.clone(),
                     child_node_id: None,
+                    asked_in: Some(doc_id.clone()),
                 },
             )?;
 
@@ -712,6 +713,7 @@ pub async fn ask_question(
                     anchor_block: Some(body.anchor.block_id.clone()),
                     body_html,
                     child_node_id: Some(sub_id.clone()),
+                    asked_in: Some(doc_id.clone()),
                 },
             )?;
 
@@ -774,6 +776,7 @@ pub async fn annotate(
             id: id.clone(),
             anchor: body.anchor,
             body_html: body_html.clone(),
+            asked_in: Some(doc_id.clone()),
         },
     )?;
 

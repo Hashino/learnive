@@ -1212,6 +1212,17 @@ math[display="block"] {
   font-style: normal;
 }
 
+/* §S15b step 4: provenance marker on an interaction read through a
+   reference — deliberately quiet (smaller, muted, no border) since it's
+   context for the rare case, not something every answer should compete
+   with visually. */
+.asked-in {
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--muted);
+  margin-top: 0.4rem;
+}
+
 /* Margin annotations (§9's own request, distinct from Q&A above): a
    post-it beside the paragraph it notes, outside the card entirely — not
    another entry in `.interactions`. The paragraph itself gets rules on

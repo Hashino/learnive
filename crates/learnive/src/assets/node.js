@@ -201,10 +201,10 @@ function answerDepth(elm) {
 // session and after a reload (its paragraphs carry their own ids, from
 // the server). Falls back to the interaction panel only if the anchor is
 // not on the page (a node the answer doesn't belong to).
-function spliceInlineAnswer(blockId, bodyHtml, scroll, id, fallbackEl) {
+function spliceInlineAnswer(blockId, bodyHtml, scroll, id, fallbackEl, askedIn) {
   const div = document.createElement("div");
   div.className = "qa inline-answer";
-  div.innerHTML = sanitizeHtml(bodyHtml);
+  div.innerHTML = sanitizeHtml(bodyHtml) + askedInMarkerHtml(askedIn);
   if (id) div.dataset.blockId = id;
   const anchorEl = blockElement(blockId);
   if (!anchorEl) {
@@ -236,7 +236,7 @@ function spliceInlineAnswer(blockId, bodyHtml, scroll, id, fallbackEl) {
 // §S8: a spawned sub-node's DOM shell — its own prose container and
 // its own (initially empty) interaction container, so a question
 // asked *inside* a sub-node nests exactly the same way, recursively.
-function buildSubNodeWrapper(subNodeId, title, questionHtml) {
+function buildSubNodeWrapper(subNodeId, title, questionHtml, askedIn) {
   const wrapper = document.createElement("div");
   wrapper.className = "subnode";
   wrapper.dataset.nodeId = subNodeId;
@@ -250,7 +250,7 @@ function buildSubNodeWrapper(subNodeId, title, questionHtml) {
   if (questionHtml) {
     const qEl = document.createElement("div");
     qEl.className = "subnode-question";
-    qEl.innerHTML = sanitizeHtml(questionHtml);
+    qEl.innerHTML = sanitizeHtml(questionHtml) + askedInMarkerHtml(askedIn);
     wrapper.appendChild(qEl);
   }
   const proseEl = document.createElement("div");
@@ -277,7 +277,7 @@ function extractQuestionHtml(markerBodyHtml) {
 // `anchorBlockId`, then recursively hydrates ITS OWN interactions
 // (including further nested spawns) into its own containers — a
 // reload must reconstruct exactly what a live session already spliced.
-async function spliceSubNodeFromServer(anchorBlockId, subNodeId, questionHtml) {
+async function spliceSubNodeFromServer(anchorBlockId, subNodeId, questionHtml, askedIn) {
   const anchorEl = document.querySelector(
     '[data-block-id="' + anchorBlockId + '"]',
   );
@@ -288,7 +288,7 @@ async function spliceSubNodeFromServer(anchorBlockId, subNodeId, questionHtml) {
     );
     if (!resp.ok) return;
     const data = await resp.json();
-    const sub = buildSubNodeWrapper(subNodeId, data.title, questionHtml);
+    const sub = buildSubNodeWrapper(subNodeId, data.title, questionHtml, askedIn);
     sub.proseEl.innerHTML = sanitizeHtml(data.content_html);
     hydrateIslands(sub.proseEl, subNodeId);
     anchorEl.insertAdjacentElement("afterend", sub.wrapper);
@@ -322,6 +322,7 @@ async function hydrateInteractions(interactions, interactionsEl) {
         item.anchor_block,
         item.child_node_id,
         extractQuestionHtml(item.body_html),
+        item.asked_in,
       );
       continue;
     }
@@ -332,12 +333,13 @@ async function hydrateInteractions(interactions, interactionsEl) {
         false,
         item.id,
         interactionsEl,
+        item.asked_in,
       );
       continue;
     }
     const div = document.createElement("div");
     div.className = item.kind;
-    div.innerHTML = sanitizeHtml(item.body_html);
+    div.innerHTML = sanitizeHtml(item.body_html) + askedInMarkerHtml(item.asked_in);
     interactionsEl.appendChild(div);
   }
 }

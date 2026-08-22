@@ -688,6 +688,13 @@ struct InteractionView {
     child_node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_block: Option<String>,
+    /// §S15b step 4: the ORIGIN document's display name, present only when
+    /// it differs from the document currently being read — a node's own
+    /// document reading its own interactions never sets this, only a
+    /// reference does. The client renders it as a discreet marker; `None`
+    /// means "render nothing", not "unknown".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asked_in: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -770,6 +777,17 @@ pub async fn get_node(
         .as_ref()
         .map(|e| e.exercise_id.clone());
 
+    // §S15b step 4: resolves an interaction's `asked_in` doc id into a
+    // display name, but only when it differs from THIS document — a plain
+    // local node (the overwhelming common case) never carries the marker.
+    let asked_in_marker = |origin: &Option<String>| -> Option<String> {
+        let origin = origin.as_ref()?;
+        if origin == &doc_id {
+            return None;
+        }
+        Some(super::cold_start::document_name(&state, origin, ""))
+    };
+
     let interactions = node
         .interaction
         .iter()
@@ -778,12 +796,14 @@ pub async fn get_node(
                 id,
                 anchor,
                 body_html,
+                asked_in,
             } => InteractionView {
                 id: id.clone(),
                 kind: "annotation",
                 body_html: body_html.clone(),
                 child_node_id: None,
                 anchor_block: Some(anchor.block_id.clone()),
+                asked_in: asked_in_marker(asked_in),
             },
             InteractionItem::Thread {
                 id,
@@ -791,17 +811,20 @@ pub async fn get_node(
                 body_html,
                 anchor_block,
                 child_node_id,
+                asked_in,
             } => InteractionView {
                 id: id.clone(),
                 kind: "qa",
                 body_html: body_html.clone(),
                 child_node_id: child_node_id.clone(),
                 anchor_block: anchor_block.clone(),
+                asked_in: asked_in_marker(asked_in),
             },
             InteractionItem::Thread {
                 id,
                 kind: ThreadKind::Remediation,
                 body_html,
+                asked_in,
                 ..
             } => InteractionView {
                 id: id.clone(),
@@ -809,11 +832,13 @@ pub async fn get_node(
                 body_html: body_html.clone(),
                 child_node_id: None,
                 anchor_block: None,
+                asked_in: asked_in_marker(asked_in),
             },
             InteractionItem::Thread {
                 id,
                 kind: ThreadKind::Attempt,
                 body_html,
+                asked_in,
                 ..
             } => InteractionView {
                 id: id.clone(),
@@ -821,6 +846,7 @@ pub async fn get_node(
                 body_html: body_html.clone(),
                 child_node_id: None,
                 anchor_block: None,
+                asked_in: asked_in_marker(asked_in),
             },
         })
         .collect();

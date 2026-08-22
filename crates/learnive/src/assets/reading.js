@@ -450,7 +450,7 @@ function ownerNodeId(blockId) {
 }
 
 function renderNoteText(entry) {
-  entry.el.innerHTML = sanitizeHtml(entry.bodyHtml);
+  entry.el.innerHTML = sanitizeHtml(entry.bodyHtml) + askedInMarkerHtml(entry.askedIn);
 }
 
 function attachNoteClickHandler(entry, id) {
@@ -473,6 +473,7 @@ function upsertAnnotationNote(item) {
       el: noteEl,
       blockId: item.anchor_block,
       bodyHtml: item.body_html,
+      askedIn: item.asked_in,
       editing: false,
     };
     notesById.set(item.id, entry);
@@ -480,6 +481,7 @@ function upsertAnnotationNote(item) {
   } else {
     entry.blockId = item.anchor_block;
     entry.bodyHtml = item.body_html;
+    entry.askedIn = item.asked_in;
   }
   if (!entry.editing) renderNoteText(entry);
   const target = blockElement(item.anchor_block);

@@ -449,6 +449,7 @@ mod tests {
                     id: "a1".to_string(),
                     anchor: Anchor::block("b1"),
                     body_html: "<p>note</p>".to_string(),
+                    asked_in: None,
                 },
             )
             .unwrap();
@@ -478,6 +479,7 @@ mod tests {
                     id: "a1".to_string(),
                     anchor: Anchor::block("b1"),
                     body_html: "<p>mid-stream question</p>".to_string(),
+                    asked_in: None,
                 },
             )
             .unwrap();

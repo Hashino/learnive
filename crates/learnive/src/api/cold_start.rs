@@ -67,7 +67,7 @@ struct DocumentMeta {
 /// needs: a document created before §S12 has no `document.json`, so it falls
 /// back to its topic, and finally to its id — never a blank entry in the
 /// sidebar's document list.
-fn document_name(state: &AppState, doc_id: &str, topic: &str) -> String {
+pub(super) fn document_name(state: &AppState, doc_id: &str, topic: &str) -> String {
     let stored = state
         .store
         .read_doc_file(doc_id, "document.json")

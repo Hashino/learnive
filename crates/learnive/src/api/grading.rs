@@ -215,6 +215,7 @@ pub async fn answer(
             anchor_block: exercise_anchor.clone(),
             body_html: attempt_html.clone(),
             child_node_id: None,
+            asked_in: Some(doc_id.clone()),
         },
     )?;
 
@@ -399,6 +400,7 @@ pub async fn answer(
             anchor_block: exercise_anchor,
             body_html: explanation.clone(),
             child_node_id: None,
+            asked_in: Some(doc_id.clone()),
         },
     )?;
 

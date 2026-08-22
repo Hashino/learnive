@@ -114,6 +114,14 @@ pub enum InteractionItem {
         id: String,
         anchor: Anchor,
         body_html: String,
+        /// §S15b step 4: the id of the document this interaction actually
+        /// happened in — distinct from `Node::doc_id` (the OWNER) once a
+        /// node is read through a reference, since the interaction layer
+        /// converges (§S15b) but the reader may be visiting. Additive and
+        /// optional so a node written before this field existed still
+        /// parses.
+        #[serde(default)]
+        asked_in: Option<String>,
     },
     Thread {
         id: String,
@@ -127,6 +135,9 @@ pub enum InteractionItem {
         /// permanently — not a collapsed/expandable widget.
         #[serde(default)]
         child_node_id: Option<String>,
+        /// §S15b step 4 — see `Annotation::asked_in`.
+        #[serde(default)]
+        asked_in: Option<String>,
     },
 }
 
@@ -436,6 +447,7 @@ fn parse_interaction(article: &ElementRef) -> Vec<InteractionItem> {
                             quote: build_quote(v),
                         },
                         body_html: el.inner_html(),
+                        asked_in: v.attr("data-asked-in").map(str::to_string),
                     })
                 }
                 "div" if v.attr("data-thread-id").is_some() => Some(InteractionItem::Thread {
@@ -447,6 +459,7 @@ fn parse_interaction(article: &ElementRef) -> Vec<InteractionItem> {
                     anchor_block: v.attr("data-anchor-block").map(str::to_string),
                     body_html: el.inner_html(),
                     child_node_id: v.attr("data-child-node-id").map(str::to_string),
+                    asked_in: v.attr("data-asked-in").map(str::to_string),
                 }),
                 _ => None,
             }
@@ -469,6 +482,7 @@ fn render_interaction(item: &InteractionItem) -> String {
             id,
             anchor,
             body_html,
+            asked_in,
         } => {
             let mut s = String::from("    <aside");
             push_attr(&mut s, "data-annotation-id", id);
@@ -482,6 +496,9 @@ fn render_interaction(item: &InteractionItem) -> String {
                     push_attr(&mut s, "data-anchor-suffix", sf);
                 }
             }
+            if let Some(a) = asked_in {
+                push_attr(&mut s, "data-asked-in", a);
+            }
             s.push('>');
             s.push_str(body_html);
             s.push_str("</aside>");
@@ -493,6 +510,7 @@ fn render_interaction(item: &InteractionItem) -> String {
             anchor_block,
             body_html,
             child_node_id,
+            asked_in,
         } => {
             let mut s = String::from("    <div");
             push_attr(&mut s, "data-thread-id", id);
@@ -502,6 +520,9 @@ fn render_interaction(item: &InteractionItem) -> String {
             }
             if let Some(c) = child_node_id {
                 push_attr(&mut s, "data-child-node-id", c);
+            }
+            if let Some(a) = asked_in {
+                push_attr(&mut s, "data-asked-in", a);
             }
             s.push('>');
             s.push_str(body_html);
@@ -627,6 +648,7 @@ mod tests {
                 }),
             },
             body_html: "<p>my note</p>".to_string(),
+            asked_in: None,
         });
 
         // Real invariant (§4.3): the append never touches the frozen content.
@@ -647,6 +669,29 @@ mod tests {
     }
 
     #[test]
+    fn asked_in_survives_the_html_round_trip() {
+        // §S15b step 4: `data-asked-in` has to parse back out unchanged, or
+        // a reference's provenance marker would silently vanish on reload.
+        let mut node = Node::parse(SAMPLE).unwrap();
+        node.push_interaction(InteractionItem::Thread {
+            id: "t1".to_string(),
+            kind: ThreadKind::Qa,
+            anchor_block: Some("b1".to_string()),
+            body_html: "<p>answer</p>".to_string(),
+            child_node_id: None,
+            asked_in: Some("visiting-doc".to_string()),
+        });
+
+        let reparsed = Node::parse(&node.to_html()).unwrap();
+        match &reparsed.interaction[0] {
+            InteractionItem::Thread { asked_in, .. } => {
+                assert_eq!(asked_in.as_deref(), Some("visiting-doc"));
+            }
+            _ => panic!("expected thread"),
+        }
+    }
+
+    #[test]
     fn preserves_interaction_order() {
         let mut node = Node::parse(SAMPLE).unwrap();
         node.push_interaction(InteractionItem::Thread {
@@ -655,11 +700,13 @@ mod tests {
             anchor_block: Some("b2".to_string()),
             body_html: "<p>remediation</p>".to_string(),
             child_node_id: None,
+            asked_in: None,
         });
         node.push_interaction(InteractionItem::Annotation {
             id: "a2".to_string(),
             anchor: Anchor::block("b1"),
             body_html: "<p>after</p>".to_string(),
+            asked_in: None,
         });
 
         let reparsed = Node::parse(&node.to_html()).unwrap();
@@ -717,6 +764,7 @@ mod tests {
             anchor_block: Some("b1".to_string()),
             body_html: "<p>The <em>Carnot</em> bound is what limits it.</p>".to_string(),
             child_node_id: None,
+            asked_in: None,
         });
 
         let r = node.resolve(&Anchor::block("qa1")).unwrap();
@@ -757,6 +805,7 @@ mod tests {
                         <p data-block-id=\"qa1-b2\">Then the irreversible one.</p></div>"
                 .to_string(),
             child_node_id: None,
+            asked_in: None,
         });
 
         let target = node.resolve_interaction("qa1-b2").unwrap();

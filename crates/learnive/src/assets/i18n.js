@@ -36,6 +36,9 @@ const I18N = {
     "prereq.action.skip": "Skip",
     "prereq.knownIn": "known in {0}",
     "prereq.reviewBadge": "(review)",
+    // §S15b step 4: provenance marker on an interaction item read through a
+    // reference — only shown when it differs from the document being read.
+    "interaction.askedIn": "asked while reading {0}",
     // Plan proposal
     "plan.title": "Proposed outline change",
     "plan.approve": "Approve",
@@ -140,6 +143,7 @@ const I18N = {
     "prereq.action.skip": "Pular",
     "prereq.knownIn": "já aprendido em {0}",
     "prereq.reviewBadge": "(revisão)",
+    "interaction.askedIn": "perguntado lendo {0}",
     "plan.title": "Mudança de estrutura proposta",
     "plan.approve": "Aprovar",
     "plan.reject": "Rejeitar",

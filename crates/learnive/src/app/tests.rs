@@ -2679,6 +2679,53 @@ async fn a_referenced_node_converges_qa_and_annotations_across_documents() {
         "annotation added on the OWNER must be visible reading through the VISITING reference: {visit_interaction}"
     );
 
+    // §S15b step 4: `asked_in` is a provenance marker, present ONLY when it
+    // differs from the document currently being read — reading a question
+    // asked from elsewhere carries the marker, reading it through the same
+    // document it was asked from does not (and vice versa for the
+    // annotation, added on the OWNER).
+    let owner_qa = owner_after_json["interactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "qa")
+        .expect("qa thread present");
+    assert!(
+        owner_qa["asked_in"].is_string(),
+        "reading through the OWNER, a question asked from the VISITING doc must carry a provenance marker: {owner_qa}"
+    );
+    let owner_annotation = owner_after_json["interactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "annotation")
+        .expect("annotation present");
+    assert!(
+        owner_annotation["asked_in"].is_null(),
+        "reading through the OWNER, an annotation added on the OWNER itself carries no marker: {owner_annotation}"
+    );
+
+    let visit_qa = visit_after_json["interactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "qa")
+        .expect("qa thread present");
+    assert!(
+        visit_qa["asked_in"].is_null(),
+        "reading through the SAME document the question was asked from, no marker: {visit_qa}"
+    );
+    let visit_annotation = visit_after_json["interactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "annotation")
+        .expect("annotation present");
+    assert!(
+        visit_annotation["asked_in"].is_string(),
+        "reading through the VISITING doc, an annotation added on the OWNER must carry a provenance marker: {visit_annotation}"
+    );
+
     // §S15b step 3: the reference's own gate STATE in the VISITING
     // document's outline must fold in the owner's log too — this is the
     // literal thing step 3 exists for (content/interactions already

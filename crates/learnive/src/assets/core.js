@@ -147,6 +147,15 @@ function escapeHtml(s) {
   );
 }
 
+// §S15b step 4: `asked_in` on an `InteractionView` is already `null`
+// unless the server resolved it to a display name that differs from the
+// document being read — so the client's whole job is "render it or don't",
+// never a comparison of its own.
+function askedInMarkerHtml(askedIn) {
+  if (!askedIn) return "";
+  return `<div class="asked-in">${escapeHtml(t("interaction.askedIn", askedIn))}</div>`;
+}
+
 // Sanitizes LLM-generated HTML before inserting it into the app origin
 // (§3.1, §4.4). Parsing happens in an inert <template> (images don't load,
 // scripts don't run), then we remove dangerous elements, event attributes
