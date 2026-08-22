@@ -858,8 +858,14 @@ async function advanceAfterGrading() {
 // the persisted node content (§4.3) — the prompt/tree simply vanish the
 // moment `openNode` below starts streaming the new topic's first node, the
 // same way "Practice again" or a "generating…" status line already does.
+//
+// Only ever replaces its own wrapper, never `container`'s other children:
+// on a returning-user reload (`openDocument`, documents.js) `rec.controls`
+// already holds the "Practice again" button (`renderPracticeControl`) by
+// the time this runs, and both must coexist.
 function renderNextTopicPrompt(container) {
-  container.innerHTML = "";
+  const existing = container.querySelector(":scope > .next-topic");
+  if (existing) existing.remove();
   const wrap = document.createElement("div");
   wrap.className = "next-topic";
   wrap.innerHTML =
