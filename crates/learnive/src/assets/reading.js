@@ -178,7 +178,12 @@ function sourceSelectionFromSelection() {
   if (!el0 || !panel.classList.contains("open") || !panel.contains(el0)) {
     return null;
   }
-  const section = el0.closest("section[data-locator]");
+  // Require the selection to sit inside the section's fetched prose, not
+  // just anywhere in the section (e.g. the TOC heading, whose body may not
+  // even be loaded yet) — otherwise the quote sent to the tutor can be a
+  // title the user never actually read.
+  const body = el0.closest(".sourceSectionBody");
+  const section = body ? body.closest("section[data-locator]") : null;
   const sourceId = panel.dataset.sourceId;
   if (!section || !sourceId) return null;
   const quote = sel.toString().trim();
