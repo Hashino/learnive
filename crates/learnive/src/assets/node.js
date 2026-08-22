@@ -868,11 +868,13 @@ function renderSourceIndex(sourceId, index, locator) {
     const h = document.createElement("h3");
     h.textContent = summary.title || summary.locator;
     h.addEventListener("click", () => loadSourceSection(sourceId, summary.locator));
-    const p = document.createElement("p");
-    p.className = "sourceSectionBody";
-    p.textContent = "";
+    // A `<div>`, not a `<p>` (§11.1 item 7): this now holds real block-level
+    // section HTML (headings, tables, figures) via `renderSectionBody`, and
+    // a `<p>` container has no valid content model for that.
+    const container = document.createElement("div");
+    container.className = "sourceSectionBody";
     sec.appendChild(h);
-    sec.appendChild(p);
+    sec.appendChild(container);
     body.appendChild(sec);
   }
   (current || body.firstElementChild)?.scrollIntoView({ block: "start" });
@@ -907,22 +909,59 @@ async function loadSourceSection(sourceId, locator, quote = "") {
   }
 }
 
-// Renders the section body as pre/mark/post text nodes -- never innerHTML,
-// this is source text, not model-generated HTML (§11.1 item 8, S19). The
-// server pre-splits `highlight` (byte-offset math on the Rust side, not
-// re-sliced here) so this stays a plain three-way append with no index math.
+// Renders the section's real markup (§11.1 item 7) -- headings, lists,
+// tables, figures, code and MathML, instead of the flattened one-paragraph
+// `text` this used to show (that field exists for retrieval, §10, not for
+// display). `html` is server-sanitized (`source::sanitize_html`, ammonia)
+// but routed through the same client-side `sanitizeHtml` every other piece
+// of server HTML goes through before `innerHTML` (defense in depth,
+// consistent with the rest of this file). `#[serde(default)]` on the Rust
+// side means a source acquired before item 1 has an empty `html` — falls
+// back to the old plain-text render rather than showing nothing.
 function renderSectionBody(body, section) {
   body.innerHTML = "";
-  if (!section.highlight) {
-    body.appendChild(document.createTextNode(section.text));
+  if (!section.html) {
+    if (!section.highlight) {
+      body.appendChild(document.createTextNode(section.text));
+      return;
+    }
+    const { before, matched, after } = section.highlight;
+    body.appendChild(document.createTextNode(before));
+    const mark = document.createElement("mark");
+    mark.textContent = matched;
+    body.appendChild(mark);
+    body.appendChild(document.createTextNode(after));
     return;
   }
-  const { before, matched, after } = section.highlight;
-  body.appendChild(document.createTextNode(before));
-  const mark = document.createElement("mark");
-  mark.textContent = matched;
-  body.appendChild(mark);
-  body.appendChild(document.createTextNode(after));
+  body.innerHTML = sanitizeHtml(section.html);
+  if (section.highlight && section.highlight.matched) {
+    highlightFirstMatch(body, section.highlight.matched);
+  }
+}
+
+// Wraps the first occurrence of `needle` in a <mark>, searching the
+// rendered HTML's own text nodes rather than re-deriving byte offsets --
+// that cross-language index math (Rust bytes vs. JS UTF-16 units) is
+// exactly the bug §11.1 item 8 already hit once (`resolve_quote`'s
+// before/matched/after triple exists because of it). Whitespace or markup
+// differences between `text` (flattened for retrieval) and `html` (real
+// structure) can make `needle` not appear verbatim in any single text
+// node -- that degrades to no highlight, same posture as an unresolved
+// quote server-side, never a hard failure.
+function highlightFirstMatch(root, needle) {
+  needle = needle.trim();
+  if (!needle) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const idx = node.nodeValue.indexOf(needle);
+    if (idx === -1) continue;
+    const after = node.splitText(idx);
+    after.splitText(needle.length);
+    const mark = document.createElement("mark");
+    mark.textContent = needle;
+    after.replaceWith(mark);
+    return;
+  }
 }
 
 function closeSourcePanel() {
@@ -935,6 +974,71 @@ document.addEventListener("keydown", (e) => {
     closeSourcePanel();
   }
 });
+
+// Resizable split (§11.1 item 7): drag `#sourcePanelHandle` to resize the
+// panel. Stored as a bare vw number (not "50vw") so it round-trips through
+// `parseFloat` cleanly on restore. Clamped generously — narrow enough that
+// the reading column still has room (app.css's own `min(760px, ...)` rules
+// handle the rest), wide enough that the panel never eats the whole screen.
+const SOURCE_WIDTH_KEY = "learnive-source-panel-width";
+const SOURCE_WIDTH_MIN_VW = 25;
+const SOURCE_WIDTH_MAX_VW = 80;
+
+function applySourcePanelWidth(vw) {
+  const clamped = Math.min(SOURCE_WIDTH_MAX_VW, Math.max(SOURCE_WIDTH_MIN_VW, vw));
+  document.documentElement.style.setProperty("--source-panel-width", `${clamped}vw`);
+  return clamped;
+}
+
+(function restoreSourcePanelWidth() {
+  const saved = parseFloat(localStorage.getItem(SOURCE_WIDTH_KEY));
+  if (!Number.isNaN(saved)) applySourcePanelWidth(saved);
+})();
+
+(function wireSourcePanelResize() {
+  const handle = el("sourcePanelHandle");
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    // Best-effort: a synthetic or already-released pointer can make this
+    // throw (`NotFoundError`), which would otherwise abort the listener
+    // setup below and leave the drag half-wired.
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore — the drag still works without capture, just without the
+      // guarantee that a fast pointer stays "owned" by the handle.
+    }
+    handle.classList.add("dragging");
+    document.body.classList.add("source-resizing");
+    let lastWidth =
+      parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue(
+          "--source-panel-width",
+        ),
+      ) || SOURCE_WIDTH_MIN_VW;
+
+    const onMove = (moveEvent) => {
+      // The panel sits flush against the right edge, so its width is just
+      // the distance from the pointer to that edge.
+      const vw = ((window.innerWidth - moveEvent.clientX) / window.innerWidth) * 100;
+      lastWidth = applySourcePanelWidth(vw);
+    };
+    const onUp = (upEvent) => {
+      try {
+        handle.releasePointerCapture(upEvent.pointerId);
+      } catch {
+        // already released, or capture never succeeded above — fine either way.
+      }
+      handle.classList.remove("dragging");
+      document.body.classList.remove("source-resizing");
+      localStorage.setItem(SOURCE_WIDTH_KEY, String(lastWidth));
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  });
+})();
 
 function appendRemediation(rec, explanationHtml) {
   // Every previously-active exercise iframe is already gone by the time this

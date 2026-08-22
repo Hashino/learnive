@@ -226,6 +226,8 @@ impl OpenStaxSource {
                 async move {
                     let body = self.get_json(&url).await.ok()?;
                     let raw_html = body.get("content").and_then(Value::as_str)?;
+                    let raw_html = super::absolutize_relative_image_srcs(raw_html, &url);
+                    let raw_html = raw_html.as_str();
                     let text = super::normalize_html(raw_html, SECTION_TEXT_CAP);
                     if text.is_empty() {
                         return None;

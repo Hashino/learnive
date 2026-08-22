@@ -214,6 +214,7 @@ function sanitizeHtml(html) {
     "FORM",
   ]);
   const SAFE_URI = /^(https?:|mailto:|#|\/|data:image\/)/i;
+  const ASSET_SRC = /^\/api\/sources\/[^/?#]+\/assets\//;
   const els = [];
   const walker = document.createTreeWalker(
     tpl.content,
@@ -246,6 +247,13 @@ function sanitizeHtml(html) {
         !SAFE_URI.test(attr.value.trim())
       ) {
         elm.removeAttribute(attr.name);
+      } else if (name === "src" && ASSET_SRC.test(attr.value)) {
+        // The security guard requires the session token on every request,
+        // but a plain <img src> can't carry the X-Learnive-Token header —
+        // so locally-served source assets need the token in the query,
+        // same convention as index.html's <script src="...?token=">.
+        const sep = attr.value.includes("?") ? "&" : "?";
+        elm.setAttribute("src", `${attr.value}${sep}token=${TOKEN}`);
       }
     }
   }

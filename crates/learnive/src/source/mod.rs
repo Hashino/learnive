@@ -156,8 +156,9 @@ fn is_safe_image_host(url: &reqwest::Url) -> bool {
 /// attribute rewriting, not a hand-rolled parser): first collect every
 /// distinct URL, then download concurrently, then rewrite. Best-effort per
 /// image — a download/network failure just leaves that `<img>` pointed at
-/// the remote host, exactly like calling this was skipped, rather than
-/// failing the whole acquisition over one broken figure.
+/// the remote host (normalized to `https:` if it was protocol-relative, see
+/// `rewrite_image_srcs`) rather than failing the whole acquisition over one
+/// broken figure.
 pub(crate) async fn localize_images(
     client: &reqwest::Client,
     corpus: &Corpus,
@@ -185,17 +186,29 @@ pub(crate) async fn localize_images(
         .filter_map(|x| async move { x })
         .collect()
         .await;
-    if rewrites.is_empty() {
-        return;
-    }
 
+    // Always run the rewrite pass, even with zero successful downloads:
+    // `rewrite_image_srcs` also normalizes any *still-remote* protocol-
+    // relative `src` to an explicit `https:` (see its doc comment) — this
+    // app is served over plain HTTP (§3), so leaving `//host/path` behind
+    // after a failed download would resolve to `http://` in the browser and
+    // get silently blocked by the CSP's `img-src ... https:`. Skipping this
+    // pass when nothing downloaded would un-do exactly that safety net.
     for section in sections.iter_mut() {
         section.html = rewrite_image_srcs(&section.html, &rewrites);
     }
 }
 
-/// Pass 1 of [`localize_images`]: every `http(s)://` `<img src>` in `html`,
-/// deduplicated. Ignores parse errors (malformed fragments just yield fewer
+/// Pass 1 of [`localize_images`]: every remotely-hosted `<img src>` in
+/// `html`, deduplicated. Matches `http(s)://` and also **protocol-relative**
+/// `//host/path` — Wikipedia (found live, verifying §11.1 item 7) emits
+/// exactly that form, and skipping it silently would defeat item 5's whole
+/// point for that backend: the browser resolves `//...` against the page's
+/// own scheme and loads it directly from the remote host regardless,
+/// offline-reading and privacy rationale included. Kept as the *original*
+/// string (not normalized) so pass 2's exact-match rewrite still finds it;
+/// [`download_and_store`] is what actually normalizes it into a fetchable
+/// absolute URL. Ignores parse errors (malformed fragments just yield fewer
 /// URLs, never a hard failure — sanitized source HTML, not a security
 /// boundary at this point).
 fn collect_image_urls(html: &str, urls: &mut std::collections::HashSet<String>) {
@@ -206,7 +219,9 @@ fn collect_image_urls(html: &str, urls: &mut std::collections::HashSet<String>) 
             "img[src]",
             |el| {
                 if let Some(src) = el.get_attribute("src")
-                    && (src.starts_with("http://") || src.starts_with("https://"))
+                    && (src.starts_with("http://")
+                        || src.starts_with("https://")
+                        || src.starts_with("//"))
                 {
                     found.push(src);
                 }
@@ -218,18 +233,66 @@ fn collect_image_urls(html: &str, urls: &mut std::collections::HashSet<String>) 
 }
 
 /// Pass 2 of [`localize_images`]: rewrites every `<img src>` present in
-/// `rewrites` to its local path; anything not in the map (a failed download)
-/// is left untouched, still pointing at the remote host.
+/// `rewrites` to its local path. Anything not in the map (a failed
+/// download) is left pointing at the remote host — **except** a still
+/// protocol-relative `src` (`//host/path`), which gets normalized to an
+/// explicit `https:` rather than left as-is: this app is served over plain
+/// HTTP (§3's local server), so a `//`-relative URL resolves to `http://`
+/// in the browser and the CSP's `img-src 'self' data: https:` then blocks
+/// it outright — found live (§11.1 item 7's verification) against a real
+/// Wikipedia image whose download failed. Forcing `https:` at least gives
+/// the browser a URL the CSP allows, matching what the download attempt
+/// itself already assumed.
 fn rewrite_image_srcs(html: &str, rewrites: &std::collections::HashMap<String, String>) -> String {
     lol_html::rewrite_str(
         html,
         lol_html::RewriteStrSettings::new().append_element_content_handler(lol_html::element!(
             "img[src]",
             |el| {
+                if let Some(src) = el.get_attribute("src") {
+                    if let Some(local) = rewrites.get(&src) {
+                        el.set_attribute("src", local)?;
+                    } else if let Some(rest) = src.strip_prefix("//") {
+                        el.set_attribute("src", &format!("https://{rest}"))?;
+                    }
+                }
+                Ok(())
+            }
+        )),
+    )
+    .unwrap_or_else(|_| html.to_string())
+}
+
+/// Resolves every **relative** `<img src>` in `html` (no scheme, not
+/// protocol-relative) against `base`, turning it into an absolute URL —
+/// found live (§11.1 item 7's verification) against real OpenStax content:
+/// its page HTML links figures as `../resources/<hash>`, relative to the
+/// page's own archive URL, which `collect_image_urls` (matching only
+/// `http(s)://`/`//`) silently never saw, so no OpenStax figure was ever
+/// being localized despite item 5 nominally covering every backend. Must run
+/// before [`localize_images`], since that function only recognizes absolute
+/// or protocol-relative URLs; a backend with server-relative image links
+/// (only OpenStax today) resolves them itself, in its own module, because
+/// only it knows the right base URL. Malformed fragments are left as-is
+/// (same best-effort spirit as [`collect_image_urls`]).
+pub(crate) fn absolutize_relative_image_srcs(html: &str, base: &str) -> String {
+    let Ok(base_url) = reqwest::Url::parse(base) else {
+        return html.to_string();
+    };
+    lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings::new().append_element_content_handler(lol_html::element!(
+            "img[src]",
+            |el| {
                 if let Some(src) = el.get_attribute("src")
-                    && let Some(local) = rewrites.get(&src)
+                    && !src.starts_with("http://")
+                    && !src.starts_with("https://")
+                    && !src.starts_with("//")
+                    && !src.starts_with("data:")
+                    && !src.starts_with('#')
+                    && let Ok(resolved) = base_url.join(&src)
                 {
-                    el.set_attribute("src", local)?;
+                    el.set_attribute("src", resolved.as_str())?;
                 }
                 Ok(())
             }
@@ -248,7 +311,15 @@ async fn download_and_store(
     source_id: &str,
     url: &str,
 ) -> Option<String> {
-    let parsed = reqwest::Url::parse(url).ok()?;
+    // Protocol-relative (`//host/path`, see `collect_image_urls`) has no
+    // scheme for `Url::parse` to work with — the browser would resolve it
+    // against the page's own (https) scheme, so do the same here.
+    let absolute = if let Some(rest) = url.strip_prefix("//") {
+        format!("https://{rest}")
+    } else {
+        url.to_string()
+    };
+    let parsed = reqwest::Url::parse(&absolute).ok()?;
     if !is_safe_image_host(&parsed) {
         return None;
     }
@@ -578,7 +649,8 @@ mod tests {
             <img src="http://example.org/fig2.jpg">
             <img src="data:image/png;base64,AAAA">
             <img src="/already/local.png">
-            <img src="https://openstax.org/fig1.png">"#;
+            <img src="https://openstax.org/fig1.png">
+            <img src="//upload.wikimedia.org/commons/fig3.jpg">"#;
         let mut urls = std::collections::HashSet::new();
         collect_image_urls(html, &mut urls);
         assert_eq!(
@@ -586,8 +658,11 @@ mod tests {
             std::collections::HashSet::from([
                 "https://openstax.org/fig1.png".to_string(),
                 "http://example.org/fig2.jpg".to_string(),
+                // Protocol-relative (Wikipedia's own form, found live) must
+                // be collected too — see `collect_image_urls`'s doc comment.
+                "//upload.wikimedia.org/commons/fig3.jpg".to_string(),
             ]),
-            "dedupes, keeps only http(s), ignores data: and already-local src"
+            "dedupes, keeps http(s) and protocol-relative, ignores data: and already-local src"
         );
     }
 
@@ -610,6 +685,46 @@ mod tests {
             rewritten.contains("<figcaption>Fig 1</figcaption>"),
             "surrounding markup survives"
         );
+    }
+
+    /// Found live (§11.1 item 7's verification): a protocol-relative `src`
+    /// whose download failed (or was never attempted) must NOT survive
+    /// as-is — this app is served over plain HTTP (§3), so `//host/path`
+    /// resolves to `http://` in the browser and the CSP's
+    /// `img-src 'self' data: https:` silently blocks it. Must normalize to
+    /// `https:` even with an empty `rewrites` map.
+    #[test]
+    fn rewrite_image_srcs_normalizes_unresolved_protocol_relative_to_https() {
+        let html = r#"<img src="//upload.wikimedia.org/commons/fig.jpg">"#;
+        let rewritten = rewrite_image_srcs(html, &std::collections::HashMap::new());
+        assert!(
+            rewritten.contains(r#"src="https://upload.wikimedia.org/commons/fig.jpg""#),
+            "expected an explicit https src: {rewritten}"
+        );
+    }
+
+    /// Found live (§11.1 item 7's verification) against real OpenStax
+    /// content: page HTML links figures as `../resources/<hash>`, relative
+    /// to the page's own archive URL — a form `collect_image_urls` never
+    /// recognized, so no OpenStax figure was ever localized. This must run
+    /// before `collect_image_urls` sees the HTML.
+    #[test]
+    fn absolutize_relative_image_srcs_resolves_against_page_base() {
+        let html = r#"<img src="../resources/deadbeef" alt="fig">
+            <img src="https://openstax.org/already/absolute.png">
+            <img src="//upload.wikimedia.org/commons/fig.jpg">
+            <img src="data:image/png;base64,AAAA">"#;
+        let base = "https://openstax.org/apps/archive/20231213.123456/contents/BOOK@1:PAGE.json";
+        let out = absolutize_relative_image_srcs(html, base);
+        assert!(
+            out.contains(
+                r#"src="https://openstax.org/apps/archive/20231213.123456/resources/deadbeef""#
+            ),
+            "relative src resolved against the page's archive base: {out}"
+        );
+        assert!(out.contains(r#"src="https://openstax.org/already/absolute.png""#));
+        assert!(out.contains(r#"src="//upload.wikimedia.org/commons/fig.jpg""#));
+        assert!(out.contains(r#"src="data:image/png;base64,AAAA""#));
     }
 
     #[test]
@@ -704,17 +819,26 @@ mod tests {
         let corpus = Corpus::open(&dir).unwrap();
         // A small, stable Wikimedia Commons thumbnail — same host family the
         // `wikipedia` backend already fetches article HTML from.
+        // Second image deliberately protocol-relative (`//host/path`) --
+        // exactly the form Wikipedia emits (found live, §11.1 item 7's
+        // verification), which `collect_image_urls`/`download_and_store`
+        // used to silently skip since it isn't `http(s)://`.
         let mut sections = vec![Section {
             locator: "sec:1".into(),
             title: "Intro".into(),
             text: "text".into(),
-            html: r#"<p>See <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png" alt="demo"></p>"#.into(),
+            html: r#"<p>See <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png" alt="demo">
+                and <img src="//upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png" alt="demo2"></p>"#.into(),
         }];
         localize_images(&image_client(), &corpus, "live-s1", &mut sections).await;
         println!("rewritten html: {}", sections[0].html);
-        assert!(
-            sections[0].html.contains("/api/sources/live-s1/assets/"),
-            "expected a local asset src: {}",
+        assert_eq!(
+            sections[0]
+                .html
+                .matches("/api/sources/live-s1/assets/")
+                .count(),
+            2,
+            "both the absolute and the protocol-relative src must localize: {}",
             sections[0].html
         );
         assert!(!sections[0].html.contains("upload.wikimedia.org"));
