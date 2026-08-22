@@ -729,6 +729,172 @@ async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node(
 }
 
 #[tokio::test]
+async fn practice_is_refused_before_demonstrated_and_regrades_without_relocking() {
+    // §S15 item 5: the on-demand practice valve only opens once a node is
+    // past its real gate (`Demonstrated`) — calling it earlier would
+    // silently replace the node's still-live real check.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &doc_id, &node0).await;
+
+    // Not demonstrated yet — refused.
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/practice"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Demonstrate it for real.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    // Now practice is allowed: it overwrites the rubric sidecar with a
+    // fresh `test` move, served by the SAME `exercise-frame` route the
+    // real gate used, unchanged.
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/practice"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, frame_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/exercise-frame"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        frame_body.contains("learnive-answer") || frame_body.contains("form"),
+        "expected a real sandboxed exercise frame: {frame_body}"
+    );
+
+    // Grading a practice attempt is real evidence (§4.3/§7) but must NOT
+    // relock the node or route the learner anywhere — `node_states`' rank
+    // keeps `Demonstrated` once reached (`events::aggregate::node_state_rank`).
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    let (status, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        outline["items"][0]["state"],
+        serde_json::json!("demonstrated")
+    );
+}
+
+#[tokio::test]
+async fn abandoned_practice_is_reused_not_regenerated() {
+    // §S15 item 5 follow-up: a practice attempt the learner never answered
+    // (navigated away mid-round) must not be silently discarded and repaid
+    // for on the next "Practice again" click (§12.2 BYOK cost discipline) —
+    // the sidecar's `move_id` only gets a `MoveGraded` once it's actually
+    // answered, so `practice_node` reuses it instead of generating anew.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &doc_id, &node0).await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    // First "Practice again": the sidecar still holds the original PASSING
+    // move, so this generates a fresh `test` move.
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/practice"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Abandoned: click "Practice again" again WITHOUT answering the first
+    // practice round. This must reuse the still-ungraded sidecar rather than
+    // generating (and paying for) a second one.
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/practice"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let event_log = state.store.event_log(&doc_id).unwrap();
+    let test_moves_after_demonstration = event_log
+        .iter()
+        .unwrap()
+        .filter(|e| {
+            e.node_id.as_deref() == Some(node0.as_str())
+                && matches!(&e.kind, crate::events::EventKind::MoveGenerated { move_type, .. }
+                    if move_type == "test")
+        })
+        .count();
+    // One `test` move for the original gate (graded, passing) + exactly one
+    // more for the first practice click. The second click must NOT add a third.
+    assert_eq!(
+        test_moves_after_demonstration, 2,
+        "abandoned practice round was regenerated instead of reused"
+    );
+}
+
+#[tokio::test]
 async fn a_partial_node_from_an_interrupted_generation_may_be_retried() {
     // §S6 follow-up: content now persists progressively, one move at a
     // time, so a node file existing is no longer proof the node is done —

@@ -1,5 +1,8 @@
 use super::cold_start::suggested_revisit;
-use super::reading::{escape_html, grounding_for, spawn_profile_distillation, topic_and_title};
+use super::reading::{
+    escape_html, grounding_for, objective_for, profile_for, spawn_profile_distillation,
+    topic_and_title,
+};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -394,6 +397,114 @@ pub async fn answer(
         attempt_html,
         remediation_html: Some(explanation),
     }))
+}
+
+/// On-demand retrieval practice on an already-`Demonstrated` node (§S15 item
+/// 5, §2.1's testing-effect reframing — the `test` move is already the
+/// retrieval instrument, this just lets the learner fire it again
+/// deliberately once mastery is behind them, complementary to item 4's
+/// revisit hint and NOT a substitute for it: a learner may not know a
+/// specific child node is the real gap and just want more reps here).
+///
+/// `node_states`'s rank (`events::aggregate`) makes `Demonstrated` the
+/// highest state and a later `MoveGraded` here can never lower it back down
+/// — so this needs no isolation from the real gate: it reuses the exact
+/// mechanism remediation already uses to swap in a fresh check (§8.2,
+/// `answer` below), overwriting the same `{node_id}.rubric.json` sidecar in
+/// place. `exercise_frame` then serves it and `answer` grades it with zero
+/// changes to either. Guarded to `Demonstrated` nodes only: calling this on
+/// a live, ungated node would silently replace its real check.
+pub async fn practice_node(
+    State(state): State<AppState>,
+    Path((doc_id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let locale = crate::locale::Locale::from_header(&headers);
+    let event_log = state.store.event_log(&doc_id)?;
+    let states = node_states(
+        event_log
+            .iter()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    );
+    if !matches!(states.get(&node_id), Some(NodeState::Demonstrated)) {
+        return Err(ApiError::BadRequest(
+            "practice is only available on an already-demonstrated node".to_string(),
+        ));
+    }
+
+    // If the sidecar already holds a practice attempt nobody answered yet
+    // (the learner clicked "Practice again", generated a fresh problem, then
+    // navigated away before submitting), reuse it instead of paying for
+    // another `test` move (§12.2 BYOK cost discipline) — the sidecar's
+    // `move_id` only ever gets a `MoveGraded` once that specific move is
+    // actually answered, so "no matching `MoveGraded`" means it's still live.
+    // The very first practice call after demonstration doesn't hit this: the
+    // sidecar still holds the ORIGINAL passing move, which is graded by
+    // definition (that grade is what made the node `Demonstrated`).
+    if let Ok(existing_json) = state
+        .store
+        .read_doc_file(&doc_id, &format!("{node_id}.rubric.json"))
+        && let Ok(existing) = serde_json::from_str::<RubricSidecar>(&existing_json)
+    {
+        let graded = event_log
+            .iter()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .any(|e| matches!(e.kind, EventKind::MoveGraded { move_id, .. } if move_id == existing.move_id));
+        if !graded {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+    }
+
+    let node = state.store.read_node(&doc_id, &node_id)?;
+    let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
+    let ai = state.ai.load_full();
+    let policy = *state.policy.load_full();
+    let grounding = grounding_for(&state, &title).await;
+    let ctx = MoveContext {
+        topic: topic.clone(),
+        item_title: title.clone(),
+        node_tail: node.content.html.clone(),
+        objective: objective_for(&state, &doc_id),
+        profile: profile_for(&state, &doc_id),
+        grounding,
+        locale,
+        ..Default::default()
+    };
+    let new_move = movement::generate_move(&ai, policy, MoveType::Test, &ctx).await?;
+    let new_move_id = engine::new_id();
+    if let Err(e) = event_log.append(
+        Some(&node_id),
+        EventKind::MoveGenerated {
+            move_id: new_move_id.clone(),
+            move_type: MoveType::Test.to_string(),
+            tactics: new_move.tactics.clone(),
+            rung: format!("{policy:?}"),
+        },
+    ) {
+        eprintln!("event log append failed: {e}");
+    }
+
+    // Same overwrite-in-place remediation already does (§8.2): this is
+    // grading state, not user knowledge — the §5 non-destructive rule is
+    // upheld by the append-only interaction layer `answer` writes to below,
+    // which keeps every practice attempt on the record (§4.3).
+    let sidecar = RubricSidecar {
+        move_id: new_move_id,
+        rubric: new_move
+            .rubric
+            .expect("MoveType::Test always parses with graded=true and a rubric"),
+        exercise_html: new_move.html,
+        reference_solution: new_move.reference_solution,
+        title,
+        topic,
+    };
+    state.store.write_doc_file(
+        &doc_id,
+        &format!("{node_id}.rubric.json"),
+        &serde_json::to_string(&sidecar).unwrap_or_default(),
+    )?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Formats an SSE frame with JSON-encoded `data` (avoids newline problems).

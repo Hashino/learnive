@@ -173,6 +173,13 @@ pub fn build_router(state: AppState) -> Router {
             get(api::block_frame),
         )
         .route("/api/documents/{doc}/nodes/{id}/skip", post(api::skip_node))
+        // On-demand retrieval practice on an already-demonstrated node
+        // (§S15 item 5) — overwrites the same rubric sidecar remediation
+        // does, so `exercise-frame`/`answer` above serve/grade it unchanged.
+        .route(
+            "/api/documents/{doc}/nodes/{id}/practice",
+            post(api::practice_node),
+        )
         // Reading interactions (§S6, §9 "the document is the answer") — only
         // valid on an already-finalized node (see `api.rs`'s §S6 doc comment).
         .route(

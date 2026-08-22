@@ -52,6 +52,12 @@ function buildSection(nodeId) {
     // "continue") — `armReadToEndWatcher`'s trigger for whether crossing
     // the sentinel should reopen `/generate` for this node's next move.
     generationPaused: false,
+    // §S15 item 5: true while this section's live exercise is an on-demand
+    // practice attempt on an already-demonstrated node, not the real gate —
+    // `submitAnswer` reads this to skip `advanceAfterGrading` on success
+    // (the node is already past the gate; nothing to advance to) and offer
+    // another practice round instead.
+    practicing: false,
   };
   state.sections.set(nodeId, rec);
   return rec;
@@ -144,6 +150,7 @@ async function mountExistingSection(id, data) {
   } else {
     rec.exercise.innerHTML = "";
     rec.exerciseFrame = null;
+    rec.practicing = false;
     // Deliberately NOT auto-advancing here: this is the node a resumed
     // session lands on most of the time (§S12: resume opens the last node
     // that exists on disk, which is usually one just completed), and the
@@ -154,7 +161,10 @@ async function mountExistingSection(id, data) {
     // No "already demonstrated" label either: the frozen attempt record
     // (exercise + answer + grade, §4.3) is right there in the interaction
     // layer above — the document itself says so, nothing left to add.
-    rec.controls.innerHTML = "";
+    // A "Practice again" button IS offered (§S15 item 5) — unlike
+    // regenerating the node, firing it is an explicit click, so it never
+    // spends the learner's money on its own either.
+    renderPracticeControl(rec, id);
   }
   setReadingToolsEnabled(true);
   armReadToEndWatcher(rec);
@@ -387,6 +397,42 @@ function renderContinueControl(rec, id) {
   rec.controls.appendChild(btn);
 }
 
+// §S15 item 5: on-demand retrieval practice on an already-demonstrated node
+// (§2.1's testing-effect reframing — `test` is already the retrieval
+// instrument, this just lets the learner fire it again deliberately once
+// mastery is behind them). Complementary to item 4's revisit hint, not a
+// substitute: the learner may not know a specific child node is the real
+// gap and just wants more reps here. Never fires on its own (BYOK cost,
+// §12.2) — only on this explicit click.
+function renderPracticeControl(rec, id) {
+  rec.controls.innerHTML = "";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = t("practice.button");
+  btn.addEventListener("click", () => startPractice(rec, id, btn));
+  rec.controls.appendChild(btn);
+}
+
+async function startPractice(rec, id, btn) {
+  btn.disabled = true;
+  rec.result.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
+  try {
+    const resp = await postJson(
+      `/api/documents/${state.docId}/nodes/${id}/practice`,
+      {},
+    );
+    if (!resp.ok) throw new Error(await resp.text());
+    rec.result.innerHTML = "";
+    rec.practicing = true;
+    rec.controls.innerHTML = "";
+    renderExerciseInto(rec, id);
+  } catch (err) {
+    btn.disabled = false;
+    rec.result.innerHTML =
+      '<p class="error">' + t("practice.error") + escapeHtml(String(err)) + "</p>";
+  }
+}
+
 // --- Node generation with streaming (§6, §14, §S18) ---------------------
 // `instant` controls the initial scroll to the new section: instant for
 // the view "arriving" (an outline click on a never-generated node), smooth
@@ -409,6 +455,7 @@ async function generateNode(id, { instant = true } = {}) {
   rec.controls.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
   rec.liveEl = null;
   rec.generationPaused = false;
+  rec.practicing = false;
   // Deliberately NOT disabling reading tools here (§9 continuous document):
   // every OTHER mounted section is fully readable right now, and the very
   // first call ever made (cold start, nothing mounted yet) leaves
@@ -696,7 +743,8 @@ window.addEventListener("message", (e) => {
   const d = e.data;
   if (!d) return;
   if (d.type === "learnive-answer") {
-    submitAnswer(d.answer);
+    const rec = recByFrame(e.source);
+    if (rec) submitAnswer(rec, d.answer);
   } else if (d.type === "learnive-height" && typeof d.height === "number") {
     // Size whichever sandbox frame reported (node exercise or a remediation
     // practice problem) — match by its content window.
@@ -709,16 +757,27 @@ window.addEventListener("message", (e) => {
   }
 });
 
+// §S15 item 5: resolves a postMessage's source window back to the section
+// that owns it. `rec.exerciseFrame` is the only live sandbox a submission
+// can come from — but now more than one section can have one open at once
+// (on-demand practice on an already-demonstrated node, alongside the real
+// frontier node's own live check elsewhere in the document), so routing can
+// no longer assume a single global `state.nodeId` the way it used to.
+function recByFrame(win) {
+  for (const rec of state.sections.values()) {
+    if (rec.exerciseFrame && rec.exerciseFrame.contentWindow === win) return rec;
+  }
+  return null;
+}
+
 // --- Answer → grading → remediation/advance (§8, §8.2) ----------------
-async function submitAnswer(answer) {
-  if (!state.nodeId) return;
-  const rec = state.sections.get(state.nodeId);
-  if (!rec) return;
+async function submitAnswer(rec, answer) {
+  const nodeId = rec.nodeId;
   // Transient status only — never wipes the interaction log below.
   rec.result.innerHTML = '<p class="muted">' + t("status.evaluating") + "</p>";
   try {
     const resp = await postJson(
-      `/api/documents/${state.docId}/nodes/${state.nodeId}/answer`,
+      `/api/documents/${state.docId}/nodes/${nodeId}/answer`,
       { answer },
     );
     if (!resp.ok) throw new Error(await resp.text());
@@ -734,7 +793,14 @@ async function submitAnswer(answer) {
     appendAttempt(rec, data.attempt_html);
     if (data.advance) {
       rec.controls.innerHTML = "";
-      await advanceAfterGrading();
+      if (rec.practicing) {
+        // §S15 item 5: this node was already past the gate before practice
+        // started — nothing to advance to, offer another round instead.
+        rec.practicing = false;
+        renderPracticeControl(rec, nodeId);
+      } else {
+        await advanceAfterGrading();
+      }
     } else if (data.remediation_html) {
       appendRemediation(rec, data.remediation_html);
     }
@@ -1057,7 +1123,7 @@ function appendRemediation(rec, explanationHtml) {
   label.className = "muted";
   label.textContent = t("review.try");
   wrap.appendChild(label);
-  const iframe = buildExerciseIframe(state.nodeId);
+  const iframe = buildExerciseIframe(rec.nodeId);
   rec.exerciseFrame = iframe;
   wrap.appendChild(iframe);
   rec.interactions.appendChild(wrap);
