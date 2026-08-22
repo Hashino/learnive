@@ -36,6 +36,12 @@ const I18N = {
     "prereq.action.skip": "Skip",
     "prereq.knownIn": "known in {0}",
     "prereq.reviewBadge": "(review)",
+    // "What are we learning next?" (§S15c) — transient, appended-to-document
+    // continuation once the main line is fully demonstrated. Never persisted
+    // (TODO futuros, 2026-08-18 decision): discarded the moment generation
+    // of the new topic's first node begins.
+    "nexttopic.title": "What are we learning next?",
+    "nexttopic.button": "Continue",
     // §S15b step 4: provenance marker on an interaction item read through a
     // reference — only shown when it differs from the document being read.
     "interaction.askedIn": "asked while reading {0}",
@@ -143,6 +149,8 @@ const I18N = {
     "prereq.action.skip": "Pular",
     "prereq.knownIn": "já aprendido em {0}",
     "prereq.reviewBadge": "(revisão)",
+    "nexttopic.title": "O que vamos aprender agora?",
+    "nexttopic.button": "Continuar",
     "interaction.askedIn": "perguntado lendo {0}",
     "plan.title": "Mudança de estrutura proposta",
     "plan.approve": "Aprovar",

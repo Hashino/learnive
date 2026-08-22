@@ -773,6 +773,125 @@ pub async fn create_document(
 }
 
 #[derive(Deserialize)]
+pub struct NextTopicReq {
+    topic: String,
+    /// Same convention as `CreateReq::objective_text` — empty only for a
+    /// caller that skipped confirmation.
+    #[serde(default)]
+    objective_text: String,
+    /// Same convention as `CreateReq::nodes` — the confirmed prerequisite
+    /// tree from `propose_outline` (reused as-is: it's stateless and
+    /// already scans every document's `Demonstrated` items, this one
+    /// included, for cross-epoch matches). Empty falls back to proposing
+    /// fresh and auto-confirming just the topic's own root.
+    #[serde(default)]
+    nodes: Vec<ConfirmedNode>,
+}
+
+#[derive(Serialize)]
+pub struct NextTopicResp {
+    items: Vec<OutlineItemView>,
+}
+
+/// "What are we learning next?" (§S15c, decided in PLAN.md's `TODO
+/// futuros` — the UI screen itself is transitory, never persisted; this
+/// endpoint is the one *persisted* consequence of confirming it). Reuses
+/// `propose_objective`/`propose_outline` unchanged (both are already
+/// document-agnostic) and `create_document`'s own materialization
+/// (`materialize_outline_tree`) — the only real difference from cold start
+/// is that this APPENDS to an existing document's outline/objective chain
+/// instead of creating a new one, so no prior work is discarded or
+/// rewritten (§5).
+pub async fn next_topic(
+    State(state): State<AppState>,
+    Path(doc_id): Path<String>,
+    Json(body): Json<NextTopicReq>,
+) -> Result<Json<NextTopicResp>, ApiError> {
+    if body.topic.trim().is_empty() {
+        return Err(ApiError::BadRequest("empty topic".to_string()));
+    }
+    let objective_text = if body.objective_text.trim().is_empty() {
+        body.topic.clone()
+    } else {
+        body.objective_text.clone()
+    };
+
+    // Surfaces a 404 for an unknown document before anything else runs.
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
+    let existing: Outline =
+        serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let confirmed_nodes = if body.nodes.is_empty() {
+        let ai = state.ai.load_full();
+        let mut tree = engine::propose_outline(&ai, &body.topic, &objective_text).await?;
+        let objective_node = tree
+            .pop()
+            .ok_or_else(|| ApiError::Internal("outline proposal returned no nodes".to_string()))?;
+        auto_confirm_learn(std::slice::from_ref(&objective_node))
+    } else {
+        body.nodes
+    };
+
+    // Continues the main line's single sequential chain (materialize_
+    // outline_tree's own doc comment) rather than starting a second,
+    // ungated one: gate the new chunk's first node on the CURRENT last
+    // main-line item. Trivially satisfied — reaching this endpoint means
+    // every main-line item already is `Demonstrated` — but keeps the whole
+    // document reading as one continuous sequence.
+    let incoming_gate = existing
+        .items
+        .iter()
+        .rev()
+        .find(|i| i.parent_id.is_none())
+        .map(|i| i.id.clone());
+
+    let mut new_items = Vec::new();
+    let mut to_skip = Vec::new();
+    materialize_outline_tree(
+        &confirmed_nodes,
+        None,
+        incoming_gate,
+        &mut new_items,
+        &mut to_skip,
+    );
+
+    state.store.update_outline_file(&doc_id, |json| {
+        let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        outline.items.extend(new_items.clone());
+        serde_json::to_string(&outline).map_err(|e| e.to_string())
+    })?;
+
+    let log_json = state.store.read_doc_file(&doc_id, "objective.json")?;
+    let mut log: ObjectiveLog =
+        serde_json::from_str(&log_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    log.push(objective_text.clone(), ObjectiveSource::NextTopic);
+    state.store.write_doc_file(
+        &doc_id,
+        "objective.json",
+        &serde_json::to_string(&log).unwrap_or_default(),
+    )?;
+
+    if !to_skip.is_empty() {
+        let event_log = state.store.event_log(&doc_id)?;
+        for id in &to_skip {
+            if let Err(e) = event_log.append(Some(id), EventKind::NodeSkipped) {
+                eprintln!("event log append failed: {e}");
+            }
+        }
+    }
+
+    // Same background grounding as `create_document` — the new epoch's
+    // objective is the best available seed text.
+    spawn_acquisition(state.clone(), objective_text);
+
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
+    let outline: Outline =
+        serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let items = outline_view(&state, &doc_id, &outline)?;
+    Ok(Json(NextTopicResp { items }))
+}
+
+#[derive(Deserialize)]
 pub struct RenameReq {
     name: String,
 }

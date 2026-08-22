@@ -2998,3 +2998,112 @@ async fn a_question_spawned_from_a_reference_shows_up_in_the_visitors_sidebar_tr
         "opened sub-node must carry real content: {sub_view}"
     );
 }
+
+#[tokio::test]
+async fn next_topic_appends_a_new_epoch_without_touching_the_first() {
+    // §S15c ("what are we learning next?", PLAN.md's `TODO futuros`): once
+    // a document's main line is fully demonstrated, confirming a new topic
+    // must APPEND to the same document's outline/objective chain — nothing
+    // about the first epoch gets rewritten or discarded (§5).
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"fractions","objective_text":"Learn fractions","nodes":[{"id":"n0","title":"Fractions","action":"learn","children":[]}]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let first_node_id = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &doc_id, &first_node_id).await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{first_node_id}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    let (status, next_body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/next"),
+        r#"{"topic":"integration","objective_text":"Learn integration","nodes":[{"id":"n1","title":"Integration","action":"learn","children":[]}]}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{next_body}");
+    let next: serde_json::Value = serde_json::from_str(&next_body).unwrap();
+    let items = next["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        2,
+        "the new epoch's node must be APPENDED alongside the first, not replace it: {next_body}"
+    );
+    let first_item = items
+        .iter()
+        .find(|i| i["id"] == first_node_id)
+        .expect("the first epoch's item must still be present");
+    assert_eq!(
+        first_item["state"], "demonstrated",
+        "the first epoch's own state must be untouched by appending a second: {first_item}"
+    );
+    let second_item = items
+        .iter()
+        .find(|i| i["id"] != first_node_id)
+        .expect("a second item must have been appended");
+    assert_eq!(second_item["title"], "Integration");
+
+    // The new epoch's node must be reachable through the outline endpoint
+    // too, gated (trivially satisfied) on the first epoch's node — i.e. it
+    // continues the SAME linear chain rather than starting a second one.
+    let (status, outline_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let outline: serde_json::Value = serde_json::from_str(&outline_body).unwrap();
+    let second_in_outline = outline["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == second_item["id"])
+        .expect("second epoch's item must be listed in the outline");
+    assert_eq!(
+        second_in_outline["state"], "available",
+        "the new epoch's own node must be immediately available (its only \
+         gate, the first epoch's node, is already demonstrated): {second_in_outline}"
+    );
+
+    // The objective chain grew by one version, tagged `NextTopic`, with the
+    // first version left byte-for-byte alone (§5 non-destructive revision).
+    let obj_json = state
+        .store
+        .read_doc_file(&doc_id, "objective.json")
+        .unwrap();
+    let log: crate::objective::ObjectiveLog = serde_json::from_str(&obj_json).unwrap();
+    assert_eq!(log.versions.len(), 2);
+    assert_eq!(log.versions[0].text, "Learn fractions");
+    assert_eq!(
+        log.versions[0].source,
+        crate::objective::ObjectiveSource::ColdStart
+    );
+    assert_eq!(log.versions[1].text, "Learn integration");
+    assert_eq!(
+        log.versions[1].source,
+        crate::objective::ObjectiveSource::NextTopic
+    );
+}

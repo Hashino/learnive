@@ -843,11 +843,109 @@ async function advanceAfterGrading() {
     await openNode(next.id, { instant: false });
   } else {
     const rec = state.sections.get(state.currentId);
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = t("completed");
-    (rec ? rec.controls : el("nodeSections")).appendChild(p);
+    renderNextTopicPrompt(rec ? rec.controls : el("nodeSections"));
   }
+}
+
+// "What are we learning next?" (§S15c) — offered once the whole main line
+// is `demonstrated`. Reuses `propose_objective`/`propose_outline`/the
+// `renderPrereqTree` toggle screen (`documents.js`) exactly as cold start
+// does, then `POST .../next` to append the confirmed tree to THIS document
+// instead of creating a new one. Deliberately transient (2026-08-18 TODO
+// futuros decision, superseding an earlier "inline and persisted" design
+// that was built and reverted the same day, `677528c`/`cfdd8e8`): mounted
+// into `rec.controls`, which is rebuilt on every render and never part of
+// the persisted node content (§4.3) — the prompt/tree simply vanish the
+// moment `openNode` below starts streaming the new topic's first node, the
+// same way "Practice again" or a "generating…" status line already does.
+function renderNextTopicPrompt(container) {
+  container.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "next-topic";
+  wrap.innerHTML =
+    '<p class="muted">' +
+    t("completed") +
+    "</p>" +
+    "<h3>" +
+    t("nexttopic.title") +
+    "</h3>" +
+    '<form id="nextTopicForm">' +
+    '<textarea id="nextTopicInput" rows="2"></textarea>' +
+    "<p><button type=\"submit\">" +
+    t("nexttopic.button") +
+    "</button></p>" +
+    "</form>" +
+    '<div id="nextTopicStatus" class="muted"></div>' +
+    '<ul id="nextTopicTree" class="prereq-tree"></ul>';
+  container.appendChild(wrap);
+
+  const statusEl = wrap.querySelector("#nextTopicStatus");
+  const formEl = wrap.querySelector("#nextTopicForm");
+  const treeEl = wrap.querySelector("#nextTopicTree");
+
+  formEl.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const topic = wrap.querySelector("#nextTopicInput").value.trim();
+    if (!topic) return;
+    formEl.hidden = true;
+    statusEl.textContent = t("status.objective");
+    try {
+      const objResp = await postJson("/api/objective/propose", { topic });
+      if (!objResp.ok) throw new Error(await objResp.text());
+      const objData = await objResp.json();
+      const objectiveText = objData.text;
+
+      statusEl.textContent = t("status.curriculum");
+      const outlineResp = await postJson("/api/outline/propose", {
+        topic,
+        objective_text: objectiveText,
+      });
+      if (!outlineResp.ok) throw new Error(await outlineResp.text());
+      const outlineData = await outlineResp.json();
+      statusEl.textContent = "";
+      const tree = outlineData.nodes || [];
+      initPrereqActions(tree);
+      renderPrereqTree(treeEl, tree);
+
+      const confirmRow = document.createElement("p");
+      const confirmBtn = document.createElement("button");
+      confirmBtn.type = "button";
+      confirmBtn.textContent = t("prereq.confirm");
+      const backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.textContent = t("coldstart.back");
+      confirmRow.append(confirmBtn, backBtn);
+      wrap.appendChild(confirmRow);
+
+      backBtn.addEventListener("click", () => renderNextTopicPrompt(container));
+      confirmBtn.addEventListener("click", async () => {
+        confirmBtn.disabled = true;
+        backBtn.disabled = true;
+        statusEl.textContent = t("status.curriculum");
+        try {
+          const resp = await postJson(`/api/documents/${state.docId}/next`, {
+            topic,
+            objective_text: objectiveText,
+            nodes: tree,
+          });
+          if (!resp.ok) throw new Error(await resp.text());
+          await refreshOutline();
+          container.innerHTML = "";
+          const nextItem = state.allItems.find((it) => it.state === "available");
+          if (nextItem) await openNode(nextItem.id, { instant: false });
+        } catch (err) {
+          statusEl.innerHTML =
+            '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
+          confirmBtn.disabled = false;
+          backBtn.disabled = false;
+        }
+      });
+    } catch (err) {
+      formEl.hidden = false;
+      statusEl.innerHTML =
+        '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
+    }
+  });
 }
 
 // Remediation (§8.2): a worked EXPLANATION of the missed problem (sanitized

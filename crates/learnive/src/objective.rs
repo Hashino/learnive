@@ -25,6 +25,14 @@ pub enum ObjectiveSource {
     /// `outline.proposal.json`); a `plan` move that also revises the
     /// objective text itself is a later refinement, not S4's scope.
     Plan,
+    /// Confirmed from the "what are we learning next?" screen at the end of
+    /// a document (§S15c, `TODO futuros` — the 2026-08-18 decision that
+    /// superseded the earlier "inline and persisted" design): a new epoch's
+    /// objective, appended to the SAME document's version chain rather than
+    /// starting a new document. Distinguished from `ColdStart` only for
+    /// anyone reading the chain later — the confirmation flow that produces
+    /// it (`api::next_topic`) is otherwise identical to cold start's.
+    NextTopic,
 }
 
 /// One locked version of the objective.

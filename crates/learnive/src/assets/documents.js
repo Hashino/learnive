@@ -150,20 +150,26 @@ function renderOutlineNode(node, lockedAction) {
   );
 }
 
-function renderOutlineTree() {
-  el("outlineTree").innerHTML = pendingOutlineTree
-    .map((n, i) => renderOutlineNode(n, i === pendingOutlineTree.length - 1 ? "learn" : null))
+// Shared by cold start's own `#outlineTree` and the "what are we learning
+// next?" prompt (§S15c, `node.js`'s `renderNextTopicPrompt`) — same tree,
+// same toggle/cascade behavior, just a different container + backing array
+// so the two flows never share mutable state.
+function renderPrereqTree(containerEl, tree) {
+  containerEl.innerHTML = tree
+    .map((n, i) => renderOutlineNode(n, i === tree.length - 1 ? "learn" : null))
     .join("");
-  el("outlineTree")
-    .querySelectorAll(".prereq-toggle-seg")
-    .forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = btn.closest(".prereq-toggle").dataset.id;
-        const node = findPrereqNode(pendingOutlineTree, id);
-        if (node) cascadePrereqAction(node, btn.dataset.action);
-        renderOutlineTree();
-      });
+  containerEl.querySelectorAll(".prereq-toggle-seg").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".prereq-toggle").dataset.id;
+      const node = findPrereqNode(tree, id);
+      if (node) cascadePrereqAction(node, btn.dataset.action);
+      renderPrereqTree(containerEl, tree);
     });
+  });
+}
+
+function renderOutlineTree() {
+  renderPrereqTree(el("outlineTree"), pendingOutlineTree);
 }
 
 async function createLivingDocument(objective_text, nodes) {
@@ -336,6 +342,19 @@ async function openDocument(summary) {
     // Outline itself came back empty — genuinely nothing to show yet.
     el("nodeSections").innerHTML = "";
     parkAtDocumentTop();
+  }
+  // §S15c: a returning learner whose main line is already fully
+  // `demonstrated` gets the same "what are we learning next?" prompt a
+  // live grading would have shown (`advanceAfterGrading`, node.js) —
+  // otherwise it only ever appears once, right after the grading that
+  // produced it, and is gone for good on the next reload.
+  if (
+    state.allItems.length &&
+    state.currentId &&
+    !state.allItems.some((it) => it.state === "available")
+  ) {
+    const rec = state.sections.get(state.currentId);
+    if (rec) renderNextTopicPrompt(rec.controls);
   }
 }
 

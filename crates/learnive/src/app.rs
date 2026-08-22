@@ -206,6 +206,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/documents/{doc}/objective",
             post(api::revise_objective),
         )
+        // "What are we learning next?" (§S15c) — appends a new epoch to an
+        // already-completed document instead of starting a new one.
+        .route("/api/documents/{doc}/next", post(api::next_topic))
         // Document display name (§S12) — the sidebar's title, renameable.
         .route("/api/documents/{doc}/name", post(api::rename_document))
         // Deleting a whole living document (§S12) — DELETE, never GET (§3.1).
