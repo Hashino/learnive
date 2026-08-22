@@ -215,6 +215,12 @@ body.source-open .main-container {
 body.source-open #askBar {
   right: 50vw;
 }
+/* Same overflow `.main-container` already needed above: `#askBarInner`'s
+   760px doesn't fit inside a 50vw half once `#askBar`'s own 1rem
+   horizontal padding is subtracted. */
+body.source-open #askBarInner {
+  max-width: min(760px, calc(50vw - 2rem));
+}
 
 /* Typewriter room (§9). The reading line is the viewport centre, so a
    block can only become the reading line if it can *reach* the centre —

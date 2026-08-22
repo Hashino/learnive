@@ -254,22 +254,37 @@ fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
 pub(super) fn question_header(
     question: &str,
     anchor: &Anchor,
+    source: Option<&SourceSelection>,
     locale: crate::locale::Locale,
 ) -> String {
     let asked = crate::locale::pick(locale, "You asked:", "Você perguntou:");
     let about = crate::locale::pick(locale, "about", "sobre");
+    let in_source = crate::locale::pick(locale, "in the source", "na fonte");
     let mut out = format!(
         "<p class=\"question\"><strong>{asked}</strong> {}",
         escape_html(question)
     );
-    if let Some(quote) = &anchor.quote {
-        let exact = quote.exact.trim();
-        if !exact.is_empty() {
-            out.push_str(&format!(
-                " <span class=\"about\">{about} \u{201c}{}\u{201d}</span>",
-                escape_html(&head_chars(exact, QUOTE_HEADER_BUDGET))
-            ));
-        }
+    // A source-panel selection (§11.1 item 9) takes priority over the node's
+    // own anchor quote when both are present: the anchor quote is `None`
+    // here in that case anyway (the anchor points at the reading-line block,
+    // not a selection — see `ask_question`), but a future caller passing
+    // both should still show what the learner actually selected.
+    let quote = source
+        .map(|s| (s.quote.trim(), Some(in_source)))
+        .filter(|(q, _)| !q.is_empty())
+        .or_else(|| {
+            anchor
+                .quote
+                .as_ref()
+                .map(|q| (q.exact.trim(), None))
+                .filter(|(q, _)| !q.is_empty())
+        });
+    if let Some((exact, label)) = quote {
+        let label = label.unwrap_or(about);
+        out.push_str(&format!(
+            " <span class=\"about\">{label} \u{201c}{}\u{201d}</span>",
+            escape_html(&head_chars(exact, QUOTE_HEADER_BUDGET))
+        ));
     }
     out.push_str("</p>");
     out
@@ -309,10 +324,27 @@ pub(super) fn topic_and_title(
     Ok((outline.topic, title))
 }
 
+/// A question asked from a selection inside the read-only source panel
+/// (§11.1 item 9), rather than from the living document itself. The panel
+/// has no `data-block-id`s to anchor to (§4.3 anchoring is block-based, and
+/// source sections aren't node content), so `AskReq.anchor` still names a
+/// real block in *this* node — the reading line, same as an unselected
+/// "ask about where I am" — and this field carries the source excerpt as
+/// additional context, the same additive role `grounding_for`'s citations
+/// already play in the prompt.
+#[derive(Debug, Deserialize)]
+pub struct SourceSelection {
+    pub(crate) source_id: String,
+    pub(crate) locator: String,
+    pub(crate) quote: String,
+}
+
 #[derive(Deserialize)]
 pub struct AskReq {
     question: String,
     anchor: Anchor,
+    #[serde(default)]
+    source: Option<SourceSelection>,
 }
 
 /// Discriminated by `kind` (§S8). Both kinds land *in the document*, at
@@ -368,6 +400,29 @@ pub async fn ask_question(
     let node = state.store.read_node(&doc_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
     let context = reading_context(&node, &body.anchor);
+    // §11.1 item 9: a source-panel selection has no block in this node to
+    // resolve against, so it rides alongside the node anchor's own context
+    // instead of replacing it — the tutor sees both where the learner is
+    // reading and what they selected in the source. Best-effort: an
+    // unresolvable `source_id`/`locator` (source deleted from the corpus
+    // between the selection and the send) just drops the extra context,
+    // same graceful-degrade contract every other optional context here uses.
+    let source_context = body.source.as_ref().and_then(|s| {
+        let section = state.corpus.load_section(&s.source_id, &s.locator).ok()?;
+        let quote = s.quote.trim();
+        if quote.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Selected in the source \"{}\": \"{}\"\n",
+            section.title, quote
+        ))
+    });
+    let context = match (source_context, context) {
+        (Some(sc), Some(c)) => Some(format!("{sc}\n{c}")),
+        (Some(sc), None) => Some(sc),
+        (None, c) => c,
+    };
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let node_tail = tail_chars(&node.content.html, NODE_TAIL_BUDGET);
 
@@ -449,7 +504,7 @@ pub async fn ask_question(
                 ensure_block_ids(&render_math(&generated.html), &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
-                question_header(question, &body.anchor, locale)
+                question_header(question, &body.anchor, body.source.as_ref(), locale)
             );
             state.store.append_interaction(
                 &doc_id,
@@ -503,7 +558,7 @@ pub async fn ask_question(
             );
             let body_html = format!(
                 "{}\n<p>↳ spawned a new section: {}</p>",
-                question_header(question, &body.anchor, locale),
+                question_header(question, &body.anchor, body.source.as_ref(), locale),
                 escape_html(&sub_title)
             );
             state.store.append_interaction(

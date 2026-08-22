@@ -815,6 +815,9 @@ document.addEventListener("click", (e) => {
 
 async function openSourcePanel(sourceId, locator, quote = "") {
   el("sourcePanel").classList.add("open");
+  // Selection-in-source→document (§11.1 item 9, reading.js): the only way
+  // a selection handler outside this file learns which source is open.
+  el("sourcePanel").dataset.sourceId = sourceId;
   // Split-view (§11.1): re-centers `.main-container` in the half of the
   // screen the panel doesn't occupy (`app.css`'s `body.source-open` rule).
   document.body.classList.add("source-open");

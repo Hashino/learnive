@@ -864,6 +864,125 @@ async fn asking_works_against_a_node_still_mid_generation() {
     assert!(reloaded.content.html.contains("equal parts"));
 }
 
+/// §11.1 item 9 (S19): a selection inside the read-only source panel routes
+/// into this same `/ask` endpoint, carrying `source: {source_id, locator,
+/// quote}` alongside the usual node `anchor` — which still points at a real
+/// block in *this* node (the reading line, from the client's point of
+/// view), because a source section has no `data-block-id` of its own to
+/// anchor to. The excerpt must reach both the tutor's prompt context (it's
+/// what the question is actually about) and the stored "You asked" header
+/// (so a reload shows what was selected, not just the bare question text).
+#[tokio::test]
+async fn asking_about_a_source_selection_threads_it_into_context_and_header() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    // A source with one section — `/ask` looks it up by (source_id,
+    // locator) to name it in the context line the tutor sees.
+    let src = crate::source::FetchedSource {
+        meta: crate::source::SourceMeta {
+            id: "ask-source-test".into(),
+            title: "Ask Source Test".into(),
+            authors: vec![],
+            kind: crate::source::SourceKind::Book,
+            license: "CC BY 4.0".into(),
+            origin: crate::source::Origin::OpenStax,
+        },
+        sections: vec![crate::source::Section {
+            locator: "sec:1".into(),
+            title: "Fractions".into(),
+            text: "A fraction splits a whole into equal parts.".into(),
+            html: "<p>A fraction splits a whole into equal parts.</p>".into(),
+        }],
+    };
+    state.corpus.store(&src).unwrap();
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    let partial = crate::engine::assemble_content_node(
+        &doc_id,
+        &node0,
+        "<p>fractions split a whole into equal parts</p>",
+    )
+    .unwrap();
+    state.store.write_node(&partial).unwrap();
+    let block_id = partial.content.blocks[0].id.clone();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
+        &format!(
+            r#"{{"question":"why equal parts?","anchor":{{"block_id":"{block_id}"}},"source":{{"source_id":"ask-source-test","locator":"sec:1","quote":"equal parts"}}}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ask: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ask_html = ask["body_html"].as_str().unwrap();
+    assert!(
+        ask_html.contains("in the source") && ask_html.contains("equal parts"),
+        "expected the source quote in the stored header, got: {ask_html}"
+    );
+
+    // Stored, not just returned — a reload has to show the same header.
+    let reloaded = state.store.read_node(&doc_id, &node0).unwrap();
+    assert_eq!(reloaded.interaction.len(), 1);
+}
+
+/// A `source` naming a locator that doesn't exist (source deleted from the
+/// corpus between the selection and the send, or a client bug) must not
+/// fail the whole question — same graceful-degrade contract every other
+/// optional context in `/ask` already uses (`objective_for`/`grounding_for`/
+/// `profile_for` all fall back to empty rather than erroring).
+#[tokio::test]
+async fn asking_with_an_unresolvable_source_selection_degrades_instead_of_failing() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+
+    let partial = crate::engine::assemble_content_node(
+        &doc_id,
+        &node0,
+        "<p>fractions split a whole into equal parts</p>",
+    )
+    .unwrap();
+    state.store.write_node(&partial).unwrap();
+    let block_id = partial.content.blocks[0].id.clone();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
+        &format!(
+            r#"{{"question":"why equal parts?","anchor":{{"block_id":"{block_id}"}},"source":{{"source_id":"no-such-source","locator":"sec:1","quote":"equal parts"}}}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[tokio::test]
 async fn asking_mid_pause_does_not_desync_the_next_move_loop_request() {
     // §S18 regression, live-caught 2026-08-21: `ask_question` logs its own

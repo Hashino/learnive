@@ -18,6 +18,7 @@ function setReadingToolsEnabled(enabled) {
   askEligible = enabled;
   if (!enabled) {
     pendingSelection = null;
+    pendingSourceSelection = null;
     hideAskBar(true);
     cancelDraftAnnotation();
     updateAnnotationPlus();
@@ -117,7 +118,7 @@ function updateReadingLine() {
   }
   // The bar's "asking about" label follows the line whenever it isn't
   // pinned to an explicit selection.
-  if (!pendingSelection) renderAskContext();
+  if (!pendingSelection && !pendingSourceSelection) renderAskContext();
 }
 function scheduleReadingLine() {
   if (readingLineQueued) return;
@@ -158,12 +159,47 @@ function anchorFromSelection() {
   };
 }
 
+// A selection inside the read-only source panel (§11.1 item 9). It has no
+// `data-block-id` to anchor to — the panel isn't node content, and
+// `anchorFromSelection` above already returns null for it via the
+// `#nodeSections` guard — so this reads the panel's own structure instead:
+// which source is open (`#sourcePanel`'s dataset, set by `openSourcePanel`
+// in node.js) and which section the selection landed in (its nearest
+// `[data-locator]` ancestor). The question this becomes still has to anchor
+// to a real block in *this* node (§4.3) — that part is unchanged, resolved
+// from the reading line at submit time same as an unselected question; this
+// only supplies the extra "what was selected in the source" context.
+function sourceSelectionFromSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const node = sel.getRangeAt(0).commonAncestorContainer;
+  const el0 = node.nodeType === 1 ? node : node.parentElement;
+  const panel = el("sourcePanel");
+  if (!el0 || !panel.classList.contains("open") || !panel.contains(el0)) {
+    return null;
+  }
+  const section = el0.closest("section[data-locator]");
+  const sourceId = panel.dataset.sourceId;
+  if (!section || !sourceId) return null;
+  const quote = sel.toString().trim();
+  if (!quote) return null;
+  return { sourceId, locator: section.dataset.locator, quote };
+}
+
 // --- The ask bar ------------------------------------------------------
 // The selection is captured the moment it is made, not when Send is
 // clicked: focusing the textarea collapses the document selection, so
 // reading it at submit time would always find nothing. `pendingSelection`
 // holds `{anchor, nodeId, quote}` until the question is sent or dropped.
 let pendingSelection = null;
+// Same idea, for a selection made in the source panel instead of the
+// document (§11.1 item 9): `{sourceId, locator, quote}`. Mutually
+// exclusive with `pendingSelection` — a selection lands in one place or
+// the other, never both — but kept as a separate variable rather than a
+// tagged union of the same one, since the two carry different shapes
+// (this one has no node `anchor` of its own; the reading line supplies it
+// at submit time).
+let pendingSourceSelection = null;
 
 function showAskBar() {
   if (!askEligible) return;
@@ -192,7 +228,8 @@ function askBarSticky() {
   return (
     el("askBar").contains(document.activeElement) ||
     el("askInput").value.trim() !== "" ||
-    pendingSelection !== null
+    pendingSelection !== null ||
+    pendingSourceSelection !== null
   );
 }
 
@@ -200,6 +237,14 @@ function askBarSticky() {
 // anchor is never a guess: the selected quote, or the reading line.
 function renderAskContext() {
   const box = el("askContext");
+  if (pendingSourceSelection) {
+    box.innerHTML =
+      t("ask.aboutSourceSelected") +
+      ' <span class="ask-quote">“' +
+      escapeHtml(truncate(pendingSourceSelection.quote, 90)) +
+      '”</span>';
+    return;
+  }
   if (pendingSelection) {
     box.innerHTML =
       t("ask.aboutSelected") +
@@ -233,11 +278,26 @@ document.addEventListener("selectionchange", () => {
       nodeId: r.nodeId,
       quote: r.anchor.quote.exact,
     };
+    pendingSourceSelection = null;
     showAskBar();
-  } else if (pendingSelection && !el("askInput").value.trim()) {
+    return;
+  }
+  // Not a document selection — try the source panel (§11.1 item 9) before
+  // falling back to "nothing selected".
+  const s = sourceSelectionFromSelection();
+  if (s) {
+    pendingSourceSelection = s;
+    showAskBar();
+    return;
+  }
+  if (
+    (pendingSelection || pendingSourceSelection) &&
+    !el("askInput").value.trim()
+  ) {
     // Selection dropped and nothing typed yet: fall back to the reading
     // line rather than keeping a stale quote.
     pendingSelection = null;
+    pendingSourceSelection = null;
     renderAskContext();
   }
 });
@@ -261,6 +321,7 @@ el("askInput").addEventListener("keydown", (e) => {
   } else if (e.key === "Escape") {
     el("askInput").value = "";
     pendingSelection = null;
+    pendingSourceSelection = null;
     autoGrowAskInput();
     hideAskBar(true);
   }
@@ -285,12 +346,23 @@ el("askBar").addEventListener("submit", async (e) => {
     : line && line.nodeId;
   if (!anchor || !targetNodeId) return;
 
+  // §11.1 item 9: rides alongside `anchor` (which is still the reading-line
+  // block above — a source selection has no block of its own to anchor to)
+  // as additional context, not a replacement for it.
+  const source = pendingSourceSelection
+    ? {
+        source_id: pendingSourceSelection.sourceId,
+        locator: pendingSourceSelection.locator,
+        quote: pendingSourceSelection.quote,
+      }
+    : undefined;
+
   el("askSend").disabled = true;
   el("askStatus").textContent = t("ask.thinking");
   try {
     const resp = await postJson(
       `/api/documents/${state.docId}/nodes/${targetNodeId}/ask`,
-      { question: text, anchor },
+      { question: text, anchor, source },
     );
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
@@ -320,6 +392,15 @@ el("askBar").addEventListener("submit", async (e) => {
     }
     el("askInput").value = "";
     pendingSelection = null;
+    pendingSourceSelection = null;
+    // The browser's own text selection outlives the app's `pending*`
+    // state otherwise — nothing before this ever cleared it. Left alone,
+    // an already-answered quote stays visibly highlighted (confusing:
+    // looks like it's still pending) and, worse, a later `selectionchange`
+    // (the DOM mutation just above, a stray click, anything) finds the
+    // exact same unchanged selection and reopens the bar on a question
+    // that was already asked.
+    window.getSelection()?.removeAllRanges();
     autoGrowAskInput();
     hideAskBar(true);
   } catch (err) {
