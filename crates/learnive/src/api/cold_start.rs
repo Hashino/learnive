@@ -610,9 +610,17 @@ pub(super) fn outline_view(
     let states = super::reading::folded_node_states(state, doc_id, outline)?;
 
     let mut items: Vec<OutlineItem> = outline.items.clone();
+    let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
     for item in &outline.items {
         if let Some(owner) = &item.source_doc_id {
-            items.extend(owner_subtree_items(state, owner, &item.id));
+            // Two references into the same owner document, one an ancestor
+            // of the other, would otherwise emit the shared descendants
+            // twice — dedup by id, first occurrence wins.
+            for extra in owner_subtree_items(state, owner, &item.id) {
+                if seen.insert(extra.id.clone()) {
+                    items.push(extra);
+                }
+            }
         }
     }
 

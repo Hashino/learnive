@@ -751,7 +751,10 @@ pub async fn get_node(
 ) -> Result<Json<NodeView>, ApiError> {
     let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
     let node = state.store.read_node(&owner_id, &node_id)?;
-    let event_log = state.store.event_log(&doc_id)?;
+    // §S15b step 3: events always land in the owner's log, so `demonstrated`
+    // must read from there too — reading `doc_id`'s own log would find no
+    // `MoveGraded` for a reference and report a demonstrated node as live.
+    let event_log = state.store.event_log(&owner_id)?;
     let states = node_states(
         event_log
             .iter()

@@ -2751,6 +2751,17 @@ async fn a_referenced_node_converges_qa_and_annotations_across_documents() {
         "the reference's state in the VISITING outline must fold in the owner's \
          MoveGraded event, not just the visiting document's own (empty) log: {visit_item}"
     );
+
+    // Same fold, but on the single-node `GET .../nodes/{id}` endpoint's
+    // `demonstrated` flag (drives whether the client offers a live
+    // exercise) — a SEPARATE read from the outline's badge above, and it
+    // used to read `doc_id`'s own (empty) log instead of the owner's.
+    assert_eq!(
+        visit_after_json["demonstrated"], true,
+        "GET .../nodes/{{id}} must report `demonstrated` from the owner's log too, \
+         or the visiting document would offer a live re-answer of an already-passed \
+         exercise: {visit_after_json}"
+    );
 }
 
 #[tokio::test]
@@ -2965,4 +2976,25 @@ async fn a_question_spawned_from_a_reference_shows_up_in_the_visitors_sidebar_tr
         });
     assert_eq!(sub_item["parent_id"], shared_node_id);
     assert_eq!(sub_item["title"], "Fractions in depth");
+
+    // Showing up in the tree is not enough — the visitor must actually be
+    // able to open it. `owner_of_node`'s one-hop fallback (it isn't in the
+    // visiting document's own outline.json, only the owner's) is what makes
+    // this resolve instead of 404ing.
+    let (status, sub_view_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/nodes/{sub_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the visitor must be able to open the spawned sub-node, not just see it listed: {sub_view_body}"
+    );
+    let sub_view: serde_json::Value = serde_json::from_str(&sub_view_body).unwrap();
+    assert!(
+        !sub_view["content_html"].as_str().unwrap_or("").is_empty(),
+        "opened sub-node must carry real content: {sub_view}"
+    );
 }

@@ -445,7 +445,7 @@ pub(super) fn folded_node_states(
         if let Ok(owner_log) = state.store.event_log(owner)
             && let Ok(iter) = owner_log.iter()
         {
-            states.extend(node_states(iter));
+            crate::events::aggregate::merge_node_states(&mut states, node_states(iter));
         }
     }
     Ok(states)

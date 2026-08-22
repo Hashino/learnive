@@ -234,6 +234,21 @@ fn node_state_rank(s: NodeState) -> u8 {
     }
 }
 
+/// Folds `other` into `into`, keeping the higher-ranked state per node id
+/// (§S15b step 3: a visiting document's own log and a reference's owner log
+/// are folded together, and neither is allowed to downgrade the other — a
+/// plain `HashMap::extend` would let iteration order decide the winner).
+pub fn merge_node_states(into: &mut HashMap<String, NodeState>, other: HashMap<String, NodeState>) {
+    for (node_id, candidate) in other {
+        match into.get(&node_id) {
+            Some(existing) if node_state_rank(*existing) >= node_state_rank(candidate) => {}
+            _ => {
+                into.insert(node_id, candidate);
+            }
+        }
+    }
+}
+
 pub fn node_states(events: impl Iterator<Item = Event>) -> HashMap<String, NodeState> {
     let mut out: HashMap<String, NodeState> = HashMap::new();
     for event in events {
