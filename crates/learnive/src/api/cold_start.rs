@@ -567,16 +567,56 @@ pub(super) fn suggested_revisit(
 /// Resolves every item's gate state against the event log in one fold
 /// (§S5) — never a separate `progress.json`, so there is nothing to desync
 /// (see `events::aggregate::node_states`'s doc comment).
+/// §S15b step 5 (read side): a reference's question-spawned sub-nodes —
+/// and any FURTHER sub-nodes spawned under those, recursively — live only
+/// in the OWNER's `outline.json`, keyed by `parent_id` chains rooted at the
+/// referenced node (`ask_question`'s `Spawn` arm already writes them
+/// there). Without this, `outline_view` shows a reference as a childless
+/// leaf even though reading through it recursively splices spliced
+/// sub-nodes (`node.js`'s `hydrateInteractions`) — the sidebar tree and the
+/// document itself would disagree. Best-effort like `referencing_documents`:
+/// an unreadable owner outline just yields no children, not an error.
+fn owner_subtree_items(state: &AppState, owner_doc_id: &str, root_id: &str) -> Vec<OutlineItem> {
+    let Ok(owner_outline_json) = state.store.read_doc_file(owner_doc_id, "outline.json") else {
+        return Vec::new();
+    };
+    let Ok(owner_outline) = serde_json::from_str::<Outline>(&owner_outline_json) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    let mut frontier = vec![root_id.to_string()];
+    while let Some(parent) = frontier.pop() {
+        for item in owner_outline
+            .items
+            .iter()
+            .filter(|i| i.parent_id.as_deref() == Some(parent.as_str()))
+        {
+            frontier.push(item.id.clone());
+            result.push(item.clone());
+        }
+    }
+    result
+}
+
 pub(super) fn outline_view(
     state: &AppState,
     doc_id: &str,
     outline: &Outline,
 ) -> Result<Vec<OutlineItemView>, ApiError> {
     // §S15b step 3: folds this document's own log AND every referenced
-    // owner's log — see `folded_node_states`'s doc comment.
+    // owner's log — see `folded_node_states`'s doc comment. Covers states
+    // for the owner-subtree items merged in below too: it folds the
+    // OWNER'S WHOLE log, not just the referenced id's own events.
     let states = super::reading::folded_node_states(state, doc_id, outline)?;
-    Ok(outline
-        .items
+
+    let mut items: Vec<OutlineItem> = outline.items.clone();
+    for item in &outline.items {
+        if let Some(owner) = &item.source_doc_id {
+            items.extend(owner_subtree_items(state, owner, &item.id));
+        }
+    }
+
+    Ok(items
         .iter()
         // §S15: every item is shown now, tree-nested by `parent_id` client-
         // side — a sub-node (question-spawned §S8, or a decomposed

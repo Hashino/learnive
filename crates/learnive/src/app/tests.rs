@@ -2850,3 +2850,119 @@ async fn deleting_a_referenced_owner_is_refused_until_the_reference_is_gone() {
     .await;
     assert_eq!(status, StatusCode::OK, "{delete_body}");
 }
+
+#[tokio::test]
+async fn a_question_spawned_from_a_reference_shows_up_in_the_visitors_sidebar_tree() {
+    // §S15b step 5, read side (design decision 4): the write side already
+    // parents a reference's spawned sub-node under the OWNER's outline
+    // (verified by `asking_a_question_that_warrants_depth_spawns_a_real_
+    // subnode` and step 1-2's convergence test) — but `outline_view` only
+    // walked `outline.items` of the document being read, so the VISITING
+    // document's sidebar tree never showed it, even though reading the
+    // node itself already recursively splices it inline (`node.js`). This
+    // pulls the owner's subtree in too.
+    let state = test_state_with_ai(spawn_ai());
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"algebra basics"}"#,
+    ))
+    .await;
+    let owner_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let owner_doc_id = owner_doc["doc_id"].as_str().unwrap().to_string();
+    let shared_node_id = owner_doc["items"][0]["id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &owner_doc_id, &shared_node_id).await;
+
+    let visit_body = serde_json::json!({
+        "topic": "integration",
+        "nodes": [
+            {
+                "id": "prereq-slot",
+                "title": "Algebra basics",
+                "action": "skip",
+                "known": {
+                    "doc_id": owner_doc_id,
+                    "doc_name": "Algebra basics",
+                    "node_id": shared_node_id,
+                },
+                "children": [],
+            },
+            {
+                "id": "obj-slot",
+                "title": "Integration",
+                "action": "learn",
+                "children": [],
+            },
+        ],
+    });
+    let (status, body) = call(authed("POST", "/api/documents", &visit_body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "create_document failed: {body}");
+    let visit_doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let visit_doc_id = visit_doc["doc_id"].as_str().unwrap().to_string();
+
+    // A question asked from the VISITING document, against the reference,
+    // spawns a sub-node — parented (per the write side) to the shared node
+    // in the OWNER's outline.
+    let (status, view_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/nodes/{shared_node_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_str(&view_body).unwrap();
+    let block_id = view["content_html"]
+        .as_str()
+        .unwrap()
+        .split("data-block-id=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("at least one frozen block")
+        .to_string();
+
+    let (status, ask_body) = call(authed(
+        "POST",
+        &format!("/api/documents/{visit_doc_id}/nodes/{shared_node_id}/ask"),
+        &format!(
+            r#"{{"question":"how does this generalize to a harder case?","anchor":{{"block_id":"{block_id}"}}}}"#
+        ),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ask_body}");
+    let ask: serde_json::Value = serde_json::from_str(&ask_body).unwrap();
+    assert_eq!(ask["kind"], "spawn");
+    let sub_id = ask["node_id"].as_str().unwrap().to_string();
+
+    // The visiting document's OWN outline must show the sub-node, parented
+    // to the reference, even though the sub-node itself was never written
+    // to the visiting document's outline.json.
+    let (status, outline_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/outline"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let visit_outline: serde_json::Value = serde_json::from_str(&outline_body).unwrap();
+    let sub_item = visit_outline["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == sub_id)
+        .unwrap_or_else(|| {
+            panic!("spawned sub-node {sub_id} must appear in the visiting outline: {visit_outline}")
+        });
+    assert_eq!(sub_item["parent_id"], shared_node_id);
+    assert_eq!(sub_item["title"], "Fractions in depth");
+}
