@@ -305,6 +305,15 @@ blockquote {
   font-style: italic;
   opacity: 0.9;
 }
+/* §S15 item 4 (grading.rs): a remediation-thread hint pointing at the
+   document's existing revisit suggestion — same border-accent idiom as
+   blockquote, muted rather than italic (it's a pointer, not a quote). */
+.revisit-hint {
+  border-left: 4px solid var(--accent);
+  margin: 1rem 0;
+  padding-left: 1rem;
+  color: var(--muted);
+}
 /* §11.1 item 7 (S19): the sanitizer whitelist (item 2) has always allowed
    tables/lists/figures through, but nothing styled them until the reader
    actually rendered real source HTML instead of flattened text — an

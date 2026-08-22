@@ -1,4 +1,5 @@
-use super::reading::{escape_html, grounding_for, spawn_profile_distillation};
+use super::cold_start::suggested_revisit;
+use super::reading::{escape_html, grounding_for, spawn_profile_distillation, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -215,6 +216,46 @@ pub async fn answer(
     }
     spawn_profile_distillation(state.clone(), doc_id.clone(), false);
 
+    // §S15 item 4: a failed transfer/synthesis objective is a cheap signal
+    // that a PRIOR concept (a child node folded into this integration
+    // exercise) may be the real gap, not this node's own explanation —
+    // surface the document's existing revisit suggestion explicitly inside
+    // THIS remediation thread, instead of only in the sidebar. Deliberately
+    // does NOT try to identify which specific child implicated the failure
+    // (PLAN.md marks full cross-node diagnosis out of scope, unproven
+    // without live failure-rate data) — it only links two mechanisms that
+    // already exist (`suggested_revisit`, the remediation thread), no new
+    // grading, no new call.
+    let structural_failure = assessment.unmet().iter().any(|g| {
+        sidecar
+            .rubric
+            .objectives
+            .iter()
+            .find(|o| o.id == g.objective_id)
+            .is_some_and(|o| o.transfer || o.kind == ObjectiveType::Synthesis)
+    });
+    let revisit_hint = if structural_failure {
+        suggested_revisit(&state, &doc_id)
+            .ok()
+            .flatten()
+            .filter(|id| id != &node_id)
+            .and_then(|id| topic_and_title(&state, &doc_id, &id).ok())
+            .filter(|(_, title)| !title.is_empty())
+            .map(|(_, title)| {
+                format!(
+                    "<p class=\"revisit-hint\">{} <strong>{}</strong>.</p>",
+                    crate::locale::pick(
+                        locale,
+                        "↺ This might help: revisiting",
+                        "↺ Isto pode ajudar: revisitar"
+                    ),
+                    escape_html(&title)
+                )
+            })
+    } else {
+        None
+    };
+
     // Remediation (§8.2): similarity grows with the number of attempts.
     let attempt = node
         .interaction
@@ -290,7 +331,10 @@ pub async fn answer(
     // `assemble_node`, which is where every other path picks up math
     // rendering (same reasoning `tag_move_html` documents for the
     // content-layer per-move path).
-    let explanation = render_math(&explain_move.html);
+    let mut explanation = render_math(&explain_move.html);
+    if let Some(hint) = &revisit_hint {
+        explanation.push_str(hint);
+    }
 
     // (b) A NEW gradeable problem in the sandbox, similar to the failed one and
     // grounded in the same sources (§8/§8.2). Its rubric is freshly locked and the

@@ -661,6 +661,73 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     assert!(body.contains("already generated"));
 }
 
+/// §S15 item 4: a remediation failure on a `transfer`/synthesis objective
+/// should surface the document's existing revisit suggestion explicitly
+/// inside the remediation thread — the cheapest diagnostic that already
+/// exists (`suggested_revisit`), linked into a place that never referenced
+/// it before. Exercised through the real router + demo_responder: the
+/// demo `test`-move contract always sets `transfer: true` on its one
+/// objective and a blank answer always grades `not_demonstrated`
+/// (`api/provider.rs::demo_responder`), so this reaches the real
+/// structural-failure branch without any custom mock wiring.
+#[tokio::test]
+async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"calculus"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let intro = created["items"][0]["id"].as_str().unwrap().to_string();
+    let intro_title = created["items"][0]["title"].as_str().unwrap().to_string();
+    let core = created["items"][1]["id"].as_str().unwrap().to_string();
+
+    // Skip the prerequisite — it becomes the document's revisit
+    // suggestion (same mechanism `outline_gates_and_skip`-style tests
+    // already pin), and unlocks `core`.
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{intro}/skip"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Drive `core` to its graded exercise, then fail it with a blank
+    // answer — the demo `test`-move objective is `transfer: true`. `"{}"`
+    // (an empty structured-answer artifact, not an empty string) is what
+    // `demo_responder`'s blank check actually matches
+    // (`api/provider.rs`'s `"Student's answer: {}"` pattern).
+    generate_to_completion(&call, &doc_id, &core).await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{core}/answer"),
+        r#"{"answer":"{}"}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(false));
+
+    let remediation_html = ans["remediation_html"].as_str().unwrap();
+    assert!(
+        remediation_html.contains("revisit-hint"),
+        "expected a revisit hint in the remediation thread: {remediation_html}"
+    );
+    assert!(
+        remediation_html.contains(&intro_title),
+        "expected the skipped prerequisite's title ({intro_title}) in the hint: {remediation_html}"
+    );
+}
+
 #[tokio::test]
 async fn a_partial_node_from_an_interrupted_generation_may_be_retried() {
     // §S6 follow-up: content now persists progressively, one move at a

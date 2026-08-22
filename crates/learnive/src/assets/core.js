@@ -197,6 +197,9 @@ const ALLOWED_CLASSES = new Set([
   "demonstrated",
   "partial",
   "not_demonstrated",
+  // Server-side (grading.rs, §S15 item 4): a remediation-thread hint
+  // pointing at the document's existing revisit suggestion.
+  "revisit-hint",
 ]);
 
 function sanitizeHtml(html) {
