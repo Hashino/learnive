@@ -177,6 +177,10 @@ impl WikipediaSource {
                 kind: SourceKind::Article,
                 license: hit.license.clone(),
                 origin: Origin::Wikipedia,
+                handle: hit.handle.clone(),
+                // A Wikipedia fetch is one article, always whole — nothing
+                // for §11.1 item 6's completion pass to do here.
+                complete: true,
             },
             sections,
         })

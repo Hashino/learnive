@@ -33,8 +33,12 @@
 //! sitting in an "immutable" corpus dir with nothing in the TOC pointing at
 //! them.
 //!
-//! A source id is written **once**: `store` is a no-op if the id already exists,
+//! A source id is written **once** via `store`: a no-op if the id already exists,
 //! so re-acquiring the same source is free and never clobbers it (§5 non-destructive).
+//! `store_complete` (§11.1 item 6) is the one sanctioned exception — it overwrites
+//! an existing entry, but only to replace a *capped* first acquisition
+//! (`SourceMeta.complete == false`) with a fuller fetch of the same source,
+//! never an arbitrary edit.
 //!
 //! **Backward compatibility**: every source acquired before this split has a
 //! monolithic `source.json` (`{meta, sections: [full Section, ...]}`, no
@@ -109,16 +113,38 @@ impl Corpus {
     /// existence is the commit marker.
     pub fn store(&self, source: &FetchedSource) -> Result<bool> {
         let id = safe_id(&source.meta.id)?;
-        let dir = self.root.join(id);
-        let path = dir.join("source.json");
-        if path.is_file() {
+        if self.root.join(id).join("source.json").is_file() {
             return Ok(false);
         }
+        self.write_source(id, source)?;
+        self.append_manifest(&source.meta)?;
+        Ok(true)
+    }
+
+    /// Overwrites an already-acquired source with a fuller fetch (§11.1 item
+    /// 6's background completion pass) — the one sanctioned exception to
+    /// `store`'s no-op-if-exists guard, since this replaces a *capped* first
+    /// acquisition with the same source more complete, not an arbitrary edit.
+    /// Errors if the id isn't already in the corpus (use `store` for a first
+    /// acquisition); doesn't touch `SOURCES.md` — the source is already
+    /// listed there.
+    pub fn store_complete(&self, source: &FetchedSource) -> Result<()> {
+        let id = safe_id(&source.meta.id)?;
+        if !self.root.join(id).join("source.json").is_file() {
+            return Err(CorpusError::NotFound(id.to_string()));
+        }
+        self.write_source(id, source)
+    }
+
+    /// Shared by `store`/`store_complete`: writes every section body first,
+    /// `source.json` (meta+toc) last — see the module doc comment on why
+    /// `source.json`'s existence is the commit marker. Wipes `sections/`
+    /// first so a retry/completion that fetches a *different* section set
+    /// never leaves the previous attempt's files orphaned in the TOC.
+    fn write_source(&self, id: &str, source: &FetchedSource) -> Result<()> {
+        let dir = self.root.join(id);
+        let path = dir.join("source.json");
         let sections_dir = dir.join("sections");
-        // `source.json` doesn't exist (checked above), so any files already
-        // here are leftovers from an interrupted or superseded prior attempt
-        // — clear them so this attempt's TOC and this attempt's on-disk
-        // section files always agree on what exists.
         fs::remove_dir_all(&sections_dir).ok();
         fs::create_dir_all(&sections_dir)?;
 
@@ -149,8 +175,7 @@ impl Corpus {
         let tmp = dir.join("source.json.tmp");
         fs::write(&tmp, json.as_bytes())?;
         fs::rename(&tmp, &path)?;
-        self.append_manifest(&source.meta)?;
-        Ok(true)
+        Ok(())
     }
 
     /// Loads a normalized source **in full** — every section's body, assembled
@@ -400,6 +425,8 @@ mod tests {
                 kind: SourceKind::Book,
                 license: "CC BY 4.0".into(),
                 origin: Origin::OpenStax,
+                handle: String::new(),
+                complete: true,
             },
             sections: vec![Section {
                 locator: "chap:2;sec:1".into(),
@@ -516,6 +543,71 @@ mod tests {
         let index = corpus.load_index(&second.meta.id).unwrap();
         assert_eq!(index.toc.len(), 1);
         assert_eq!(index.toc[0].locator, "chap:2;sec:1");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §11.1 item 6: `store_complete` overwrites an existing entry (the one
+    /// sanctioned exception to `store`'s no-op guard) with a fuller fetch,
+    /// and flips `complete` to `true`.
+    #[test]
+    fn store_complete_overwrites_a_capped_entry() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-corpus-complete-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+
+        let mut capped = sample("calculus-v1-complete1234");
+        capped.meta.complete = false;
+        assert!(
+            corpus.store(&capped).unwrap(),
+            "first (capped) store writes"
+        );
+
+        let mut full = sample("calculus-v1-complete1234");
+        full.meta.complete = true;
+        full.sections.push(Section {
+            locator: "chap:2;sec:2".into(),
+            title: "Continuity".into(),
+            text: "A function is continuous where it has no breaks.".into(),
+            html: "<p>A function is continuous where it has no breaks.</p>".into(),
+        });
+        corpus
+            .store_complete(&full)
+            .expect("store_complete overwrites");
+
+        let index = corpus.load_index(&full.meta.id).unwrap();
+        assert!(index.meta.complete, "completion marks the source complete");
+        assert_eq!(
+            index.toc.len(),
+            2,
+            "the fuller fetch's sections replace the capped ones"
+        );
+
+        // `store` (not `store_complete`) is still a no-op against the now-complete entry.
+        assert!(
+            !corpus.store(&capped).unwrap(),
+            "store never overwrites an existing entry, even a capped one"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `store_complete` refuses to create a new entry — it exists only to
+    /// replace an already-acquired source, never as a `store` bypass.
+    #[test]
+    fn store_complete_errors_when_the_source_does_not_exist_yet() {
+        let dir = std::env::temp_dir().join(format!(
+            "learnive-corpus-complete-missing-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+
+        let src = sample("calculus-v1-nevercalled1234");
+        let err = corpus.store_complete(&src).unwrap_err();
+        assert!(matches!(err, CorpusError::NotFound(_)));
+        assert!(!corpus.has(&src.meta.id));
 
         fs::remove_dir_all(&dir).ok();
     }

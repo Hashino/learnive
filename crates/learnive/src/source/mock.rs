@@ -79,6 +79,8 @@ impl MockSource {
                 kind: hit.kind,
                 license: hit.license.clone(),
                 origin: hit.origin.clone(),
+                handle: hit.handle.clone(),
+                complete: true,
             },
             sections,
         })

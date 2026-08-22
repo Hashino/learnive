@@ -895,6 +895,8 @@ async fn asking_about_a_source_selection_threads_it_into_context_and_header() {
             kind: crate::source::SourceKind::Book,
             license: "CC BY 4.0".into(),
             origin: crate::source::Origin::OpenStax,
+            handle: String::new(),
+            complete: true,
         },
         sections: vec![crate::source::Section {
             locator: "sec:1".into(),
@@ -2154,6 +2156,8 @@ async fn source_section_resolves_quote_into_a_highlight_range() {
             kind: crate::source::SourceKind::Book,
             license: "CC BY 4.0".into(),
             origin: crate::source::Origin::OpenStax,
+            handle: String::new(),
+            complete: true,
         },
         sections: vec![crate::source::Section {
             locator: "chap:2;sec:1".into(),
@@ -2230,6 +2234,8 @@ async fn source_section_highlight_survives_multibyte_prefix() {
             kind: crate::source::SourceKind::Book,
             license: "CC BY 4.0".into(),
             origin: crate::source::Origin::OpenStax,
+            handle: String::new(),
+            complete: true,
         },
         sections: vec![crate::source::Section {
             locator: "sec:1".into(),

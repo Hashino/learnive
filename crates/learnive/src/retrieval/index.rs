@@ -282,6 +282,8 @@ mod tests {
                     kind: SourceKind::Book,
                     license: "CC BY 4.0".into(),
                     origin: Origin::OpenStax,
+                    handle: String::new(),
+                    complete: true,
                 },
                 sections: vec![
                     Section {

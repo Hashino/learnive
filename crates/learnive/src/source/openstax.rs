@@ -27,6 +27,11 @@ use super::{
 const BASE: &str = "https://openstax.org";
 /// Cap on pages fetched per acquisition (bounds first-fetch latency, §14).
 const DEFAULT_MAX_PAGES: usize = 24;
+/// Cap for [`OpenStaxSource::fetch_all`] (§11.1 item 6's background
+/// completion pass) — no longer bounded by first-token latency, but still
+/// bounded so a pathological book tree can't turn a background job into an
+/// unbounded fetch. Comfortably above any real OpenStax book's page count.
+const COMPLETION_MAX_PAGES: usize = 2_000;
 /// Concurrent page fetches — polite to the host, still fast.
 const FETCH_CONCURRENCY: usize = 6;
 /// Per-section text cap so the corpus stays lean (retrieval chunks it, §10).
@@ -158,7 +163,22 @@ impl OpenStaxSource {
         }
     }
 
+    /// First acquisition, bounded by `self.max_pages` (§14).
     pub async fn fetch(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
+        self.fetch_capped(hit, self.max_pages).await
+    }
+
+    /// §11.1 item 6's background completion pass: re-fetches ignoring
+    /// `self.max_pages`, bounded instead by `COMPLETION_MAX_PAGES`.
+    pub async fn fetch_all(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
+        self.fetch_capped(hit, COMPLETION_MAX_PAGES).await
+    }
+
+    async fn fetch_capped(
+        &self,
+        hit: &SearchHit,
+        max_pages: usize,
+    ) -> Result<FetchedSource, SourceError> {
         let book_uuid = hit.handle.clone();
 
         // 1. Resolve the pinned archive version for this book.
@@ -191,7 +211,9 @@ impl OpenStaxSource {
             let mut ordinal = 0usize;
             walk_tree(root, 0, &mut chapter, &mut ordinal, &mut pages);
         }
-        pages.truncate(self.max_pages);
+        let total_pages = pages.len();
+        let complete = total_pages <= max_pages;
+        pages.truncate(max_pages);
         if pages.is_empty() {
             return Err(SourceError::NoResult);
         }
@@ -240,6 +262,8 @@ impl OpenStaxSource {
                 kind: SourceKind::Book,
                 license: hit.license.clone(),
                 origin: Origin::OpenStax,
+                handle: book_uuid,
+                complete,
             },
             sections,
         })
@@ -355,6 +379,14 @@ mod tests {
         println!("id={} sections={}", doc.meta.id, doc.sections.len());
         assert!(!doc.sections.is_empty());
         assert!(doc.char_len() > 200, "expected real extracted prose");
+        // §11.1 item 6: a real book has way more than 3 pages, so a
+        // `with_max_pages(3)` fetch must come back marked incomplete, and
+        // must carry the handle a completion pass would re-fetch against.
+        assert!(
+            !doc.meta.complete,
+            "a 3-page cap against a real book must be partial"
+        );
+        assert_eq!(doc.meta.handle, hit.handle);
         let mut locs: Vec<&str> = doc.sections.iter().map(|s| s.locator.as_str()).collect();
         locs.sort();
         let before = locs.len();
@@ -368,5 +400,31 @@ mod tests {
                 &s.text[..s.text.len().min(80)]
             );
         }
+    }
+
+    /// §11.1 item 6: `fetch_all` ignores `max_pages` and comes back marked
+    /// complete. Live (network); run with
+    /// `cargo test -p learnive openstax_live -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn openstax_live_fetch_all_is_marked_complete() {
+        let src = OpenStaxSource::new().with_max_pages(3);
+        let hits = src.search("calculus").await.expect("search");
+        let hit = hits.iter().find(|h| h.title.contains("Calculus")).unwrap();
+
+        let capped = src.fetch(hit).await.expect("capped fetch");
+        assert!(!capped.meta.complete);
+
+        let full = src.fetch_all(hit).await.expect("fetch_all");
+        assert!(full.meta.complete, "fetch_all must not be capped");
+        assert!(
+            full.sections.len() > capped.sections.len(),
+            "fetch_all must fetch strictly more than the 3-page cap did"
+        );
+        println!(
+            "capped={} full={}",
+            capped.sections.len(),
+            full.sections.len()
+        );
     }
 }

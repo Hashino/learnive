@@ -365,6 +365,30 @@ pub struct SourceMeta {
     pub kind: SourceKind,
     pub license: String,
     pub origin: Origin,
+    /// The backend-specific handle ([`SearchHit::handle`]) this source was
+    /// fetched from — kept so §11.1 item 6's background completion pass can
+    /// rebuild a [`SearchHit`] and re-fetch without a fresh search.
+    /// `#[serde(default)]`: sources acquired before this field existed
+    /// deserialize with an empty string; [`complete_source`] treats an empty
+    /// handle as nothing-to-re-fetch-against, same non-destructive stance as
+    /// the `html` backfill (item 1) — they stay as-is until a fresh
+    /// acquisition replaces them.
+    #[serde(default)]
+    pub handle: String,
+    /// Whether this acquisition got the whole source or was capped by
+    /// first-fetch latency bounds (§14) — §11.1 item 6. `#[serde(default)]`
+    /// deliberately defaults to `true`: sources acquired before this field
+    /// existed have no recorded truncation, and there is no way to tell
+    /// after the fact whether they were capped, so treating them as
+    /// "nothing known to be pending" is honest — a background completion
+    /// job with no evidence of truncation would just be silent extra network
+    /// traffic against sources that may already be whole.
+    #[serde(default = "default_true")]
+    pub complete: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One addressable piece of a source — the unit a `data-locator` names (§4.3)
@@ -499,6 +523,19 @@ impl Source {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
             Source::OpenStax(o) => o.fetch(hit).await,
+            Source::Wikipedia(w) => w.fetch(hit).await,
+        }
+    }
+
+    /// Re-fetches ignoring whatever first-acquisition cap `fetch` applies
+    /// (§11.1 item 6's background completion pass). Backends that never cap
+    /// (`Mock`, `Wikipedia` — a whole article is already one fetch) just
+    /// delegate to `fetch`; `OpenStax` ignores its configured `max_pages` in
+    /// favor of a much larger, still-bounded ceiling.
+    pub async fn fetch_complete(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
+        match self {
+            Source::Mock(m) => m.fetch(hit).await,
+            Source::OpenStax(o) => o.fetch_all(hit).await,
             Source::Wikipedia(w) => w.fetch(hit).await,
         }
     }
