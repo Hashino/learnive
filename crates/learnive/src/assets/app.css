@@ -191,6 +191,22 @@ body {
   max-width: 760px;
   margin: 0 auto;
   padding: 3rem 2rem;
+  transition: transform 0.18s ease;
+}
+/* Split-view (§11.1): the source panel occupies the right half of the
+   screen (`#sourcePanel`'s `width: 50vw`), so re-centering the document in
+   the remaining left half means shifting its centre from 50vw to 25vw —
+   a plain -25vw translate, not a margin recompute, so it holds regardless
+   of the container's own (possibly narrower) rendered width. Toggled by a
+   body class (`node.js`'s `openSourcePanel`/`closeSourcePanel`) rather than
+   a CSS-only sibling selector, matching how the panel's own open state is
+   already JS-driven. */
+body.source-open .main-container {
+  transform: translateX(-25vw);
+  /* At viewport widths under ~1520px, 760px doesn't actually fit inside a
+     700px (50vw) half without spilling under the panel's edge — shrink to
+     fit instead. */
+  max-width: min(760px, calc(50vw - 4rem));
 }
 
 /* Typewriter room (§9). The reading line is the viewport centre, so a
@@ -379,8 +395,7 @@ button:disabled {
   right: 0;
   top: 0;
   z-index: 950;
-  width: 380px;
-  max-width: 90vw;
+  width: 50vw;
   height: 100vh;
   display: flex;
   flex-direction: column;

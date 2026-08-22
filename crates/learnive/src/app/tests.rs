@@ -2001,3 +2001,142 @@ async fn plan_approval_preserves_spawned_subnodes() {
         vec![node0_title.as_str(), "A new second concept"]
     );
 }
+
+/// §11.1 item 8 (S19): a citation click deep-links the exact passage, not
+/// just the section — `get_source_section`'s `?quote=` resolves the
+/// citation's own text against the section body (`resolve_quote`, reused
+/// from user-selection anchoring) and returns the matched span pre-split
+/// into `{before, matched, after}` (never a raw byte offset — a live check
+/// against `euclidean-geometry-3aa895e7`'s real Wikipedia-sourced prose
+/// found that shipping `resolve_quote`'s UTF-8 *byte* offset as-is and
+/// re-slicing with JS `.slice()` client-side, which indexes by UTF-16 code
+/// unit, silently highlighted the wrong span whenever non-ASCII text
+/// preceded the match). A quote that doesn't resolve (paraphrase too far
+/// from source, or no quote at all) must not turn into an error — the
+/// section still loads.
+#[tokio::test]
+async fn source_section_resolves_quote_into_a_highlight_range() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let src = crate::source::FetchedSource {
+        meta: crate::source::SourceMeta {
+            id: "calc-quote-test".into(),
+            title: "Calculus, Volume 1".into(),
+            authors: vec!["Gilbert Strang".into()],
+            kind: crate::source::SourceKind::Book,
+            license: "CC BY 4.0".into(),
+            origin: crate::source::Origin::OpenStax,
+        },
+        sections: vec![crate::source::Section {
+            locator: "chap:2;sec:1".into(),
+            title: "The Limit of a Function".into(),
+            text: "A limit describes the value a function approaches.".into(),
+            html: "<p>A limit describes the value a function approaches.</p>".into(),
+        }],
+    };
+    state.corpus.store(&src).unwrap();
+
+    // Resolves: the exact excerpt handed to the model is a substring of the
+    // section text.
+    let (status, body) = call(authed(
+        "GET",
+        "/api/sources/calc-quote-test/sections/chap%3A2%3Bsec%3A1?quote=the%20value%20a%20function%20approaches",
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let highlight = &json["highlight"];
+    assert_eq!(highlight["before"], "A limit describes ");
+    assert_eq!(highlight["matched"], "the value a function approaches");
+    assert_eq!(highlight["after"], ".");
+
+    // No quote at all: still loads, no highlight, no error.
+    let (status, body) = call(authed(
+        "GET",
+        "/api/sources/calc-quote-test/sections/chap%3A2%3Bsec%3A1",
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json["highlight"].is_null());
+
+    // A quote nowhere in the section: degrades to no highlight, not an error.
+    let (status, body) = call(authed(
+        "GET",
+        "/api/sources/calc-quote-test/sections/chap%3A2%3Bsec%3A1?quote=nothing%20like%20this%20text",
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(json["highlight"].is_null());
+}
+
+/// Regression for the byte-offset/JS-string-index bug caught in the live
+/// verification above: a multi-byte character (an em dash, 3 UTF-8 bytes)
+/// sitting before the match shifts the byte offset ahead of where a
+/// UTF-16-code-unit index (what JS `.slice()` uses) would expect it. If
+/// `get_source_section` ever regresses to shipping `resolve_quote`'s raw
+/// byte range instead of a pre-split `{before, matched, after}`, this is
+/// the smallest case that would silently highlight the wrong text.
+#[tokio::test]
+async fn source_section_highlight_survives_multibyte_prefix() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let src = crate::source::FetchedSource {
+        meta: crate::source::SourceMeta {
+            id: "unicode-quote-test".into(),
+            title: "Unicode Test".into(),
+            authors: vec![],
+            kind: crate::source::SourceKind::Book,
+            license: "CC BY 4.0".into(),
+            origin: crate::source::Origin::OpenStax,
+        },
+        sections: vec![crate::source::Section {
+            locator: "sec:1".into(),
+            title: "Section".into(),
+            text: "A note — the law of contradiction says that S and not-S cannot both hold."
+                .into(),
+            html:
+                "<p>A note — the law of contradiction says that S and not-S cannot both hold.</p>"
+                    .into(),
+        }],
+    };
+    state.corpus.store(&src).unwrap();
+
+    let (status, body) = call(authed(
+        "GET",
+        "/api/sources/unicode-quote-test/sections/sec%3A1?quote=the%20law%20of%20contradiction",
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let highlight = &json["highlight"];
+    assert_eq!(highlight["matched"], "the law of contradiction");
+    assert_eq!(highlight["before"], "A note — ");
+    assert_eq!(
+        highlight["after"], " says that S and not-S cannot both hold.",
+        "the em dash before the match must not shift the split"
+    );
+}

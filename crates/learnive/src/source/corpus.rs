@@ -24,8 +24,12 @@
 //! `source.json` is still the commit marker: `store` writes every section
 //! file first, `source.json` last, so `has`/the no-op-if-exists guard below
 //! only ever see a source as "acquired" once every section is actually on
-//! disk — an interruption mid-fetch leaves no `source.json` and a retry
-//! starts clean.
+//! disk — an interruption mid-fetch leaves no `source.json`. A retry then
+//! starts by wiping `sections/` (not just skipping ahead), so a retry that
+//! fetches a *different* section set (paginated further, or the two-phase
+//! fetch item 6 will add) never leaves the previous attempt's orphaned files
+//! sitting in an "immutable" corpus dir with nothing in the TOC pointing at
+//! them.
 //!
 //! A source id is written **once**: `store` is a no-op if the id already exists,
 //! so re-acquiring the same source is free and never clobbers it (§5 non-destructive).
@@ -109,6 +113,11 @@ impl Corpus {
             return Ok(false);
         }
         let sections_dir = dir.join("sections");
+        // `source.json` doesn't exist (checked above), so any files already
+        // here are leftovers from an interrupted or superseded prior attempt
+        // — clear them so this attempt's TOC and this attempt's on-disk
+        // section files always agree on what exists.
+        fs::remove_dir_all(&sections_dir).ok();
         fs::create_dir_all(&sections_dir)?;
 
         for section in &source.sections {
@@ -421,6 +430,55 @@ mod tests {
         assert_eq!(entries.len(), 1, "one file per section");
         let section_file = fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
         assert!(section_file.contains("A limit describes"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Advisor-flagged risk: `store` writes sections then `source.json` last so
+    /// an *interrupted* fetch leaves nothing recognized as acquired — but a
+    /// *retry* that fetches a different section set under the same id used to
+    /// leave the first attempt's section files sitting in `sections/`, orphaned
+    /// (nothing in the new TOC points at them) but never cleaned up. `store`
+    /// now wipes `sections/` before writing, so a retry's on-disk section files
+    /// always match its own TOC exactly.
+    #[test]
+    fn store_retry_does_not_orphan_stale_section_files() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-corpus-retry-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+
+        let mut first = sample("calculus-v1-retry1234");
+        first.sections.push(Section {
+            locator: "chap:2;sec:2".into(),
+            title: "Continuity".into(),
+            text: "A function is continuous where it has no breaks.".into(),
+            html: "<p>A function is continuous where it has no breaks.</p>".into(),
+        });
+        assert!(corpus.store(&first).unwrap(), "first attempt writes");
+
+        let source_json_path = dir.join("corpus/calculus-v1-retry1234/source.json");
+        fs::remove_file(&source_json_path).unwrap();
+
+        // Retry fetches only the first section — simulates a shorter second
+        // attempt (fewer pages, or a two-phase fetch's first phase).
+        let second = sample("calculus-v1-retry1234");
+        assert!(
+            corpus.store(&second).unwrap(),
+            "retry after interruption writes again"
+        );
+
+        let sections_dir = dir.join("corpus/calculus-v1-retry1234/sections");
+        let entries: Vec<_> = fs::read_dir(&sections_dir).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "retry's sections/ must contain only the retry's own sections, not the first attempt's leftovers"
+        );
+
+        let index = corpus.load_index(&second.meta.id).unwrap();
+        assert_eq!(index.toc.len(), 1);
+        assert_eq!(index.toc[0].locator, "chap:2;sec:1");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -807,11 +807,17 @@ const sourceSectionCache = new Map();
 document.addEventListener("click", (e) => {
   const cite = e.target.closest("cite[data-source-id]");
   if (!cite) return;
-  openSourcePanel(cite.dataset.sourceId, cite.dataset.locator || "");
+  // The citation's own text is the excerpt-derived claim the model wrote —
+  // sent along so the section load can deep-link the exact passage (§11.1
+  // item 8, S19) instead of just landing on the section as a whole.
+  openSourcePanel(cite.dataset.sourceId, cite.dataset.locator || "", cite.textContent || "");
 });
 
-async function openSourcePanel(sourceId, locator) {
+async function openSourcePanel(sourceId, locator, quote = "") {
   el("sourcePanel").classList.add("open");
+  // Split-view (§11.1): re-centers `.main-container` in the half of the
+  // screen the panel doesn't occupy (`app.css`'s `body.source-open` rule).
+  document.body.classList.add("source-open");
   el("sourceTitle").textContent = t("source.loading");
   el("sourceMeta").textContent = "";
   el("sourceBody").innerHTML = "";
@@ -825,8 +831,12 @@ async function openSourcePanel(sourceId, locator) {
       index = await resp.json();
       sourceIndexCache.set(sourceId, index);
     }
+    // No locator (opened from a citation that didn't carry one, or any other
+    // future caller) — default to the first TOC entry rather than leaving
+    // every section body empty with no indication anything is loadable.
+    if (!locator && index.toc && index.toc.length) locator = index.toc[0].locator;
     renderSourceIndex(sourceId, index, locator);
-    if (locator) await loadSourceSection(sourceId, locator);
+    if (locator) await loadSourceSection(sourceId, locator, quote);
   } catch (err) {
     el("sourceTitle").textContent = t("source.unavailable");
     el("sourceMeta").textContent = String(err);
@@ -867,34 +877,54 @@ function renderSourceIndex(sourceId, index, locator) {
 
 // Loads (and caches) one section's body on demand and fills it into the
 // already-rendered TOC entry — never the whole book, per §11.1 item 4.
-async function loadSourceSection(sourceId, locator) {
+async function loadSourceSection(sourceId, locator, quote = "") {
   const container = el("sourceBody").querySelector(
     `section[data-locator="${CSS.escape(locator)}"]`,
   );
   if (!container) return;
   const body = container.querySelector(".sourceSectionBody");
-  const key = `${sourceId} ${locator}`;
+  const key = `${sourceId} ${locator} ${quote}`;
   try {
     let section = sourceSectionCache.get(key);
     if (!section) {
       body.textContent = t("source.sectionLoading");
+      const qs = quote ? `?quote=${encodeURIComponent(quote)}` : "";
       const resp = await api(
-        `/api/sources/${encodeURIComponent(sourceId)}/sections/${encodeURIComponent(locator)}`,
+        `/api/sources/${encodeURIComponent(sourceId)}/sections/${encodeURIComponent(locator)}${qs}`,
       );
       if (!resp.ok) throw new Error(await resp.text());
       section = await resp.json();
       sourceSectionCache.set(key, section);
     }
-    body.textContent = section.text;
+    renderSectionBody(body, section);
     container.classList.add("current");
-    container.scrollIntoView({ block: "start" });
+    (body.querySelector("mark") || container).scrollIntoView({ block: "center" });
   } catch (err) {
     body.textContent = t("source.unavailable");
   }
 }
 
+// Renders the section body as pre/mark/post text nodes -- never innerHTML,
+// this is source text, not model-generated HTML (§11.1 item 8, S19). The
+// server pre-splits `highlight` (byte-offset math on the Rust side, not
+// re-sliced here) so this stays a plain three-way append with no index math.
+function renderSectionBody(body, section) {
+  body.innerHTML = "";
+  if (!section.highlight) {
+    body.appendChild(document.createTextNode(section.text));
+    return;
+  }
+  const { before, matched, after } = section.highlight;
+  body.appendChild(document.createTextNode(before));
+  const mark = document.createElement("mark");
+  mark.textContent = matched;
+  body.appendChild(mark);
+  body.appendChild(document.createTextNode(after));
+}
+
 function closeSourcePanel() {
   el("sourcePanel").classList.remove("open");
+  document.body.classList.remove("source-open");
 }
 el("sourceCloseBtn").addEventListener("click", closeSourcePanel);
 document.addEventListener("keydown", (e) => {

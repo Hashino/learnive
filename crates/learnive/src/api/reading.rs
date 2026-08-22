@@ -50,19 +50,87 @@ pub async fn get_source(
         .map_err(|e| ApiError::NotFound(e.to_string()))
 }
 
+/// Optional query on [`get_source_section`]: the citation's own text (§11.1
+/// item 8, S19) — resolved against the section to deep-link the exact passage.
+#[derive(Debug, Deserialize)]
+pub struct SectionQuery {
+    #[serde(default)]
+    quote: Option<String>,
+}
+
+/// The matched span, pre-split out of `section.text` (§11.1 item 8) so the
+/// client never has to interpret an offset itself: `resolve_quote` returns a
+/// **UTF-8 byte** range, valid only against the exact Rust `&str` it was
+/// computed from — reusable as-is client-side only by coincidence (ASCII-only
+/// text). JS string indices are UTF-16 code units, so shipping the raw
+/// `(usize, usize)` and re-slicing with `.slice(start, end)` in `node.js`
+/// silently lands on the wrong span the moment anything before the match is
+/// non-ASCII (real book/article text routinely is — verified live against
+/// `euclidean-geometry-3aa895e7`'s Wikipedia-sourced prose, which is full of
+/// multi-byte dashes and quotes: a byte offset sent as-is highlighted "ty
+/// follows, one conclude" for the query "the law of contradiction"). Slicing
+/// once, correctly, on the Rust side removes the ambiguity instead of
+/// asking the client to get UTF-8-vs-UTF-16 indexing right.
+#[derive(Debug, Serialize)]
+pub struct HighlightSpan {
+    before: String,
+    matched: String,
+    after: String,
+}
+
+/// A section plus, when a `quote` was asked for and resolved, the matched
+/// span (§11.1 item 8).
+#[derive(Debug, Serialize)]
+pub struct SectionWithHighlight {
+    #[serde(flatten)]
+    section: crate::source::Section,
+    highlight: Option<HighlightSpan>,
+}
+
 /// One section's full body (text + sanitized HTML), addressed by locator
 /// (§11.1 item 4, S19) — what a citation click loads once it knows which
 /// section it's pointing at, and what the reader loads as the learner
 /// navigates the table of contents. Read-only, same rationale as `get_source`.
+///
+/// §11.1 item 8: a citation's own text is the excerpt-derived claim the model
+/// wrote (`Citation.text`, `learnive_core::node`) — passed here as `?quote=`
+/// and resolved with `learnive_core::resolve_quote` (the same fuzzy
+/// exact/whitespace matcher already used for user text selections) against
+/// the section's plain text, which is what the client actually renders today
+/// (the real HTML reader, item 7, is not built yet — resolving against
+/// `section.html` instead is deferred until something renders it). No match
+/// (a paraphrase too far from the source, or a hallucinated locator) just
+/// means no highlight — never an error, the section still loads.
 pub async fn get_source_section(
     State(state): State<AppState>,
     Path((source_id, locator)): Path<(String, String)>,
-) -> Result<Json<crate::source::Section>, ApiError> {
-    state
+    Query(query): Query<SectionQuery>,
+) -> Result<Json<SectionWithHighlight>, ApiError> {
+    let section = state
         .corpus
         .load_section(&source_id, &locator)
-        .map(Json)
-        .map_err(|e| ApiError::NotFound(e.to_string()))
+        .map_err(|e| ApiError::NotFound(e.to_string()))?;
+    let highlight = query
+        .quote
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .and_then(|quote| {
+            let (start, end) = learnive_core::resolve_quote(
+                &section.text,
+                &learnive_core::QuoteSelector {
+                    exact: quote.to_string(),
+                    prefix: None,
+                    suffix: None,
+                },
+            )?;
+            Some(HighlightSpan {
+                before: section.text[..start].to_string(),
+                matched: section.text[start..end].to_string(),
+                after: section.text[end..].to_string(),
+            })
+        });
+    Ok(Json(SectionWithHighlight { section, highlight }))
 }
 
 /// Resolves a client-supplied anchor against the node (§4.3) — rejecting one
