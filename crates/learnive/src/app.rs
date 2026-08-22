@@ -216,6 +216,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sources/{id}/sections/{locator}",
             get(api::get_source_section),
         )
+        // Downloaded figures (§11.1 item 5, S19) — content-addressed, so the
+        // response is safe to cache forever.
+        .route(
+            "/api/sources/{id}/assets/{filename}",
+            get(api::get_source_asset),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security::guard,

@@ -30,6 +30,7 @@ async-stream = "0.3"
 futures-util = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
+lol_html = "3.0.1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

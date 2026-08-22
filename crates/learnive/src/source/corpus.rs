@@ -11,6 +11,8 @@
 //!     source.json         # meta + table of contents only (§11.1 item 4, S19)
 //!     sections/
 //!       <locator-hash>.json  # one Section (locator, title, text, html) per file
+//!     assets/
+//!       <content-hash>.<ext> # downloaded figures (§11.1 item 5), src-rewritten
 //! ```
 //!
 //! Split on purpose (§11.1 item 4): before this, `source.json` held every
@@ -221,6 +223,41 @@ impl Corpus {
             .into_iter()
             .find(|s| s.locator == locator)
             .ok_or_else(|| CorpusError::NotFound(format!("{id}#{locator}")))
+    }
+
+    /// Stores a downloaded figure's bytes (§11.1 item 5), addressed by a
+    /// content-derived filename (`<sha256-prefix>.<ext>`, mirrors
+    /// `locator_filename`'s hash idiom) rather than the original URL — so
+    /// there's no path-traversal surface and no leak of the source host's
+    /// URL structure into the corpus. Idempotent by construction: the same
+    /// bytes always hash to the same filename, so a re-download harmlessly
+    /// overwrites identical content instead of needing an existence check
+    /// like `store`'s `source.json` guard.
+    pub fn store_asset(&self, id: &str, filename: &str, bytes: &[u8]) -> Result<()> {
+        let id = safe_id(id)?;
+        let filename = safe_id(filename)?;
+        let dir = self.root.join(id).join("assets");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(filename);
+        let tmp = dir.join(format!("{filename}.tmp"));
+        fs::write(&tmp, bytes)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// Loads a previously downloaded figure's bytes (§11.1 item 5) — what
+    /// `GET /api/sources/{id}/assets/{filename}` serves.
+    pub fn load_asset(&self, id: &str, filename: &str) -> Result<Vec<u8>> {
+        let id = safe_id(id)?;
+        let filename = safe_id(filename)?;
+        let path = self.root.join(id).join("assets").join(filename);
+        fs::read(&path).map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                CorpusError::NotFound(format!("{id}/assets/{filename}"))
+            } else {
+                CorpusError::Io(e)
+            }
+        })
     }
 
     /// Lists metadata for every source in the corpus (for the §10 index rebuild
@@ -603,6 +640,44 @@ mod tests {
         assert!(matches!(
             corpus.load_section("old-source-5678", "sec:99"),
             Err(CorpusError::NotFound(_))
+        ));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §S19 item 5: an asset roundtrips through `store_asset`/`load_asset`,
+    /// and an id/filename outside the safe-id charset is rejected the same
+    /// way `load`/`store` already reject one (path-traversal defense).
+    #[test]
+    fn store_asset_then_load_asset_roundtrips() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-corpus-asset-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+
+        corpus
+            .store_asset(
+                "calculus-v1-abcd1234",
+                "deadbeef1234.png",
+                b"\x89PNG fake bytes",
+            )
+            .unwrap();
+        let loaded = corpus
+            .load_asset("calculus-v1-abcd1234", "deadbeef1234.png")
+            .unwrap();
+        assert_eq!(loaded, b"\x89PNG fake bytes");
+
+        assert!(matches!(
+            corpus.load_asset("calculus-v1-abcd1234", "no-such-file.png"),
+            Err(CorpusError::NotFound(_))
+        ));
+        assert!(matches!(
+            corpus.store_asset("../escape", "x.png", b"x"),
+            Err(CorpusError::InvalidId(_))
+        ));
+        assert!(matches!(
+            corpus.store_asset("calculus-v1-abcd1234", "../../escape.png", b"x"),
+            Err(CorpusError::InvalidId(_))
         ));
 
         fs::remove_dir_all(&dir).ok();

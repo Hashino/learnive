@@ -67,16 +67,221 @@ const MATHML_TAGS: &[&str] = &[
 /// `ammonia`'s default whitelist (already covers headings, lists, tables,
 /// `figure`/`figcaption`, `code`/`pre`, `sub`/`sup`, and `img[src]`) this adds
 /// the `<math>` subtree so OpenStax's MathML survives. `img[src]` is kept
-/// pointed at the remote host for now — downloading figures into the corpus
-/// is a separate follow-up (§11.1 item 5); dropping the attribute today would
-/// make any source where the figure IS the content (physics, geometry)
-/// useless in the reader before that lands.
+/// pointed at the remote host here — [`localize_images`] downloads figures
+/// into the corpus and rewrites `src` as a separate pass over the *already
+/// sanitized* HTML (§11.1 item 5), so a caller that skips it (tests, `mock.rs`)
+/// still gets a source where the figure IS the content usable in the reader.
 pub(crate) fn sanitize_html(html: &str) -> String {
     ammonia::Builder::default()
         .add_tags(MATHML_TAGS)
         .add_generic_attributes(["mathvariant", "display", "xmlns", "columnalign", "rowalign"])
         .clean(html)
         .to_string()
+}
+
+/// Concurrent image downloads per acquisition — polite to the image host,
+/// mirrors `openstax.rs`'s `FETCH_CONCURRENCY` for the same reason.
+const IMAGE_FETCH_CONCURRENCY: usize = 6;
+
+/// A `reqwest::Client` for [`localize_images`], identified the same way the
+/// backends identify themselves to OpenStax/Wikipedia — a courtesy to
+/// whatever host is actually serving the figure, which is almost never the
+/// backend's own host.
+pub(crate) fn image_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("learnive/0.1 (+https://github.com/; educational)")
+        .build()
+        .unwrap_or_default()
+}
+
+/// Raster image content-types this app will store and serve back (§11.1 item
+/// 5). Deliberately **excludes `image/svg+xml`**: unlike a raster format, an
+/// SVG can carry an embedded `<script>` that a browser executes if the asset
+/// URL is ever opened as a top-level navigation (not just `<img>`-embedded,
+/// where SVG script execution is already suppressed) — sanitizing untrusted
+/// SVG bytes is its own project, and every OER backend here already delivers
+/// figures as raster images, so the safer move is to just not serve SVG from
+/// this app's own origin.
+fn image_extension(content_type: &str) -> Option<&'static str> {
+    match content_type {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Rejects loopback/link-local/private-range hosts (§3.1's spirit extended to
+/// outbound fetches, cheap SSRF hardening): the `<img src>` values here come
+/// from third-party page content (an OpenStax page, a Wikipedia article) that
+/// this app doesn't otherwise vet host-by-host, so a malicious or compromised
+/// page embedding e.g. `http://169.254.169.254/...` shouldn't get an
+/// authenticated-context server to fetch it on its behalf. Prefix-based, not
+/// full CIDR parsing — proportionate to what a source backend's HTML can
+/// actually smuggle in an `<img src>`, not a general-purpose SSRF filter.
+fn is_safe_image_host(url: &reqwest::Url) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host == "localhost" || host == "::1" {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_loopback() || v4.is_link_local() || v4.is_private() {
+                    return false;
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Downloads every remotely-hosted `<img src>` across a source's sections
+/// into the corpus (§11.1 item 5) and rewrites `src` to the locally-served
+/// `/api/sources/{id}/assets/{hash}.{ext}` — otherwise the reader can't work
+/// offline, and every panel open would tell the source host what page the
+/// learner is on. Two passes over the HTML with `lol_html` (streaming
+/// attribute rewriting, not a hand-rolled parser): first collect every
+/// distinct URL, then download concurrently, then rewrite. Best-effort per
+/// image — a download/network failure just leaves that `<img>` pointed at
+/// the remote host, exactly like calling this was skipped, rather than
+/// failing the whole acquisition over one broken figure.
+pub(crate) async fn localize_images(
+    client: &reqwest::Client,
+    corpus: &Corpus,
+    source_id: &str,
+    sections: &mut [Section],
+) {
+    let mut urls = std::collections::HashSet::new();
+    for section in sections.iter() {
+        collect_image_urls(&section.html, &mut urls);
+    }
+    if urls.is_empty() {
+        return;
+    }
+
+    use futures_util::StreamExt;
+    let rewrites: std::collections::HashMap<String, String> = futures_util::stream::iter(urls)
+        .map(|url| {
+            let client = client.clone();
+            async move {
+                let local = download_and_store(&client, corpus, source_id, &url).await;
+                local.map(|path| (url, path))
+            }
+        })
+        .buffer_unordered(IMAGE_FETCH_CONCURRENCY)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await;
+    if rewrites.is_empty() {
+        return;
+    }
+
+    for section in sections.iter_mut() {
+        section.html = rewrite_image_srcs(&section.html, &rewrites);
+    }
+}
+
+/// Pass 1 of [`localize_images`]: every `http(s)://` `<img src>` in `html`,
+/// deduplicated. Ignores parse errors (malformed fragments just yield fewer
+/// URLs, never a hard failure — sanitized source HTML, not a security
+/// boundary at this point).
+fn collect_image_urls(html: &str, urls: &mut std::collections::HashSet<String>) {
+    let mut found = Vec::new();
+    let _ = lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings::new().append_element_content_handler(lol_html::element!(
+            "img[src]",
+            |el| {
+                if let Some(src) = el.get_attribute("src")
+                    && (src.starts_with("http://") || src.starts_with("https://"))
+                {
+                    found.push(src);
+                }
+                Ok(())
+            }
+        )),
+    );
+    urls.extend(found);
+}
+
+/// Pass 2 of [`localize_images`]: rewrites every `<img src>` present in
+/// `rewrites` to its local path; anything not in the map (a failed download)
+/// is left untouched, still pointing at the remote host.
+fn rewrite_image_srcs(html: &str, rewrites: &std::collections::HashMap<String, String>) -> String {
+    lol_html::rewrite_str(
+        html,
+        lol_html::RewriteStrSettings::new().append_element_content_handler(lol_html::element!(
+            "img[src]",
+            |el| {
+                if let Some(src) = el.get_attribute("src")
+                    && let Some(local) = rewrites.get(&src)
+                {
+                    el.set_attribute("src", local)?;
+                }
+                Ok(())
+            }
+        )),
+    )
+    .unwrap_or_else(|_| html.to_string())
+}
+
+/// Downloads one image and stores it in the corpus under a content hash
+/// (§11.1 item 5); `None` on any failure (network, non-2xx, non-raster
+/// content-type) or on an unsafe host ([`is_safe_image_host`]) — every
+/// failure here is recoverable by leaving that image at its remote `src`.
+async fn download_and_store(
+    client: &reqwest::Client,
+    corpus: &Corpus,
+    source_id: &str,
+    url: &str,
+) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !is_safe_image_host(&parsed) {
+        return None;
+    }
+    let resp = client.get(parsed).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let ext = image_extension(&content_type)?;
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(&bytes);
+    let filename = format!(
+        "{}.{ext}",
+        hash.iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    corpus.store_asset(source_id, &filename, &bytes).ok()?;
+    Some(format!("/api/sources/{source_id}/assets/{filename}"))
 }
 
 /// HTML → plain text via the `html2text` crate, whitespace collapsed to
@@ -329,6 +534,155 @@ pub(crate) fn corpus_id(title: &str, disambiguator: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_image_urls_finds_remote_srcs_and_ignores_data_uris() {
+        let html = r#"<figure><img src="https://openstax.org/fig1.png" alt="a"></figure>
+            <img src="http://example.org/fig2.jpg">
+            <img src="data:image/png;base64,AAAA">
+            <img src="/already/local.png">
+            <img src="https://openstax.org/fig1.png">"#;
+        let mut urls = std::collections::HashSet::new();
+        collect_image_urls(html, &mut urls);
+        assert_eq!(
+            urls,
+            std::collections::HashSet::from([
+                "https://openstax.org/fig1.png".to_string(),
+                "http://example.org/fig2.jpg".to_string(),
+            ]),
+            "dedupes, keeps only http(s), ignores data: and already-local src"
+        );
+    }
+
+    #[test]
+    fn rewrite_image_srcs_only_touches_mapped_urls() {
+        let html = r#"<figure><img src="https://openstax.org/fig1.png" alt="a"><figcaption>Fig 1</figcaption></figure>
+            <img src="https://openstax.org/fig2.png">"#;
+        let mut rewrites = std::collections::HashMap::new();
+        rewrites.insert(
+            "https://openstax.org/fig1.png".to_string(),
+            "/api/sources/s1/assets/deadbeef.png".to_string(),
+        );
+        let rewritten = rewrite_image_srcs(html, &rewrites);
+        assert!(rewritten.contains(r#"src="/api/sources/s1/assets/deadbeef.png""#));
+        assert!(
+            rewritten.contains(r#"src="https://openstax.org/fig2.png""#),
+            "an image with no successful download is left pointed at the remote host: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("<figcaption>Fig 1</figcaption>"),
+            "surrounding markup survives"
+        );
+    }
+
+    #[test]
+    fn image_extension_accepts_raster_rejects_svg_and_unknown() {
+        assert_eq!(image_extension("image/png"), Some("png"));
+        assert_eq!(image_extension("image/jpeg"), Some("jpg"));
+        assert_eq!(image_extension("image/gif"), Some("gif"));
+        assert_eq!(image_extension("image/webp"), Some("webp"));
+        assert_eq!(
+            image_extension("image/svg+xml"),
+            None,
+            "SVG must never be accepted — it can carry an executable <script>"
+        );
+        assert_eq!(image_extension("text/html"), None);
+        assert_eq!(image_extension(""), None);
+    }
+
+    #[test]
+    fn is_safe_image_host_rejects_loopback_link_local_and_private() {
+        let unsafe_urls = [
+            "http://localhost/x.png",
+            "http://127.0.0.1/x.png",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/x.png",
+            "http://192.168.1.1/x.png",
+            "http://172.16.0.1/x.png",
+            "http://[::1]/x.png",
+            "ftp://openstax.org/x.png",
+            "file:///etc/passwd",
+        ];
+        for u in unsafe_urls {
+            let parsed = reqwest::Url::parse(u).unwrap();
+            assert!(!is_safe_image_host(&parsed), "must reject {u}");
+        }
+        let safe = reqwest::Url::parse("https://openstax.org/fig.png").unwrap();
+        assert!(is_safe_image_host(&safe));
+    }
+
+    #[tokio::test]
+    async fn localize_images_rewrites_only_successfully_downloaded_images() {
+        let dir =
+            std::env::temp_dir().join(format!("learnive-localize-images-{}", engine_test_id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+        let mut sections = vec![Section {
+            locator: "sec:1".into(),
+            title: "Intro".into(),
+            text: "text".into(),
+            html: r#"<img src="http://127.0.0.1:1/unreachable.png">"#.into(),
+        }];
+        // A loopback URL is rejected by `is_safe_image_host` before any
+        // network attempt, so this exercises the "leave the remote src
+        // untouched" path end-to-end without needing a live image host.
+        localize_images(&image_client(), &corpus, "s1", &mut sections).await;
+        assert!(
+            sections[0]
+                .html
+                .contains("http://127.0.0.1:1/unreachable.png"),
+            "unsafe/unreachable image must be left at its original src: {}",
+            sections[0].html
+        );
+        assert!(
+            corpus.load_asset("s1", "anything.png").is_err(),
+            "nothing should have been stored"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn engine_test_id() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    /// Live end-to-end against a real, stable image host. Ignored by default
+    /// (network); run with `cargo test -p learnive image_localize_live --
+    /// --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn image_localize_live_downloads_and_rewrites() {
+        let dir = std::env::temp_dir().join(format!(
+            "learnive-localize-images-live-{}",
+            engine_test_id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let corpus = Corpus::open(&dir).unwrap();
+        // A small, stable Wikimedia Commons thumbnail — same host family the
+        // `wikipedia` backend already fetches article HTML from.
+        let mut sections = vec![Section {
+            locator: "sec:1".into(),
+            title: "Intro".into(),
+            text: "text".into(),
+            html: r#"<p>See <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png" alt="demo"></p>"#.into(),
+        }];
+        localize_images(&image_client(), &corpus, "live-s1", &mut sections).await;
+        println!("rewritten html: {}", sections[0].html);
+        assert!(
+            sections[0].html.contains("/api/sources/live-s1/assets/"),
+            "expected a local asset src: {}",
+            sections[0].html
+        );
+        assert!(!sections[0].html.contains("upload.wikimedia.org"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Advisor-flagged risk: `xmlns` was added as a *generic* attribute, so
     /// it's allowed on every whitelisted tag, not just `<math>`. A foreign

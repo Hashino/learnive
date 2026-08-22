@@ -1047,7 +1047,7 @@ async fn try_acquire_from(
             return None;
         }
     };
-    let doc = match source.fetch(&hit).await {
+    let mut doc = match source.fetch(&hit).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("acquisition fetch failed: {e}");
@@ -1055,6 +1055,17 @@ async fn try_acquire_from(
         }
     };
     let title = doc.meta.title.clone();
+    // §11.1 item 5: download figures into the corpus and rewrite `src` to
+    // point at them, before `store` ever writes a section to disk — a
+    // section written with a still-remote `src` would need its own
+    // migration pass later, same as the html-field backfill this mirrors.
+    crate::source::localize_images(
+        &crate::source::image_client(),
+        corpus,
+        &doc.meta.id,
+        &mut doc.sections,
+    )
+    .await;
     match corpus.store(&doc) {
         Ok(true) => {
             let mut r = retriever.write().await;

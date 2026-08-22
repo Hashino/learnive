@@ -133,6 +133,48 @@ pub async fn get_source_section(
     Ok(Json(SectionWithHighlight { section, highlight }))
 }
 
+/// Serves a figure downloaded into the corpus by `source::localize_images`
+/// (§11.1 item 5, S19) — what an `<img src>` rewritten in a section's HTML
+/// actually points at. Read-only, same rationale as the other source
+/// endpoints. The filename is `<content-hash>.<ext>`, so the response is
+/// content-addressed and safe to cache forever; `Content-Type` is derived
+/// from the filename's extension the server itself chose at download time
+/// (never sniffed from the bytes), and restricted to the same raster-only
+/// whitelist `source::image_extension` downloads — `image/svg+xml` is
+/// deliberately never in that set (see its doc comment), so this handler
+/// never serves anything a browser would treat as active content.
+pub async fn get_source_asset(
+    State(state): State<AppState>,
+    Path((source_id, filename)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let mime = match filename.rsplit('.').next() {
+        Some("png") => "image/png",
+        Some("jpg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => return Err(ApiError::BadRequest("unsupported asset type".to_string())),
+    };
+    let bytes = state
+        .corpus
+        .load_asset(&source_id, &filename)
+        .map_err(|e| ApiError::NotFound(e.to_string()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// Resolves a client-supplied anchor against the node (§4.3) — rejecting one
 /// that doesn't resolve keeps the interaction layer's "always references real
 /// IDs" invariant true by construction, rather than trusting whatever block id
