@@ -208,6 +208,93 @@ pub fn calibrate_rung(prior: AgentPolicy, signals: &LadderSignals) -> AgentPolic
     prior
 }
 
+/// §S23 scaffolding parameter (SPEC §6.2, §8) — a few-rung, zero-cost
+/// signal derived by folding over the same log `node_states`/
+/// `calibrate_rung` already read, no new event and no persisted state to
+/// desync. The measured signal is the **cost of reaching `demonstrated`**:
+/// how many `MoveGraded` a node took before its first `Demonstrated`
+/// grade, averaged over the most recently demonstrated nodes. Many
+/// attempts recently ⇒ more support (a worked example before the
+/// problem); first-try success ⇒ less (the problem direct). This
+/// calibrates SUPPORT, never difficulty — `movement/prompt.rs`'s fade
+/// addendum must never read a low level as license to make the exercise
+/// itself harder.
+///
+/// **Signal correction this slice carries (SPEC §6.2):** the original
+/// spec counted *questions* toward "material is too easy". That's
+/// inverted — asking is elaborative generation, associated with BETTER
+/// learning, and §7 already calls the question the single most valuable
+/// signal in the whole system, so counting it as a difficulty signal here
+/// would contradict that outright. Only grading attempts feed this fold;
+/// `QuestionAsked` is deliberately absent from the match below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScaffoldingLevel {
+    /// Several attempts needed on recently demonstrated nodes: more support.
+    High,
+    /// Not enough sample yet, or a mixed recent history — the neutral prior.
+    #[default]
+    Medium,
+    /// Recently demonstrating on (close to) the first attempt: less support.
+    Low,
+}
+
+/// Minimum demonstrated nodes before this fold says anything but the
+/// neutral `Medium` — same "don't snap-judge on noise" principle as
+/// [`MIN_MOVES_FOR_CALIBRATION`], applied to a much smaller, per-node
+/// sample here (one point per NODE, not per move).
+const MIN_NODES_FOR_SCAFFOLDING: usize = 3;
+
+/// How many of the most recently demonstrated nodes the average is taken
+/// over — deliberately small: SPEC §6.2 asks for calibration that's
+/// "contínua e local", and older nodes say less about the learner's
+/// CURRENT footing than what just happened.
+const RECENT_NODES_FOR_SCAFFOLDING: usize = 8;
+
+pub fn scaffolding_level(events: impl Iterator<Item = Event>) -> ScaffoldingLevel {
+    let mut attempts: HashMap<String, u32> = HashMap::new();
+    let mut done: HashSet<String> = HashSet::new();
+    // (ts of the demonstrating grade, attempts taken to reach it).
+    let mut demonstrated: Vec<(u64, u32)> = Vec::new();
+    for event in events {
+        let Some(node_id) = event.node_id else {
+            continue;
+        };
+        if done.contains(&node_id) {
+            continue;
+        }
+        if let EventKind::MoveGraded { grade, .. } = event.kind {
+            let count = attempts.entry(node_id.clone()).or_insert(0);
+            *count += 1;
+            if grade == Grade::Demonstrated {
+                demonstrated.push((event.ts, *count));
+                done.insert(node_id);
+            }
+        }
+    }
+    if demonstrated.len() < MIN_NODES_FOR_SCAFFOLDING {
+        return ScaffoldingLevel::Medium;
+    }
+    demonstrated.sort_by_key(|(ts, _)| *ts);
+    let recent: Vec<u32> = demonstrated
+        .into_iter()
+        .rev()
+        .take(RECENT_NODES_FOR_SCAFFOLDING)
+        .map(|(_, a)| a)
+        .collect();
+    let avg = f64::from(recent.iter().sum::<u32>()) / recent.len() as f64;
+    // Arbitrary, few-rung thresholds — noted honestly in PLAN.md S23 as
+    // having no basis in this application yet: this is a bias nudge on a
+    // prompt addendum, never the sole thing deciding a move's shape, so
+    // getting these exact cutoffs slightly wrong costs little.
+    if avg >= 2.0 {
+        ScaffoldingLevel::High
+    } else if avg <= 1.2 {
+        ScaffoldingLevel::Low
+    } else {
+        ScaffoldingLevel::Medium
+    }
+}
+
 /// A node's status derived from the log (§S5) — the availability gate's
 /// only input, folded in one pass rather than tracked in a second
 /// `progress.json` that could desync from it (the `AgentPolicy`/config
@@ -439,6 +526,101 @@ mod tests {
                 rung: "L2".to_string(),
             },
         }
+    }
+
+    fn graded(node_id: &str, ts: u64, grade: Grade) -> Event {
+        Event {
+            id: "e".to_string(),
+            ts,
+            node_id: Some(node_id.to_string()),
+            kind: EventKind::MoveGraded {
+                move_id: "m".to_string(),
+                grade,
+            },
+        }
+    }
+
+    /// A thin sample (fewer than [`MIN_NODES_FOR_SCAFFOLDING`] demonstrated
+    /// nodes) must not tip the level away from the neutral prior — same
+    /// "don't snap-judge on noise" guard `calibrate_rung` already applies.
+    #[test]
+    fn scaffolding_level_stays_medium_on_a_thin_sample() {
+        let events = vec![
+            graded("n1", 1, Grade::NotDemonstrated),
+            graded("n1", 2, Grade::Demonstrated),
+        ];
+        assert_eq!(
+            scaffolding_level(events.into_iter()),
+            ScaffoldingLevel::Medium
+        );
+    }
+
+    /// Several recent nodes each needing multiple attempts before
+    /// `demonstrated` ⇒ High (more support), not read as "make it harder".
+    #[test]
+    fn scaffolding_level_is_high_when_recent_nodes_took_several_attempts() {
+        let mut events = Vec::new();
+        for (i, node) in ["n1", "n2", "n3"].into_iter().enumerate() {
+            let base = (i as u64) * 10;
+            events.push(graded(node, base, Grade::NotDemonstrated));
+            events.push(graded(node, base + 1, Grade::Partial));
+            events.push(graded(node, base + 2, Grade::Demonstrated));
+        }
+        assert_eq!(
+            scaffolding_level(events.into_iter()),
+            ScaffoldingLevel::High
+        );
+    }
+
+    /// Several recent nodes each demonstrated on the first attempt ⇒ Low
+    /// (less support, the problem direct).
+    #[test]
+    fn scaffolding_level_is_low_when_recent_nodes_demonstrate_on_the_first_try() {
+        let events = ["n1", "n2", "n3"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, node)| graded(node, i as u64, Grade::Demonstrated))
+            .collect::<Vec<_>>();
+        assert_eq!(scaffolding_level(events.into_iter()), ScaffoldingLevel::Low);
+    }
+
+    /// A `MoveGraded` for a node that never reaches `Demonstrated` must
+    /// never contribute a data point — an abandoned or still-struggling
+    /// node shouldn't silently count toward "recently easy" or "recently
+    /// hard" until it actually closes.
+    #[test]
+    fn scaffolding_level_ignores_nodes_never_demonstrated() {
+        let events = vec![
+            graded("stuck", 1, Grade::NotDemonstrated),
+            graded("stuck", 2, Grade::Partial),
+            graded("n1", 3, Grade::Demonstrated),
+            graded("n2", 4, Grade::Demonstrated),
+            graded("n3", 5, Grade::Demonstrated),
+        ];
+        assert_eq!(scaffolding_level(events.into_iter()), ScaffoldingLevel::Low);
+    }
+
+    /// Asking a question must never itself count as a grading attempt — the
+    /// §6.2 signal correction this slice carries: elaboration is not
+    /// difficulty.
+    #[test]
+    fn scaffolding_level_does_not_count_questions_as_attempts() {
+        let events = vec![
+            Event {
+                id: "e".to_string(),
+                ts: 1,
+                node_id: Some("n1".to_string()),
+                kind: EventKind::QuestionAsked {
+                    move_id: "m".to_string(),
+                    anchor_block: "b1".to_string(),
+                    question: "why?".to_string(),
+                },
+            },
+            graded("n1", 2, Grade::Demonstrated),
+            graded("n2", 3, Grade::Demonstrated),
+            graded("n3", 4, Grade::Demonstrated),
+        ];
+        assert_eq!(scaffolding_level(events.into_iter()), ScaffoldingLevel::Low);
     }
 
     /// §S13: a `research` move must never count toward move-type diversity

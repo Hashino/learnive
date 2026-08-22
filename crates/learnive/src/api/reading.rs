@@ -921,6 +921,15 @@ pub(super) struct NodePrep {
     /// attempt-per-node cap (`MoveContext::research_attempted`'s doc
     /// comment) survives across per-move requests, not just within one.
     pub(super) research_attempted: bool,
+    /// §S23: the zero-cost scaffolding parameter, folded fresh from the
+    /// event log on every `/generate` call — fed to `MoveContext::scaffolding`.
+    pub(super) scaffolding: crate::events::aggregate::ScaffoldingLevel,
+    /// §S23: titles of already-demonstrated prerequisites or graph-close
+    /// siblings — fed to `MoveContext::interleave_titles` so a `test` move
+    /// can be told to mix one in and require distinguishing it, distinct
+    /// from `children_titles`' "combine what this node's own children
+    /// taught".
+    pub(super) interleave_titles: Vec<String>,
 }
 
 /// §14 resilience: reconstructs the ungraded moves a prior, interrupted
@@ -1167,6 +1176,22 @@ pub(super) async fn prepare(
         event_log.iter().map_err(|e| e.to_string())?,
         &item.id,
     );
+    let scaffolding =
+        crate::events::aggregate::scaffolding_level(event_log.iter().map_err(|e| e.to_string())?);
+    // §S23: nearby ⇒ an already-demonstrated prerequisite of this item, or
+    // a sibling sharing its parent — distinct from `children_titles`
+    // (this item's own decomposed children).
+    let interleave_titles: Vec<String> = outline
+        .items
+        .iter()
+        .filter(|i| i.id != item.id)
+        .filter(|i| {
+            let is_prereq = item.prerequisites.iter().any(|p| p == &i.id);
+            let is_sibling = item.parent_id.is_some() && i.parent_id == item.parent_id;
+            (is_prereq || is_sibling) && matches!(states.get(&i.id), Some(NodeState::Demonstrated))
+        })
+        .map(|i| i.title.clone())
+        .collect();
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -1185,6 +1210,8 @@ pub(super) async fn prepare(
         resumed_move_index,
         observation,
         research_attempted,
+        scaffolding,
+        interleave_titles,
     })
 }
 

@@ -142,6 +142,8 @@ pub async fn generate_node(
             locale,
             observation: prep.observation.clone(),
             research_attempted: prep.research_attempted,
+            scaffolding: prep.scaffolding,
+            interleave_titles: prep.interleave_titles.clone(),
             ..Default::default()
         };
         let mut graded: Option<(String, GeneratedMove)> = None;

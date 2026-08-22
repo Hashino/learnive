@@ -341,6 +341,19 @@ pub struct MoveContext {
     /// (`movement/prompt.rs::observation_line`): the log is now a
     /// perception channel, not just an audit trail (PLAN.md's S18).
     pub observation: crate::events::aggregate::ObservationFrame,
+    /// §S23: the zero-cost scaffolding parameter
+    /// (`events::aggregate::scaffolding_level`), reconstructed by `prepare`
+    /// on every `/generate` call the same way `research_attempted` is —
+    /// calibrates SUPPORT in the fade addendum (a worked example before
+    /// the problem, or the problem direct), never difficulty.
+    pub scaffolding: crate::events::aggregate::ScaffoldingLevel,
+    /// §S23: titles of already-demonstrated prerequisites or graph-close
+    /// siblings — fed to `Test`'s interleave addendum so the exercise can
+    /// be told to mix them in, distinct from `children_titles`
+    /// (integration: distant concepts COMBINE; interleaving: near
+    /// concepts must be told APART). Empty when there is nothing nearby
+    /// yet demonstrated to mix in.
+    pub interleave_titles: Vec<String>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

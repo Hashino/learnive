@@ -3,6 +3,7 @@ use crate::ai::ChatMessage;
 use crate::engine::prompt::{
     CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
 };
+use crate::events::aggregate::ScaffoldingLevel;
 use crate::locale::language_directive;
 
 /// [`CITE_CONTRACT`], appended only when there is grounding to cite —
@@ -392,6 +393,58 @@ fn scope_addendum(parent_title: Option<&str>, item_title: &str) -> String {
     }
 }
 
+/// §S23 fade addendum (SPEC §6.2, §8) — same mechanics as
+/// `integration_addendum`/`review_addendum`: a bias on a prompt that was
+/// already firing, not a new call. Calibrates SUPPORT (how much scaffolding
+/// precedes the task), never the task's own difficulty — `Medium` is the
+/// neutral prior and adds nothing, so a document with too little signal
+/// yet reads exactly as it would have before this slice existed.
+fn fade_addendum(scaffolding: ScaffoldingLevel) -> &'static str {
+    match scaffolding {
+        ScaffoldingLevel::Medium => "",
+        ScaffoldingLevel::High => {
+            " The learner has needed several attempts to reach \"demonstrated\" \
+             on recent nodes: lean toward MORE scaffolding here — a worked \
+             example or step-by-step walkthrough before the problem, not just \
+             the problem stated cold. This is about SUPPORT, not difficulty: \
+             do not make the underlying exercise itself easier or harder \
+             because of this."
+        }
+        ScaffoldingLevel::Low => {
+            " The learner has been reaching \"demonstrated\" on recent nodes \
+             quickly, on or near the first attempt: lean toward LESS \
+             scaffolding here — pose the problem directly rather than walking \
+             through a worked example first. This is about SUPPORT, not \
+             difficulty: do not make the underlying exercise itself easier or \
+             harder because of this."
+        }
+    }
+}
+
+/// §S23 interleaving addendum for `Test` — distinct in kind from
+/// `integration_addendum`, not a rename of it: integration asks whether
+/// DISTANT concepts (this node's own decomposed children) COMBINE;
+/// interleaving asks whether NEAR concepts (already-demonstrated
+/// prerequisites or graph-close siblings) can be TOLD APART. Using one in
+/// place of the other cancels the effect (PLAN.md S23's explicit warning)
+/// — the instruction below is deliberately built around
+/// distinguishing/choosing-which-applies, never "combine" or "together".
+fn interleave_addendum(interleave_titles: &[String]) -> String {
+    if interleave_titles.is_empty() {
+        return String::new();
+    }
+    format!(
+        " The learner has already demonstrated these nearby concepts: {}. \
+         Mix at least one item into this check that requires DISTINGUISHING \
+         this node's concept from one of them — the learner must first \
+         recognize WHICH concept applies to the scenario, not just apply the \
+         one they were just told about. Do not phrase this as one task that \
+         needs both concepts applied together — that is a different move; \
+         this is about telling them apart.",
+        interleave_titles.join(", ")
+    )
+}
+
 fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
     let base: String = match move_type {
         MoveType::Explain => "Write short, atomic explanatory prose for this concept. Do \
@@ -448,11 +501,17 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
     } else {
         String::new()
     };
+    let interleave = if move_type == MoveType::Test {
+        interleave_addendum(&ctx.interleave_titles)
+    } else {
+        String::new()
+    };
     format!(
-        "{base}{integration}{}{}{}",
+        "{base}{integration}{interleave}{}{}{}{}",
         review_addendum(ctx.review_mode, move_type),
         scope_addendum(ctx.parent_title.as_deref(), &ctx.item_title),
         remediation_addendum(ctx, move_type),
+        fade_addendum(ctx.scaffolding),
     )
 }
 
@@ -738,6 +797,70 @@ mod tests {
         let bare = MoveContext::default();
         let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &bare)[0].content;
         assert!(!sys.contains("MUST require combining"));
+    }
+
+    /// §S23: integration (distant concepts COMBINE) and interleaving (near
+    /// concepts told APART) must be two genuinely different instructions,
+    /// not one renamed as the other — PLAN.md's explicit warning that
+    /// using one in place of the other cancels the intended effect, and
+    /// that no unit test can catch a prompt that merely SAYS the right
+    /// thing without meaning it. What this test CAN catch: the two
+    /// addenda texts must not collapse into the same wording, and each
+    /// must use its own distinguishing verb, never the other's.
+    #[test]
+    fn integration_and_interleaving_are_different_instructions() {
+        let integration = integration_addendum(&["Product rule".to_string()]);
+        let interleave = interleave_addendum(&["Product rule".to_string()]);
+        assert_ne!(integration, interleave);
+        assert!(integration.to_lowercase().contains("combin"));
+        assert!(!integration.to_lowercase().contains("distinguish"));
+        assert!(interleave.to_lowercase().contains("disting"));
+        assert!(!interleave.to_lowercase().contains("combin"));
+    }
+
+    /// §S23: a `test` move with nearby demonstrated concepts is told to mix
+    /// one in and distinguish it — a node with none sees no such
+    /// instruction (nonsensical noise, same convention as
+    /// `integration_addendum`).
+    #[test]
+    fn test_move_asks_to_interleave_nearby_concepts_only_when_present() {
+        let with_nearby = MoveContext {
+            interleave_titles: vec!["Product rule".into()],
+            ..Default::default()
+        };
+        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &with_nearby)[0].content;
+        assert!(sys.contains("Product rule"));
+        assert!(sys.contains("DISTINGUISHING"));
+
+        let bare = MoveContext::default();
+        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &bare)[0].content;
+        assert!(!sys.contains("DISTINGUISHING"));
+    }
+
+    /// §S23: the fade addendum only speaks up away from the neutral
+    /// `Medium` prior, and always frames itself as support, never
+    /// difficulty — every move type sees it, not just `Test`.
+    #[test]
+    fn fade_addendum_is_silent_at_the_neutral_prior_and_frames_support_not_difficulty() {
+        let medium = MoveContext::default();
+        let sys = &generate_move_streamed(MoveType::Explain, &medium)[0].content;
+        assert!(!sys.contains("scaffolding"));
+
+        let high = MoveContext {
+            scaffolding: ScaffoldingLevel::High,
+            ..Default::default()
+        };
+        let sys = &generate_move_streamed(MoveType::Explain, &high)[0].content;
+        assert!(sys.contains("MORE scaffolding"));
+        assert!(sys.contains("not difficulty"));
+
+        let low = MoveContext {
+            scaffolding: ScaffoldingLevel::Low,
+            ..Default::default()
+        };
+        let sys = &generate_move_streamed(MoveType::Explain, &low)[0].content;
+        assert!(sys.contains("LESS scaffolding"));
+        assert!(sys.contains("not difficulty"));
     }
 
     /// §S15 learn/review/skip: a review-mode node's moves are told to stay
