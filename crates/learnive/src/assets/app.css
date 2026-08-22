@@ -208,6 +208,13 @@ body.source-open .main-container {
      fit instead. */
   max-width: min(760px, calc(50vw - 4rem));
 }
+/* `#askBar` normally spans the full viewport width, which was fine when
+   `#sourcePanel` was a narrow 380px overlay but now draws the ask bar
+   straight across the panel's bottom half at its real 50vw width —
+   pull its right edge back to match the panel instead. */
+body.source-open #askBar {
+  right: 50vw;
+}
 
 /* Typewriter room (§9). The reading line is the viewport centre, so a
    block can only become the reading line if it can *reach* the centre —
@@ -439,6 +446,14 @@ button:disabled {
 #sourceBody p {
   white-space: pre-wrap;
   line-height: 1.5;
+}
+/* Passage deep-link (§11.1 item 8, S19): the browser's UA `mark` style
+   resolves against `color-scheme` (set on `:root`), not against this app's
+   own tokens, so it was never actually verified against the dark theme —
+   pin it to the theme's own accent instead of trusting the default. */
+#sourceBody mark {
+  background: var(--accent);
+  color: var(--nord0);
 }
 
 .sidebar-head {
@@ -1205,6 +1220,14 @@ math[display="block"] {
   #annotationsLayer {
     display: none;
   }
+}
+/* Split-view (§11.1): same "no room in the margin" case as the viewport
+   fallback above, forced regardless of actual width — `.main-container`
+   shrinks to `min(760px, calc(50vw - 4rem))` and margin notes are
+   positioned at `left: 100%` of the (now narrower) card, which would land
+   them under or past the source panel's edge instead of beside the text. */
+body.source-open #annotationsLayer {
+  display: none;
 }
 
 /* Settings dialog (§12): a native <dialog>, which centers itself and paints
