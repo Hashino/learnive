@@ -176,7 +176,12 @@ pub async fn answer(
     )
     .await?;
 
-    let event_log = state.store.event_log(&doc_id)?;
+    // §S15b step 3: a reference's grading evidence belongs to the OWNER's
+    // log — this is the event that actually makes the node `Demonstrated`
+    // (`events::aggregate::node_states`), so routing it correctly is what
+    // makes `outline_view`'s owner-fold (below) show the right state
+    // regardless of which document the answer was submitted from.
+    let event_log = state.store.event_log(&owner_id)?;
     if let Err(e) = event_log.append(
         Some(&node_id),
         EventKind::MoveGraded {
@@ -425,7 +430,13 @@ pub async fn practice_node(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let locale = crate::locale::Locale::from_header(&headers);
-    let event_log = state.store.event_log(&doc_id)?;
+    // §S15b: a reference's whole history — including the `Demonstrated`
+    // grade this gate checks — lives in the OWNER's log (step 3: `answer`
+    // routes `MoveGraded` there), so the gate has to fold the OWNER's log
+    // too, same convergence `answer`/`ask_question`/`annotate` already
+    // apply on the read/write side.
+    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
+    let event_log = state.store.event_log(&owner_id)?;
     let states = node_states(
         event_log
             .iter()
@@ -446,9 +457,6 @@ pub async fn practice_node(
     // The very first practice call after demonstration doesn't hit this: the
     // sidecar still holds the ORIGINAL passing move, which is graded by
     // definition (that grade is what made the node `Demonstrated`).
-    // §S15b: sidecar/node state for a referenced item lives with the owner —
-    // same convergence `answer`/`ask_question`/`annotate` already apply.
-    let owner_id = super::reading::owner_of_node(&state, &doc_id, &node_id);
     if let Ok(existing_json) = state
         .store
         .read_doc_file(&owner_id, &format!("{node_id}.rubric.json"))

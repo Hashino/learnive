@@ -2678,4 +2678,30 @@ async fn a_referenced_node_converges_qa_and_annotations_across_documents() {
         visit_interaction.contains("note to self"),
         "annotation added on the OWNER must be visible reading through the VISITING reference: {visit_interaction}"
     );
+
+    // §S15b step 3: the reference's own gate STATE in the VISITING
+    // document's outline must fold in the owner's log too — this is the
+    // literal thing step 3 exists for (content/interactions already
+    // converge without it; the outline's "demonstrated" badge does not,
+    // since the visiting document has no local events for a node it never
+    // generated).
+    let (status, visit_outline_body) = call(authed(
+        "GET",
+        &format!("/api/documents/{visit_doc_id}/outline"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let visit_outline: serde_json::Value = serde_json::from_str(&visit_outline_body).unwrap();
+    let visit_item = visit_outline["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == shared_node_id)
+        .expect("the reference must still be listed in the visiting outline");
+    assert_eq!(
+        visit_item["state"], "demonstrated",
+        "the reference's state in the VISITING outline must fold in the owner's \
+         MoveGraded event, not just the visiting document's own (empty) log: {visit_item}"
+    );
 }

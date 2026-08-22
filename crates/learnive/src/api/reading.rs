@@ -412,6 +412,45 @@ pub(super) fn owner_of_node(state: &AppState, doc_id: &str, node_id: &str) -> St
     doc_id.to_string()
 }
 
+/// Folds `doc_id`'s own event log into `node_states`, then folds in every
+/// distinct owner referenced by `outline` too (§S15b step 3) — a
+/// referenced item's real state (in particular `Demonstrated`) lives in
+/// the OWNER's log, since `answer`/`ask_question`/`annotate`/
+/// `practice_node` all route their events there via `owner_of_node`. Used
+/// by both `outline_view` (the sidebar's own state per item) and
+/// `prepare`'s gate check (a chain item can be gated on a REFERENCE's real
+/// id — `materialize_outline_node`'s `Skip` arm returns `known.node_id` as
+/// the exit gate — so the same fold has to apply there too, or a document
+/// gated behind a reference would stay locked forever even after the
+/// owner demonstrates it). Ids are opaque random strings (`engine::new_id`),
+/// so merging owners' states into one flat map by id carries no realistic
+/// cross-document collision risk.
+pub(super) fn folded_node_states(
+    state: &AppState,
+    doc_id: &str,
+    outline: &Outline,
+) -> Result<std::collections::HashMap<String, NodeState>, ApiError> {
+    let event_log = state.store.event_log(doc_id)?;
+    let mut states = node_states(
+        event_log
+            .iter()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    );
+    let owners: std::collections::HashSet<&str> = outline
+        .items
+        .iter()
+        .filter_map(|i| i.source_doc_id.as_deref())
+        .collect();
+    for owner in owners {
+        if let Ok(owner_log) = state.store.event_log(owner)
+            && let Ok(iter) = owner_log.iter()
+        {
+            states.extend(node_states(iter));
+        }
+    }
+    Ok(states)
+}
+
 /// A question asked from a selection inside the read-only source panel
 /// (§11.1 item 9), rather than from the living document itself. The panel
 /// has no `data-block-id`s to anchor to (§4.3 anchoring is block-based, and
@@ -534,7 +573,12 @@ pub async fn ask_question(
     .unwrap_or(AskDecision::Inline);
 
     let move_id = engine::new_id();
-    let event_log = state.store.event_log(&doc_id)?;
+    // §S15b step 3: a reference's events belong to the OWNER's log — same
+    // convergence the node/interaction reads and writes above already
+    // apply, so the owner's own evidence table (§7) and `outline_view`'s
+    // fold (below) see every question asked from ANY document, not just
+    // this one.
+    let event_log = state.store.event_log(&owner_id)?;
     if let Err(e) = event_log.append(
         Some(&node_id),
         EventKind::QuestionAsked {
@@ -711,7 +755,7 @@ pub async fn annotate(
     let node = state.store.read_node(&owner_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
 
-    let event_log = state.store.event_log(&doc_id)?;
+    let event_log = state.store.event_log(&owner_id)?;
     if let Err(e) = event_log.append(
         Some(&node_id),
         EventKind::AnnotationAdded {
@@ -1021,9 +1065,33 @@ pub(super) async fn prepare(
         .position(|i| i.id == item_id)
         .ok_or_else(|| "unknown outline item".to_string())?;
     let item = outline.items[idx].clone();
+    // §S15b: a reference is by construction already generated (in the
+    // OWNER, which is the only place `Demonstrated` evidence for it can
+    // exist) — `prepare` is exclusively the pre-generation setup, so
+    // refusing here is both correct and cheaper than an owner-aware
+    // `node_generated` check: it also closes the accidental-duplicate-
+    // generation risk a reference reached here would otherwise create
+    // (a fresh LOCAL node file under this document's own id, orphaned
+    // dead weight the moment `owner_of` resolution — used everywhere
+    // else — keeps pointing at the owner's real file regardless).
+    if item.source_doc_id.is_some() {
+        return Err(
+            "this node is a reference to another document; read it, don't generate it".to_string(),
+        );
+    }
 
     let event_log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
-    let states = node_states(event_log.iter().map_err(|e| e.to_string())?);
+    // §S15b step 3: a prerequisite can itself be a REFERENCE's real id
+    // (`materialize_outline_node`'s `Skip` arm returns `known.node_id` as
+    // the chain's exit gate) — its `Demonstrated` state lives in the
+    // owner's log, not this document's own, so the gate check below needs
+    // the same owner-fold `outline_view` uses. Everything else in this
+    // function (`resumed_moves`, `observation`, `research_attempted`
+    // below) stays on the plain local `event_log`: it's this DOCUMENT's
+    // own generation history of THIS item, which is always local (a
+    // reference is refused above, before this point).
+    let states = folded_node_states(state, doc_id, &outline)
+        .map_err(|_| "failed to read the event log".to_string())?;
     // §S15: a `Skipped` prerequisite satisfies the gate exactly like
     // `Demonstrated` — a deliberate, permanent "I don't need this" is not
     // supposed to lock the rest of the document forever, and once real

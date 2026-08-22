@@ -572,12 +572,9 @@ pub(super) fn outline_view(
     doc_id: &str,
     outline: &Outline,
 ) -> Result<Vec<OutlineItemView>, ApiError> {
-    let event_log = state.store.event_log(doc_id)?;
-    let states = node_states(
-        event_log
-            .iter()
-            .map_err(|e| ApiError::Internal(e.to_string()))?,
-    );
+    // §S15b step 3: folds this document's own log AND every referenced
+    // owner's log — see `folded_node_states`'s doc comment.
+    let states = super::reading::folded_node_states(state, doc_id, outline)?;
     Ok(outline
         .items
         .iter()
