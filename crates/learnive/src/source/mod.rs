@@ -2,13 +2,27 @@
 //!
 //! Node content is grounded in real sources cited by book+chapter or article
 //! (§11). Acquisition is agent-driven and behind ONE swappable facade so the
-//! backend is an implementation detail (matters for the §15 hosting endgame):
-//! LibGen is deliberately **not** part of this — the default chain is Open
-//! Educational Resources (OpenStax, LibreTexts) + open-access books/papers +
-//! public domain. See the project memory `acquisition-oer-not-libgen`.
+//! backend is an implementation detail — origin is a deliberately open
+//! question (§11.1, 2026-08-23: reopened when the app moved to personal-use
+//! only and chapter-granularity nodes, still pending which backend covers the
+//! user's own book/paper library). LibGen/Sci-Hub are excluded regardless of
+//! that decision — copyright infringement and paywall circumvention are
+//! refused independent of use case. See the project memory
+//! `acquisition-oer-not-libgen`.
+//!
+//! **No backend is wired in right now (2026-08-23):** the earlier OpenStax
+//! and Wikipedia backends were deleted at the user's request once §11.1's
+//! origin reopened, rather than left running as a default nobody had chosen
+//! anymore — see git history around that date to restore either one if a
+//! future backend decision wants to reuse them. [`Source::Unconfigured`] is
+//! what `build_source`/`build_fallback_source` (`api/cold_start.rs`) return
+//! today; every call fails fast with [`SourceError::Unconfigured`] instead of
+//! silently acquiring nothing or panicking — same shape as `ai::Provider`'s
+//! `Unconfigured` variant (§22).
 //!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
-//! backend — including a hosted one — is a new variant, no call-site changes.
+//! backend is a new variant, no call-site changes — this is what keeps the
+//! open §11.1 question from blocking anything else.
 //! Everything a backend returns is **normalized** to one internal representation
 //! ([`FetchedSource`]: extracted text + the app HTML dialect), so source format
 //! (EPUB/PDF/HTML) is an acquisition detail invisible downstream (§11.1).
@@ -19,13 +33,9 @@
 
 pub mod corpus;
 pub mod mock;
-pub mod openstax;
-pub mod wikipedia;
 
 pub use corpus::{Corpus, CorpusError};
 pub use mock::MockSource;
-pub use openstax::OpenStaxSource;
-pub use wikipedia::WikipediaSource;
 
 /// MathML tags a source may deliver (OpenStax; LibreTexts's LaTeX is
 /// converted to MathML separately by `learnive_core::math` at freeze time) —
@@ -80,11 +90,11 @@ pub(crate) fn sanitize_html(html: &str) -> String {
 }
 
 /// Concurrent image downloads per acquisition — polite to the image host,
-/// mirrors `openstax.rs`'s `FETCH_CONCURRENCY` for the same reason.
+/// same reasoning any backend's own fetch concurrency would use.
 const IMAGE_FETCH_CONCURRENCY: usize = 6;
 
-/// A `reqwest::Client` for [`localize_images`], identified the same way the
-/// backends identify themselves to OpenStax/Wikipedia — a courtesy to
+/// A `reqwest::Client` for [`localize_images`], identified the same way a
+/// backend would identify itself to the site it fetches from — a courtesy to
 /// whatever host is actually serving the figure, which is almost never the
 /// backend's own host.
 pub(crate) fn image_client() -> reqwest::Client {
@@ -99,9 +109,9 @@ pub(crate) fn image_client() -> reqwest::Client {
 /// SVG can carry an embedded `<script>` that a browser executes if the asset
 /// URL is ever opened as a top-level navigation (not just `<img>`-embedded,
 /// where SVG script execution is already suppressed) — sanitizing untrusted
-/// SVG bytes is its own project, and every OER backend here already delivers
-/// figures as raster images, so the safer move is to just not serve SVG from
-/// this app's own origin.
+/// SVG bytes is its own project, and every backend seen live so far has
+/// delivered figures as raster images, so the safer move is to just not
+/// serve SVG from this app's own origin.
 fn image_extension(content_type: &str) -> Option<&'static str> {
     match content_type {
         "image/png" => Some("png"),
@@ -358,8 +368,8 @@ async fn download_and_store(
 /// HTML → plain text via the `html2text` crate, whitespace collapsed to
 /// single spaces (rendered line-wrapping is irrelevant for retrieval) and
 /// truncated to `cap` chars so the corpus stays lean (retrieval chunks it
-/// further, §10) — shared by every backend that normalizes HTML sections
-/// (`openstax`, `wikipedia`).
+/// further, §10) — for any future HTML-normalizing backend to share; unused
+/// while `Source::Unconfigured` is the only real variant (2026-08-23).
 pub(crate) fn normalize_html(html: &str, cap: usize) -> String {
     let rendered = html2text::config::plain()
         .string_from_read(html.as_bytes(), 100)
@@ -392,10 +402,13 @@ pub enum SourceKind {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "backend")]
 pub enum Origin {
+    /// Kept for existing corpus entries acquired while this backend was
+    /// wired in; the backend itself was deleted 2026-08-23 (see the module
+    /// doc comment) — no code constructs this variant anymore.
     OpenStax,
-    /// Wikipedia (§11.1's "internet search" fallback tier) — free, keyless,
-    /// CC BY-SA. See `wikipedia` module docs for why this backend and not a
-    /// general search API.
+    /// Free, keyless, CC BY-SA — was §11.1's "internet search" fallback
+    /// tier. Kept for existing corpus entries; the backend itself was
+    /// deleted 2026-08-23 (see the module doc comment).
     Wikipedia,
     LibreTexts,
     /// Open-access book registries (DOAB/OAPEN) — future backend.
@@ -531,6 +544,11 @@ pub enum SourceError {
     Normalize(String),
     /// Persisting to / reading from the corpus failed.
     Corpus(CorpusError),
+    /// No acquisition backend is configured (§11.1's origin is a
+    /// deliberately open question, 2026-08-23). Distinct from `NoResult` so
+    /// callers/logs can tell "nothing wired up yet" apart from "a real
+    /// backend tried and found nothing" — mirrors `ai::ProviderError::Unconfigured`.
+    Unconfigured,
 }
 
 impl std::fmt::Display for SourceError {
@@ -540,6 +558,9 @@ impl std::fmt::Display for SourceError {
             SourceError::Network(e) => write!(f, "acquisition network error: {e}"),
             SourceError::Normalize(e) => write!(f, "could not normalize source: {e}"),
             SourceError::Corpus(e) => write!(f, "corpus error: {e}"),
+            SourceError::Unconfigured => {
+                write!(f, "no source acquisition backend is configured")
+            }
         }
     }
 }
@@ -554,37 +575,28 @@ impl From<CorpusError> for SourceError {
 
 /// Swappable acquisition facade (§11.1). Each variant is one backend; the app
 /// asks by intent (search a topic, fetch a hit) without knowing which backend
-/// serves it. Add a hosted/registry backend as a new variant.
+/// serves it. Add a real backend as a new variant.
 pub enum Source {
     /// Canned content — demo mode and tests, no network.
     Mock(MockSource),
-    /// OpenStax OER textbooks (network) — the default legal source.
-    OpenStax(OpenStaxSource),
-    /// Wikipedia (network) — free/keyless fallback, §11.1's "internet search" tier.
-    Wikipedia(WikipediaSource),
+    /// No acquisition backend is configured (§11.1's origin is deliberately
+    /// open, 2026-08-23 — the earlier OpenStax/Wikipedia backends were
+    /// deleted, not replaced). Every call fails fast with
+    /// [`SourceError::Unconfigured`] instead of silently acquiring nothing —
+    /// mirrors `ai::Provider::Unconfigured` (§22).
+    Unconfigured,
     // Future, behind the same facade (kept as doc so the seam is explicit):
     //   LibreTexts(LibreTextsSource),
     //   OpenAccess(OpenAccessSource),// DOAB/OAPEN, arXiv/PMC
+    //   LocalPdf(LocalPdfSource),// user's own book/paper library
 }
 
 impl Source {
-    /// The default runtime backend: real OER acquisition (OpenStax). Demo/tests
-    /// construct `Source::Mock` explicitly.
-    pub fn openstax() -> Self {
-        Source::OpenStax(OpenStaxSource::new())
-    }
-
-    /// The free/keyless fallback backend (§11.1) — see `wikipedia` module docs.
-    pub fn wikipedia() -> Self {
-        Source::Wikipedia(WikipediaSource::new())
-    }
-
     /// Searches the backend for sources relevant to `query`, cheaply (no fetch).
     pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SourceError> {
         match self {
             Source::Mock(m) => m.search(query).await,
-            Source::OpenStax(o) => o.search(query).await,
-            Source::Wikipedia(w) => w.search(query).await,
+            Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
 
@@ -593,21 +605,19 @@ impl Source {
     pub async fn fetch(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
-            Source::OpenStax(o) => o.fetch(hit).await,
-            Source::Wikipedia(w) => w.fetch(hit).await,
+            Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
 
     /// Re-fetches ignoring whatever first-acquisition cap `fetch` applies
-    /// (§11.1 item 6's background completion pass). Backends that never cap
-    /// (`Mock`, `Wikipedia` — a whole article is already one fetch) just
-    /// delegate to `fetch`; `OpenStax` ignores its configured `max_pages` in
-    /// favor of a much larger, still-bounded ceiling.
+    /// (§11.1 item 6's background completion pass). `Mock` never caps (a
+    /// whole canned source is already one fetch), so it just delegates to
+    /// `fetch`; a future backend that does cap gets its own arm here, same
+    /// as the deleted `OpenStax` backend used to.
     pub async fn fetch_complete(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
-            Source::OpenStax(o) => o.fetch_all(hit).await,
-            Source::Wikipedia(w) => w.fetch(hit).await,
+            Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
 }

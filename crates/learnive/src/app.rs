@@ -54,10 +54,11 @@ pub struct AppState {
     pub secret: Arc<SecretStore>,
     /// Data directory, needed to persist config on setup.
     pub data_dir: Arc<str>,
-    /// Source acquisition backend (§11.1) — swappable (OpenStax by default).
+    /// Source acquisition backend (§11.1) — swappable; `Source::Unconfigured`
+    /// while origin stays a deliberately open question (2026-08-23).
     pub source: Arc<Source>,
-    /// §11.1's free/keyless fallback tier (Wikipedia) — tried when `source`
-    /// finds nothing for a query (`api::cold_start::acquire`).
+    /// §11.1's fallback tier — tried when `source` finds nothing for a query
+    /// (`api::cold_start::acquire`); also `Source::Unconfigured` today.
     pub fallback_source: Arc<Source>,
     /// Immutable source corpus (§4/§11).
     pub corpus: Corpus,

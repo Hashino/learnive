@@ -1225,11 +1225,15 @@ pub(super) struct AcquisitionOutcome {
 
 /// Runs source acquisition + reindex for `query_hint` (§11.1/§10): derives a
 /// short catalog-search subject phrase (`engine::propose_search_subject` —
-/// the backend matches TITLES, not semantic intent, so a full sentence
-/// reliably misses even when the catalog covers the subject, confirmed live
-/// against OpenStax), then tries each configured `Source` in the §11.1
-/// fallback order (OER first, Wikipedia last) with that phrase and, failing
-/// that, the raw hint verbatim. Returns as soon as one attempt lands.
+/// title-matching backends reliably miss on a full sentence even when the
+/// catalog covers the subject, confirmed live against OpenStax before that
+/// backend was deleted, 2026-08-23), then tries each configured `Source` in
+/// order (`state.source` then `state.fallback_source`) with that phrase and,
+/// failing that, the raw hint verbatim. Returns as soon as one attempt
+/// lands. With no backend wired in (`Source::Unconfigured`, the current
+/// default — §11.1's origin is deliberately open), every attempt fails
+/// immediately and this degrades to not-grounded, same as the
+/// no-retriever case below.
 ///
 /// No-op (returns not-grounded) when grounding is disabled (no retriever).
 /// Awaited directly by the `research` move (generation must not proceed
@@ -1435,16 +1439,22 @@ fn spawn_acquisition(state: AppState, topic: String) {
     });
 }
 
-/// The runtime acquisition backends (§11.1): OpenStax OER by default,
-/// Wikipedia as the free/keyless fallback (`AppState::fallback_source`).
+/// The runtime acquisition backend (§11.1). Origin is deliberately open
+/// (2026-08-23, `source::mod` doc comment) — the earlier OpenStax backend
+/// was deleted rather than left running as a default nobody had chosen
+/// anymore, so this returns `Source::Unconfigured` until a real backend is
+/// picked. Every call through it fails fast with `SourceError::Unconfigured`
+/// (`acquire`/`try_acquire_from` already treat that as a normal, recoverable
+/// "nothing acquired" outcome).
 pub fn build_source() -> Source {
-    Source::openstax()
+    Source::Unconfigured
 }
 
-/// The §11.1 fallback tier — see `source::wikipedia` module docs for why
-/// this backend and not a general web-search API.
+/// The §11.1 fallback tier. Same status as `build_source` — the earlier
+/// Wikipedia backend was deleted 2026-08-23; this returns
+/// `Source::Unconfigured` until a real fallback is picked.
 pub fn build_fallback_source() -> Source {
-    Source::wikipedia()
+    Source::Unconfigured
 }
 
 #[cfg(test)]
@@ -1629,100 +1639,5 @@ mod tests {
         assert_eq!(items[0].id, "p1");
         assert_eq!(items[0].mode, NodeMode::Review);
         assert!(items[0].prerequisites.is_empty());
-    }
-
-    /// §11.1 item 6, end-to-end live: `acquire` capped at 3 pages must land
-    /// a `complete: false` entry immediately, and the fire-and-forget
-    /// completion it spawns must catch up to `complete: true` with strictly
-    /// more sections, all through the real orchestration in this file (not
-    /// just the lower-level `OpenStaxSource`/`Corpus` pieces already
-    /// unit-tested elsewhere). Ignored by default (network + a real
-    /// embedding model); run with
-    /// `cargo test -p learnive completion_pipeline_live -- --ignored --nocapture`.
-    #[tokio::test]
-    #[ignore = "hits the network and loads a real embedding model"]
-    async fn completion_pipeline_live_catches_up_a_capped_acquisition() {
-        use arc_swap::ArcSwap;
-        use std::collections::HashSet;
-        use std::fs;
-        use tokio::sync::RwLock as TokioRwLock;
-
-        let dir = std::env::temp_dir().join(format!(
-            "learnive-completion-live-{}",
-            crate::engine::new_id()
-        ));
-        let corpus = Corpus::open(&dir).unwrap();
-        let embedder = crate::retrieval::Embedder::default_model().expect("load embedding model");
-        let retriever =
-            crate::retrieval::Retriever::open(&dir, &corpus, embedder).expect("open retriever");
-
-        let state = AppState {
-            token: Arc::from("test-token"),
-            allowed_origins: Arc::new(HashSet::new()),
-            allowed_hosts: Arc::new(HashSet::new()),
-            store: crate::store::Store::open(&dir).unwrap(),
-            ai: Arc::new(ArcSwap::from_pointee(crate::api::demo_ai())),
-            policy: Arc::new(ArcSwap::from_pointee(crate::movement::AgentPolicy::L0)),
-            config: Arc::new(RwLock::new(crate::config::AppConfig::default())),
-            secret: Arc::new(crate::secret::SecretStore::open(&dir)),
-            data_dir: Arc::from(dir.to_string_lossy().as_ref()),
-            source: Arc::new(Source::OpenStax(
-                crate::source::OpenStaxSource::new().with_max_pages(3),
-            )),
-            fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-            corpus: corpus.clone(),
-            retriever: Some(Arc::new(TokioRwLock::new(retriever))),
-        };
-
-        let title = try_acquire_from(
-            &state,
-            &state.source,
-            state.retriever.as_ref().unwrap(),
-            "calculus",
-        )
-        .await
-        .expect("first (capped) acquisition must ground");
-        println!("acquired: {title}");
-
-        let ids: Vec<String> = corpus.list().unwrap().into_iter().map(|m| m.id).collect();
-        let source_id = ids
-            .into_iter()
-            .find(|id| id.starts_with("calculus"))
-            .expect("a calculus source in the corpus");
-        let capped = corpus.load_index(&source_id).unwrap();
-        assert!(
-            !capped.meta.complete,
-            "3-page cap against a real book must land as partial"
-        );
-        let capped_sections = capped.toc.len();
-
-        // The completion pass was spawned fire-and-forget by
-        // `try_acquire_from` — poll for it to land instead of a fixed sleep.
-        // A full-book completion fetch (~90 pages + figures) is slow, so the
-        // window here is generous.
-        let mut caught_up = false;
-        for i in 0..120 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let index = corpus.load_index(&source_id).unwrap();
-            println!(
-                "poll {i}: complete={} sections={}",
-                index.meta.complete,
-                index.toc.len()
-            );
-            if index.meta.complete {
-                assert!(
-                    index.toc.len() > capped_sections,
-                    "completion must fetch strictly more sections than the capped pass"
-                );
-                caught_up = true;
-                break;
-            }
-        }
-        assert!(
-            caught_up,
-            "background completion did not land within the poll window"
-        );
-
-        fs::remove_dir_all(&dir).ok();
     }
 }
