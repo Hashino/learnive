@@ -158,7 +158,7 @@ impl Corpus {
             fs::rename(&sec_tmp, &sec_path)?;
         }
 
-        let index = SourceIndex {
+        let mut index = SourceIndex {
             meta: source.meta.clone(),
             toc: source
                 .sections
@@ -169,6 +169,13 @@ impl Corpus {
                 })
                 .collect(),
         };
+        // The canonical PDF artifact (§4/§11): when a backend delivered one,
+        // persist it as `assets/source.pdf` and record that on the metadata so
+        // the (future) native-PDF viewer knows where to serve it from.
+        if let Some(pdf) = &source.pdf {
+            self.store_asset(id, "source.pdf", pdf)?;
+            index.meta.pdf_asset = Some("source.pdf".into());
+        }
         let json =
             serde_json::to_string_pretty(&index).map_err(|e| CorpusError::Decode(e.to_string()))?;
         // Atomic write (tmp + rename), mirroring `store.rs`.
@@ -200,6 +207,7 @@ impl Corpus {
         Ok(FetchedSource {
             meta: index.meta,
             sections,
+            pdf: None,
         })
     }
 
@@ -332,7 +340,8 @@ impl Corpus {
             writeln!(
                 f,
                 "Immutable corpus (§4, §11): each source is fetched once and cited by \
-                 id. Legal open sources only — no LibGen.\n"
+                  id. The mirror/backend a source came from is recorded per entry \
+                  (see `backend` on each line).\n"
             )?;
         }
         let authors = if meta.authors.is_empty() {
@@ -427,6 +436,7 @@ mod tests {
                 origin: Origin::OpenStax,
                 handle: String::new(),
                 complete: true,
+                pdf_asset: None,
             },
             sections: vec![Section {
                 locator: "chap:2;sec:1".into(),
@@ -434,6 +444,7 @@ mod tests {
                 text: "A limit describes the value a function approaches.".into(),
                 html: "<p>A limit describes the value a function approaches.</p>".into(),
             }],
+            pdf: None,
         }
     }
 

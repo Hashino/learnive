@@ -55,10 +55,11 @@ pub struct AppState {
     /// Data directory, needed to persist config on setup.
     pub data_dir: Arc<str>,
     /// Source acquisition backend (§11.1) — swappable; `Source::Unconfigured`
-    /// while origin stays a deliberately open question (2026-08-23).
+    /// when no mirror URL is configured (see `build_source`).
     pub source: Arc<Source>,
     /// §11.1's fallback tier — tried when `source` finds nothing for a query
-    /// (`api::cold_start::acquire`); also `Source::Unconfigured` today.
+    /// (`api::cold_start::acquire`); `Source::Unconfigured` when no secondary
+    /// mirror URL is configured.
     pub fallback_source: Arc<Source>,
     /// Immutable source corpus (§4/§11).
     pub corpus: Corpus,
@@ -114,7 +115,22 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             secret: Arc::new(secret),
             data_dir: Arc::from(data_dir.as_str()),
-            source: Arc::new(api::build_source()),
+            source: {
+                let source = api::build_source();
+                // A missing backend is expected post-pivot (§11.1 origin is a
+                // deliberately open question): say so once instead of spamming
+                // an error on every acquisition. The document still generates,
+                // just ungrounded, until a backend is wired up.
+                if matches!(source, crate::source::Source::Unconfigured) {
+                    println!(
+                        "note: no source acquisition backend configured — \
+                         documents will be generated ungrounded. Set \
+                         LEARNIVE_LIBGEN_URL or LEARNIVE_SCIHUB_URL to enable \
+                         grounding (a mirror you supply; no default is baked in)."
+                    );
+                }
+                Arc::new(source)
+            },
             fallback_source: Arc::new(api::build_fallback_source()),
             corpus,
             retriever,

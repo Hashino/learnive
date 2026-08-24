@@ -32,6 +32,8 @@ impl MockSource {
             origin: Origin::Mock,
             license: "CC BY 4.0".into(),
             handle: format!("mock:{query}"),
+            pages: None,
+            size_bytes: None,
         }])
     }
 
@@ -81,8 +83,10 @@ impl MockSource {
                 origin: hit.origin.clone(),
                 handle: hit.handle.clone(),
                 complete: true,
+                pdf_asset: None,
             },
             sections,
+            pdf: None,
         })
     }
 }

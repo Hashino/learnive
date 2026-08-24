@@ -152,6 +152,7 @@ pub async fn get_source_asset(
         Some("jpg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
+        Some("pdf") => "application/pdf",
         _ => return Err(ApiError::BadRequest("unsupported asset type".to_string())),
     };
     let bytes = state

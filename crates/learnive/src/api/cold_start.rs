@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::retrieval::Retriever;
-use crate::source::Corpus;
+use crate::source::{Corpus, SearchHit, Source};
 
 // ---------------------------------------------------------------------------
 // Cold start (§6.1, §S4): topic → proposed objective → confirmed objective +
@@ -1230,10 +1230,11 @@ pub(super) struct AcquisitionOutcome {
 /// backend was deleted, 2026-08-23), then tries each configured `Source` in
 /// order (`state.source` then `state.fallback_source`) with that phrase and,
 /// failing that, the raw hint verbatim. Returns as soon as one attempt
-/// lands. With no backend wired in (`Source::Unconfigured`, the current
-/// default — §11.1's origin is deliberately open), every attempt fails
-/// immediately and this degrades to not-grounded, same as the
-/// no-retriever case below.
+/// lands. The primary (LibGen) and fallback (Sci-Hub) backends are both tried;
+/// when neither mirror answers (offline / blocked / no result) this degrades to
+/// not-grounded — same as the no-retriever case below. Acquisition is a
+/// best-effort enhancement, so every failure mode here is recoverable and never
+/// surfaced as an error to the caller.
 ///
 /// No-op (returns not-grounded) when grounding is disabled (no retriever).
 /// Awaited directly by the `research` move (generation must not proceed
@@ -1260,13 +1261,24 @@ pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOu
         queries.push(query_hint);
     }
 
+    // Try every (backend, query), and within a query EVERY ranked hit — the
+    // best textbook first, then the next, … — until one actually downloads.
+    // A single mirror download can reset mid-stream (LibGen is flaky on larger
+    // PDFs), so falling through to the next candidate is what lets grounding
+    // land a real textbook instead of silently giving up on the first reset.
+    // `ranked_hits` already puts textbooks ahead of journal articles.
     for source in [&state.source, &state.fallback_source] {
         for query in &queries {
-            if let Some(title) = try_acquire_from(state, source, retriever, query).await {
-                return AcquisitionOutcome {
-                    grounded: true,
-                    source_title: Some(title),
-                };
+            let Ok(hits) = source.search(query).await else {
+                continue;
+            };
+            for hit in crate::source::ranked_hits(&hits) {
+                if let Some(title) = fetch_and_store(state, source, retriever, &hit).await {
+                    return AcquisitionOutcome {
+                        grounded: true,
+                        source_title: Some(title),
+                    };
+                }
             }
         }
     }
@@ -1276,36 +1288,29 @@ pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOu
     }
 }
 
-/// One search→fetch→store→reindex attempt against a single backend. `None`
-/// on any failure or empty result — every failure mode here is recoverable
-/// by trying the next query/backend in `acquire`'s chain, so this only logs,
-/// never surfaces an error to the caller.
-async fn try_acquire_from(
+/// Downloads, localizes, stores, and reindexes a chosen hit. `None` on any
+/// failure — every failure mode is recoverable by the caller trying another
+/// hit/query/backend.
+async fn fetch_and_store(
     state: &AppState,
     source: &Arc<Source>,
     retriever: &Arc<RwLock<Retriever>>,
-    query: &str,
+    hit: &SearchHit,
 ) -> Option<String> {
     let corpus = &state.corpus;
-    let hit = match source.search(query).await {
-        Ok(hits) => hits.into_iter().next()?,
-        Err(e) => {
-            eprintln!("acquisition search failed: {e}");
-            return None;
-        }
-    };
-    let mut doc = match source.fetch(&hit).await {
+    let mut doc = match source.fetch(hit).await {
         Ok(d) => d,
+        // Download/normalize failure (e.g. mirror reset mid-stream) — log it
+        // so a flaky acquisition is visible, then let the caller try the next
+        // ranked candidate instead of failing silently.
         Err(e) => {
-            eprintln!("acquisition fetch failed: {e}");
+            eprintln!("acquisition: fetch failed for \"{}\": {e}", hit.title);
             return None;
         }
     };
     let title = doc.meta.title.clone();
     // §11.1 item 5: download figures into the corpus and rewrite `src` to
-    // point at them, before `store` ever writes a section to disk — a
-    // section written with a still-remote `src` would need its own
-    // migration pass later, same as the html-field backfill this mirrors.
+    // point at them, before `store` ever writes a section to disk.
     crate::source::localize_images(
         &crate::source::image_client(),
         corpus,
@@ -1344,12 +1349,16 @@ async fn try_acquire_from(
     }
 }
 
+/// One search→fetch→store→reindex attempt against a single backend. `None`
+/// on any failure or empty result — every failure mode here is recoverable
+/// by trying the next query/backend in `acquire`'s chain, so this only logs,
+/// never surfaces an error to the caller.
 /// §11.1 item 6: background completion pass for a source whose first
 /// acquisition was capped (`SourceMeta.complete == false`) — re-fetches
 /// ignoring the cap via [`Source::fetch_complete`] and overwrites the corpus
 /// entry with [`Corpus::store_complete`], the one sanctioned exception to
 /// `store`'s no-op-if-exists guard. Fire-and-forget: failures are logged
-/// only, same convention as `try_acquire_from` — a still-partial source
+/// only, same convention as `fetch_and_store` — a still-partial source
 /// stays fully usable, just missing later sections until this succeeds (or a
 /// future acquisition of the same source retries it; nothing here retries on
 /// its own).
@@ -1382,6 +1391,8 @@ async fn complete_source(
         origin: index.meta.origin.clone(),
         license: index.meta.license.clone(),
         handle: index.meta.handle.clone(),
+        pages: None,
+        size_bytes: None,
     };
     let mut doc = match source.fetch_complete(&hit).await {
         Ok(d) => d,
@@ -1440,21 +1451,49 @@ fn spawn_acquisition(state: AppState, topic: String) {
 }
 
 /// The runtime acquisition backend (§11.1). Origin is deliberately open
-/// (2026-08-23, `source::mod` doc comment) — the earlier OpenStax backend
-/// was deleted rather than left running as a default nobody had chosen
-/// anymore, so this returns `Source::Unconfigured` until a real backend is
-/// picked. Every call through it fails fast with `SourceError::Unconfigured`
-/// (`acquire`/`try_acquire_from` already treat that as a normal, recoverable
-/// "nothing acquired" outcome).
+/// (`source::mod` doc comment) — the earlier OpenStax/Wikipedia backends were
+/// deleted, but the façade now also ships LibGen and Sci-Hub backends, enabled
+/// by pointing them at a mirror the user controls: `LEARNIVE_LIBGEN_URL` and
+/// `LEARNIVE_SCIHUB_URL`. When neither is set this still returns
+/// `Source::Unconfigured`, whose calls fail fast with `SourceError::Unconfigured`
+/// — `acquire`/`try_acquire_from` already treat that as a normal, recoverable
+/// "nothing acquired" outcome.
+/// Built-in candidate mirrors tried in order when the user hasn't pointed the
+/// app at one via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`. LibGen/Sci-Hub
+/// domains rotate frequently, so these are lists (whichever answers first
+/// wins), not single hard-coded hosts. Override entirely with the env var
+/// (also comma-separated to supply several candidates).
+// Mirror lists are candidate roots tried in order (whichever answers first
+// wins). They rotate constantly, so keep several current ones here; the user
+// can override entirely via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`.
+// `sci-hub.ee` is a reliably-ungated mirror (no Cloudflare interstitial) that
+// works where `.se`/`.st`/`.wf` are challenged. libgen.im/libgen.li are tried
+// first because they answer from more networks; libgen.is/rs/st are the older
+// generation that still works where reachable.
+const DEFAULT_LIBGEN_URLS: &str = "https://libgen.li,https://libgen.im,https://libgen.is,https://libgen.rs,https://libgen.st";
+const DEFAULT_SCIHUB_URLS: &str = "https://sci-hub.ee,https://sci-hub.se,https://sci-hub.st,https://sci-hub.wf,https://sci-hub.ren";
+
+/// The §11.1 primary acquisition backend: LibGen (books). The mirror list comes
+/// from `LEARNIVE_LIBGEN_URL` (comma-separated) or the built-in candidates
+/// above. The fallback (`build_fallback_source`, Sci-Hub for papers) is tried
+/// when this yields nothing.
 pub fn build_source() -> Source {
-    Source::Unconfigured
+    let urls = std::env::var("LEARNIVE_LIBGEN_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LIBGEN_URLS.to_string());
+    Source::LibGen(crate::source::LibGenSource::new(urls))
 }
 
-/// The §11.1 fallback tier. Same status as `build_source` — the earlier
-/// Wikipedia backend was deleted 2026-08-23; this returns
-/// `Source::Unconfigured` until a real fallback is picked.
+/// The §11.1 fallback tier: Sci-Hub (papers). Used when the primary LibGen
+/// search finds nothing. The mirror list comes from `LEARNIVE_SCIHUB_URL`
+/// (comma-separated) or the built-in candidates above.
 pub fn build_fallback_source() -> Source {
-    Source::Unconfigured
+    let urls = std::env::var("LEARNIVE_SCIHUB_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SCIHUB_URLS.to_string());
+    Source::SciHub(crate::source::SciHubSource::new(urls))
 }
 
 #[cfg(test)]

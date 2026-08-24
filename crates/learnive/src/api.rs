@@ -46,7 +46,6 @@ use crate::movement::{
 use crate::objective::{ObjectiveLog, ObjectiveSource};
 use crate::profile::{self, ProfileProjection};
 use crate::secret::SecretStore;
-use crate::source::Source;
 use crate::store::StoreError;
 
 /// API error mapped to an HTTP status.

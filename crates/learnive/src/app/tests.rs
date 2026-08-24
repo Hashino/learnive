@@ -1130,6 +1130,7 @@ async fn asking_about_a_source_selection_threads_it_into_context_and_header() {
             origin: crate::source::Origin::OpenStax,
             handle: String::new(),
             complete: true,
+            pdf_asset: None,
         },
         sections: vec![crate::source::Section {
             locator: "sec:1".into(),
@@ -1137,6 +1138,7 @@ async fn asking_about_a_source_selection_threads_it_into_context_and_header() {
             text: "A fraction splits a whole into equal parts.".into(),
             html: "<p>A fraction splits a whole into equal parts.</p>".into(),
         }],
+        pdf: None,
     };
     state.corpus.store(&src).unwrap();
 
@@ -2391,6 +2393,7 @@ async fn source_section_resolves_quote_into_a_highlight_range() {
             origin: crate::source::Origin::OpenStax,
             handle: String::new(),
             complete: true,
+            pdf_asset: None,
         },
         sections: vec![crate::source::Section {
             locator: "chap:2;sec:1".into(),
@@ -2398,6 +2401,7 @@ async fn source_section_resolves_quote_into_a_highlight_range() {
             text: "A limit describes the value a function approaches.".into(),
             html: "<p>A limit describes the value a function approaches.</p>".into(),
         }],
+        pdf: None,
     };
     state.corpus.store(&src).unwrap();
 
@@ -2469,6 +2473,7 @@ async fn source_section_highlight_survives_multibyte_prefix() {
             origin: crate::source::Origin::OpenStax,
             handle: String::new(),
             complete: true,
+            pdf_asset: None,
         },
         sections: vec![crate::source::Section {
             locator: "sec:1".into(),
@@ -2479,6 +2484,7 @@ async fn source_section_highlight_survives_multibyte_prefix() {
                 "<p>A note — the law of contradiction says that S and not-S cannot both hold.</p>"
                     .into(),
         }],
+        pdf: None,
     };
     state.corpus.store(&src).unwrap();
 

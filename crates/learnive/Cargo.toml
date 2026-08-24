@@ -15,7 +15,18 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
 ] }
 serde = { version = "1", features = ["derive"] }
+# `libgen-rs` was dropped — its search is a hash-scrape of `search.php` HTML
+# that only matches one LibGen UI generation and returns nothing on the
+# mirrors that answer today (libgen.li serves `index.php`). The LibGen backend
+# now speaks the canonical `out=json` API directly, which covers both
+# `search.php` (libgen.is/rs/st) and `index.php` (libgen.li/im).
 serde_json = "1"
+# Source acquisition (§11.1): HTML scraping of LibGen's search-results page to
+# extract (title, author, md5) per book. LibGen mirrors don't expose a single
+# stable JSON endpoint that carries both title and md5 across generations
+# (libgen.li serves `index.php` results as HTML; libgen.is answers the
+# `out=json` query), so we scrape the results table and keep a JSON fallback.
+scraper = "0.20"
 # Hot-swap the AI provider when the user (re)configures it in /setup (§12).
 arc-swap = "1"
 # Source normalization (§11.1): acquired HTML → extracted text.
@@ -31,6 +42,11 @@ futures-util = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
 lol_html = "3.0.1"
+# Source acquisition (§11.1): PDF-backed backends (LibGen/Sci-Hub) extract
+# text from the downloaded PDF into the normalized corpus representation.
+pdf-extract = "0.12"
+# Shared `url::Url` for building mirror/search/download URLs in the sources.
+url = "2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

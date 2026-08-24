@@ -284,6 +284,7 @@ mod tests {
                     origin: Origin::OpenStax,
                     handle: String::new(),
                     complete: true,
+                    pdf_asset: None,
                 },
                 sections: vec![
                     Section {
@@ -303,6 +304,7 @@ mod tests {
                         html: String::new(),
                     },
                 ],
+                pdf: None,
             })
             .unwrap();
 

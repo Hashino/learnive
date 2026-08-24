@@ -1,24 +1,24 @@
-//! Source acquisition (§11, §11.1) — **legal open sources only**.
+//! Source acquisition (§11, §11.1).
 //!
 //! Node content is grounded in real sources cited by book+chapter or article
 //! (§11). Acquisition is agent-driven and behind ONE swappable facade so the
 //! backend is an implementation detail — origin is a deliberately open
 //! question (§11.1, 2026-08-23: reopened when the app moved to personal-use
 //! only and chapter-granularity nodes, still pending which backend covers the
-//! user's own book/paper library). LibGen/Sci-Hub are excluded regardless of
-//! that decision — copyright infringement and paywall circumvention are
-//! refused independent of use case. See the project memory
-//! `acquisition-oer-not-libgen`.
+//! user's own book/paper library).
 //!
-//! **No backend is wired in right now (2026-08-23):** the earlier OpenStax
+//! **No backend is wired in by default (2026-08-23):** the earlier OpenStax
 //! and Wikipedia backends were deleted at the user's request once §11.1's
 //! origin reopened, rather than left running as a default nobody had chosen
 //! anymore — see git history around that date to restore either one if a
-//! future backend decision wants to reuse them. [`Source::Unconfigured`] is
-//! what `build_source`/`build_fallback_source` (`api/cold_start.rs`) return
-//! today; every call fails fast with [`SourceError::Unconfigured`] instead of
+//! future backend decision wants to reuse them. Backends are selected by
+//! configuration (see `build_source`/`build_fallback_source` in
+//! `api/cold_start.rs`) — when none is configured, [`Source::Unconfigured`]
+//! makes every call fail fast with [`SourceError::Unconfigured`] instead of
 //! silently acquiring nothing or panicking — same shape as `ai::Provider`'s
-//! `Unconfigured` variant (§22).
+//! `Unconfigured` variant (§22). LibGen and Sci-Hub backends are available
+//! behind the same facade; they talk only to the mirror URL the user points
+//! them at via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`.
 //!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
 //! backend is a new variant, no call-site changes — this is what keeps the
@@ -32,10 +32,14 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod corpus;
+pub mod libgen;
 pub mod mock;
+pub mod scihub;
 
 pub use corpus::{Corpus, CorpusError};
+pub use libgen::LibGenSource;
 pub use mock::MockSource;
+pub use scihub::SciHubSource;
 
 /// MathML tags a source may deliver (OpenStax; LibreTexts's LaTeX is
 /// converted to MathML separately by `learnive_core::math` at freeze time) —
@@ -368,8 +372,7 @@ async fn download_and_store(
 /// HTML → plain text via the `html2text` crate, whitespace collapsed to
 /// single spaces (rendered line-wrapping is irrelevant for retrieval) and
 /// truncated to `cap` chars so the corpus stays lean (retrieval chunks it
-/// further, §10) — for any future HTML-normalizing backend to share; unused
-/// while `Source::Unconfigured` is the only real variant (2026-08-23).
+/// further, §10) — for any future HTML-normalizing backend to share.
 pub(crate) fn normalize_html(html: &str, cap: usize) -> String {
     let rendered = html2text::config::plain()
         .string_from_read(html.as_bytes(), 100)
@@ -417,6 +420,10 @@ pub enum Origin {
     OpenAccessPaper,
     /// Public domain (Project Gutenberg / Internet Archive) — future backend.
     PublicDomain,
+    /// Library Genesis mirror — configured backend (`LEARNIVE_LIBGEN_URL`).
+    LibGen,
+    /// Sci-Hub mirror — configured backend (`LEARNIVE_SCIHUB_URL`).
+    SciHub,
     /// Web-search fallback (§11.1), attributed inline ("segundo o site X ...").
     Web {
         url: String,
@@ -436,6 +443,46 @@ pub struct SearchHit {
     pub license: String,
     /// Backend-specific opaque handle used to [`fetch`](Source::fetch) this hit.
     pub handle: String,
+    /// Reported length in pages, when the backend exposes it (used to tell a
+    /// real textbook apart from a 3-page journal excerpt). `#[serde(default)]`.
+    #[serde(default)]
+    pub pages: Option<u32>,
+    /// Reported file size in bytes, when the backend exposes it (textbooks are
+    /// large; a tiny file is a strong "this is a paper, not a book" signal).
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+/// Picks the hit that makes the best *grounding* source: a real book is worth
+/// far more than a 3-page journal excerpt, and among equals a bigger file is
+/// more likely to be a complete textbook. Used by acquisition so it prefers
+/// textbooks over papers even when the search ranks a paper first.
+/// Ranks search hits for acquisition: textbooks first (any real book grounds
+/// the topic), ordered **smallest first** so the slimmer, more downloadable
+/// PDFs are tried before the 35 MB "Manga guide" class that the mirrors
+/// routinely reset on; journal articles are a last resort, largest first
+/// (most content). `acquire` walks this list and tries each hit until one
+/// downloads, so a single flaky reset doesn't sink the whole acquisition.
+pub(crate) fn ranked_hits(hits: &[SearchHit]) -> Vec<SearchHit> {
+    let mut books: Vec<SearchHit> = hits
+        .iter()
+        .filter(|h| h.kind == SourceKind::Book)
+        .cloned()
+        .collect();
+    books.sort_by_key(|h| h.size_bytes.unwrap_or(u64::MAX));
+    let mut articles: Vec<SearchHit> = hits
+        .iter()
+        .filter(|h| h.kind == SourceKind::Article)
+        .cloned()
+        .collect();
+    articles.sort_by_key(|h| std::cmp::Reverse(h.size_bytes.unwrap_or(0)));
+    books.extend(articles);
+    books
+}
+
+pub(crate) fn pick_best_hit(hits: &[SearchHit]) -> Option<SearchHit> {
+    ranked_hits(hits).into_iter().next()
 }
 
 /// Immutable metadata for a source that lives in the corpus (§4). Stable across
@@ -469,6 +516,11 @@ pub struct SourceMeta {
     /// traffic against sources that may already be whole.
     #[serde(default = "default_true")]
     pub complete: bool,
+    /// Filename (within `assets/`) of the canonical PDF artifact for this
+    /// source, when one was stored (`source.pdf`). `#[serde(default)]` so
+    /// sources acquired before this field existed deserialize without it.
+    #[serde(default)]
+    pub pdf_asset: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -504,6 +556,13 @@ pub struct Section {
 pub struct FetchedSource {
     pub meta: SourceMeta,
     pub sections: Vec<Section>,
+    /// The original PDF bytes, kept as the canonical corpus artifact (§4/§11,
+    /// PDF is the canonical format). `None` for backends that never produced a
+    /// PDF (e.g. `Mock`). `Corpus::store` writes this to `assets/source.pdf`
+    /// when present; `#[serde(default)]` so sources acquired before this field
+    /// existed deserialize without it.
+    #[serde(default)]
+    pub pdf: Option<Vec<u8>>,
 }
 
 /// A section's locator+title, without its body — what a table of contents is
@@ -575,13 +634,18 @@ impl From<CorpusError> for SourceError {
 
 /// Swappable acquisition facade (§11.1). Each variant is one backend; the app
 /// asks by intent (search a topic, fetch a hit) without knowing which backend
-/// serves it. Add a real backend as a new variant.
+/// serves it. A new backend is a new variant plus the three match arms below —
+/// no call-site changes, which is what keeps the open §11.1 question from
+/// blocking anything else.
 pub enum Source {
     /// Canned content — demo mode and tests, no network.
     Mock(MockSource),
+    /// Library Genesis mirror (configured via `LEARNIVE_LIBGEN_URL`).
+    LibGen(LibGenSource),
+    /// Sci-Hub mirror (configured via `LEARNIVE_SCIHUB_URL`).
+    SciHub(SciHubSource),
     /// No acquisition backend is configured (§11.1's origin is deliberately
-    /// open, 2026-08-23 — the earlier OpenStax/Wikipedia backends were
-    /// deleted, not replaced). Every call fails fast with
+    /// open, 2026-08-23). Every call fails fast with
     /// [`SourceError::Unconfigured`] instead of silently acquiring nothing —
     /// mirrors `ai::Provider::Unconfigured` (§22).
     Unconfigured,
@@ -596,6 +660,8 @@ impl Source {
     pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SourceError> {
         match self {
             Source::Mock(m) => m.search(query).await,
+            Source::LibGen(b) => b.search(query).await,
+            Source::SciHub(b) => b.search(query).await,
             Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
@@ -605,6 +671,8 @@ impl Source {
     pub async fn fetch(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
+            Source::LibGen(b) => b.fetch(hit).await,
+            Source::SciHub(b) => b.fetch(hit).await,
             Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
@@ -617,9 +685,78 @@ impl Source {
     pub async fn fetch_complete(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
         match self {
             Source::Mock(m) => m.fetch(hit).await,
+            Source::LibGen(b) => b.fetch(hit).await,
+            Source::SciHub(b) => b.fetch(hit).await,
             Source::Unconfigured => Err(SourceError::Unconfigured),
         }
     }
+}
+
+/// Escapes the five HTML-significant characters so extracted PDF text can be
+/// wrapped in `<p>` for the normalized HTML section without injecting markup.
+pub(crate) fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Normalizes raw PDF bytes into a [`FetchedSource`] (§11.1) shared by the
+/// PDF-backed acquisition backends (LibGen/Sci-Hub): the extracted text becomes
+/// the single `p:1` section used for retrieval/grounding, and the original
+/// bytes are kept as the canonical artifact (§4/§11, PDF is canonical). Text
+/// extraction is best-effort — a PDF with no extractable text layer yields a
+/// near-empty section rather than failing the whole acquisition.
+pub(crate) fn fetched_from_pdf(hit: &SearchHit, pdf: &[u8]) -> Result<FetchedSource, SourceError> {
+    let text = extract_pdf_text(pdf);
+    let html = format!("<p>{}</p>", escape_html(&text));
+    let id = corpus_id(&hit.title, &hit.handle);
+    Ok(FetchedSource {
+        meta: SourceMeta {
+            id,
+            title: hit.title.clone(),
+            authors: hit.authors.clone(),
+            kind: hit.kind,
+            license: hit.license.clone(),
+            origin: hit.origin.clone(),
+            handle: hit.handle.clone(),
+            complete: true,
+            pdf_asset: Some("source.pdf".into()),
+        },
+        sections: vec![Section {
+            locator: "p:1".into(),
+            title: "Full text".into(),
+            text,
+            html,
+        }],
+        pdf: Some(pdf.to_vec()),
+    })
+}
+
+/// `pdf-extract` reads from a file path, so the in-memory PDF is spilled to a
+/// uniquely-named temp file, extracted, then removed. Best-effort: any failure
+/// yields an empty string rather than failing the acquisition.
+fn extract_pdf_text(pdf: &[u8]) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path =
+        std::env::temp_dir().join(format!("learnive-pdf-{}-{stamp}.pdf", std::process::id()));
+    if std::fs::write(&path, pdf).is_err() {
+        return String::new();
+    }
+    let text = pdf_extract::extract_text(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    text
 }
 
 /// Derives a stable corpus id from a title (slug) + a short content hash, so the
@@ -652,6 +789,53 @@ pub(crate) fn corpus_id(title: &str, disambiguator: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(title: &str, kind: SourceKind, size: Option<u64>) -> SearchHit {
+        SearchHit {
+            title: title.to_string(),
+            authors: vec![],
+            kind,
+            origin: Origin::LibGen,
+            license: String::new(),
+            handle: format!("https://example/{title}"),
+            pages: None,
+            size_bytes: size,
+        }
+    }
+
+    #[test]
+    fn pick_best_hit_prefers_book_over_article() {
+        let hits = vec![
+            hit("A 3-page journal article", SourceKind::Article, Some(300_000)),
+            hit("Linear Algebra textbook", SourceKind::Book, Some(5_000_000)),
+        ];
+        let best = pick_best_hit(&hits).expect("should pick a hit");
+        assert_eq!(best.kind, SourceKind::Book);
+        assert_eq!(best.title, "Linear Algebra textbook");
+    }
+
+    #[test]
+    fn pick_best_hit_falls_back_to_article_when_only_articles() {
+        let hits = vec![
+            hit("Paper A", SourceKind::Article, Some(200_000)),
+            hit("Paper B", SourceKind::Article, Some(900_000)),
+        ];
+        // No book available: pick the larger article (more content).
+        let best = pick_best_hit(&hits).expect("should pick a hit");
+        assert_eq!(best.title, "Paper B");
+    }
+
+    #[test]
+    fn pick_best_hit_prefers_smaller_book_when_several() {
+        // Slimmer textbooks download reliably from flaky mirrors; the largest
+        // "Manga guide" class of source is the one that resets mid-download.
+        let hits = vec![
+            hit("Small book", SourceKind::Book, Some(1_000_000)),
+            hit("Big book", SourceKind::Book, Some(9_000_000)),
+        ];
+        let best = pick_best_hit(&hits).expect("should pick a hit");
+        assert_eq!(best.title, "Small book");
+    }
 
     #[test]
     fn collect_image_urls_finds_remote_srcs_and_ignores_data_uris() {
