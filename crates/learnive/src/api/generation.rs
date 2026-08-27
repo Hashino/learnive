@@ -292,6 +292,32 @@ pub async fn generate_node(
                 }
             };
 
+            // §S21: post-generation grounding-verification gate, run for
+            // BOTH render paths above (covers `plan`, the one structured
+            // type in the gate's six-type scope, alongside the five
+            // streamed ones) — right after the move's content is fully
+            // settled and before it's used any further (event log, §S6
+            // progressive persistence below). `applies` is the same
+            // cheap grounded/in-scope check `verify_and_correct` makes
+            // internally; checked again here only to gate the status
+            // frame, so a plain ungrounded/out-of-scope move never emits
+            // one. `verify_and_correct` itself never errors this request —
+            // a verification failure degrades to the visible "grounding
+            // unconfirmed" banner (never a silent drop, same principle as
+            // S27's existence verification) rather than propagating.
+            let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
+                let checking_en = "Checking grounding…";
+                let checking_pt = "Verificando fundamentação…";
+                yield Ok(sse_frame(
+                    "grounding_check",
+                    crate::locale::pick(locale, checking_en, checking_pt),
+                ));
+                movement::grounding::verify_and_correct(&ai, policy, move_type, &ctx, generated)
+                    .await
+            } else {
+                generated
+            };
+
             if generated.repaired {
                 // §9 ladder telemetry signal: the first response violated the
                 // Move JSON contract and needed a repair round.

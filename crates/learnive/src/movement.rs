@@ -354,6 +354,16 @@ pub struct MoveContext {
     /// concepts must be told APART). Empty when there is nothing nearby
     /// yet demonstrated to mix in.
     pub interleave_titles: Vec<String>,
+    /// §S21 post-generation grounding-verification gate (`movement::
+    /// grounding`): set ONLY on the single corrective-regeneration attempt
+    /// after the gate's own structured check flagged claims in the FIRST
+    /// attempt as unsupported by `grounding` above — names those claims so
+    /// the retry can revise or drop them instead of blindly regenerating
+    /// from scratch. `None` on every first-pass call and for every move
+    /// type outside the gate's scope. Drives `prompt::
+    /// grounding_correction_addendum`, applied in `purpose()` the same way
+    /// `remediation_addendum`/`fade_addendum` are.
+    pub grounding_correction: Option<Vec<String>>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.
@@ -832,6 +842,12 @@ fn repair_messages(
 pub mod prompt;
 
 pub mod parse;
+
+/// §S21 post-generation grounding-verification gate — see the module's own
+/// doc comment for the full design (why it's a separate structured call
+/// from the move's own generation, the escalation shape, why a failed
+/// verifier degrades to a visible warning instead of erroring the request).
+pub mod grounding;
 
 #[cfg(test)]
 mod tests {

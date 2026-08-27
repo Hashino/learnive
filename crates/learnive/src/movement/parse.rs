@@ -125,3 +125,22 @@ pub fn generated_move(move_type: MoveType, text: &str) -> Result<GeneratedMove, 
         repaired: false,
     })
 }
+
+#[derive(Deserialize)]
+struct RawGroundingVerdict {
+    /// Claim text the model quotes/paraphrases from GENERATED, one entry
+    /// per unsupported claim (`movement::grounding`'s verification call).
+    /// An empty (or omitted) array is the "fully supported" verdict — there
+    /// is no separate boolean to fall out of sync with the list.
+    #[serde(default)]
+    unsupported_claims: Vec<String>,
+}
+
+/// Parses the grounding-verification call's verdict (§S21,
+/// `movement::grounding`). Empty `Vec` means every claim checked out.
+pub fn grounding_verdict(text: &str) -> Result<Vec<String>, EngineError> {
+    let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
+    let raw: RawGroundingVerdict =
+        serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
+    Ok(raw.unsupported_claims)
+}
