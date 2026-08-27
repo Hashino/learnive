@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 
 use super::SourceKind;
 use super::local::{LibraryEntry, LocalPdfSource};
+use super::matching::{normalize, primary_title, surname_of};
 use super::pdf::{OutlineEntry, PdfDocument, read_pdf};
 use crate::retrieval::{Embedder, chunk_text};
 
@@ -504,38 +505,6 @@ pub fn build_index_cache(
     fs::write(&tmp, &json)?;
     fs::rename(&tmp, &path)?;
     Ok(path)
-}
-
-/// Lowercases, drops punctuation (keeping alphanumerics), and collapses
-/// whitespace — the "comparação normalizada" SPEC asks for, for both title
-/// and author matching.
-fn normalize(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_space = true; // suppress a leading space
-    for c in s.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            out.push(c);
-            last_space = false;
-        } else if !last_space {
-            out.push(' ');
-            last_space = true;
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// Drops an optional subtitle (SPEC: "subtítulo opcional") — the part after
-/// the first colon, the common English/Portuguese convention for
-/// "Title: Subtitle".
-fn primary_title(title: &str) -> &str {
-    title.split(':').next().unwrap_or(title).trim()
-}
-
-/// Last whitespace-separated token of an author string — "Michael Sipser" →
-/// "Sipser". Assumes "First Last" order (see [`ExpectedItem::authors`]'s
-/// doc); good enough for matching, not a bibliography formatter.
-fn surname_of(author: &str) -> &str {
-    author.split_whitespace().next_back().unwrap_or("")
 }
 
 fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
@@ -1179,27 +1148,5 @@ mod tests {
         assert!(item.passes(), "{item:?}");
         assert!(report.all_pass());
         assert!(report.failing_items().is_empty());
-    }
-
-    // -- Small pure-function unit tests ------------------------------------
-
-    #[test]
-    fn normalize_lowercases_and_strips_punctuation() {
-        assert_eq!(
-            normalize("Introduction, to THE Theory!!"),
-            "introduction to the theory"
-        );
-    }
-
-    #[test]
-    fn primary_title_drops_an_optional_subtitle() {
-        assert_eq!(primary_title("Calculus: An Intuitive Approach"), "Calculus");
-        assert_eq!(primary_title("No Subtitle Here"), "No Subtitle Here");
-    }
-
-    #[test]
-    fn surname_of_takes_the_last_token() {
-        assert_eq!(surname_of("Michael Sipser"), "Sipser");
-        assert_eq!(surname_of("Sipser"), "Sipser");
     }
 }

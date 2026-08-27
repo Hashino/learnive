@@ -1480,6 +1480,7 @@ dependencies = [
  "lopdf 0.44.0",
  "model2vec-rs",
  "pdf-extract",
+ "quick-xml",
  "rand 0.8.7",
  "reqwest",
  "scraper 0.20.0",
@@ -2173,6 +2174,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1cf850381ae0dbb131f36e31d6090f55363d079ab3e518ad0323b9cb6a96d115"
 dependencies = [
  "bumpalo",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]

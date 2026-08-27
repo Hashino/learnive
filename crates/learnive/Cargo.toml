@@ -52,6 +52,10 @@ url = "2"
 # Default features (chrono/jiff/rayon/time) are all optional date-formatting
 # and parallel-decode conveniences this slice doesn't touch.
 lopdf = { version = "0.44.0", default-features = false }
+# Bibliographic existence verification (§11.1, PLAN.md S27d): the arXiv API
+# answers Atom XML, not JSON — used only to deserialize its feed/entry/author
+# shape into plain structs via `quick_xml::de`.
+quick-xml = { version = "0.42.0", features = ["serialize"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

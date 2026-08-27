@@ -41,6 +41,16 @@
 //! caller yet (the cold-start wiring is S27g+); see [`acervo`]'s module doc,
 //! including its scope note on the retrieval-index check.
 //!
+//! **Bibliographic existence verification (PLAN.md S27d, added 2026-08-27):**
+//! [`bibliography::verify_bibliography`] answers a narrower, deliberately
+//! *lenient* question against public catalogs (OpenLibrary/Google Books for
+//! books, Crossref/arXiv/OpenAlex for articles) before the acervo gate's
+//! strict per-file check ever runs: "does something like this exist?" — see
+//! [`bibliography`]'s module doc for the calibration rationale and the
+//! `Verified`/`NotFound`/`Unavailable` three-way result. Standalone, no
+//! caller yet (the model call site that produces a
+//! [`bibliography::ProposedItem`] is S27e).
+//!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
 //! backend is a new variant, no call-site changes — this is what keeps the
 //! open §11.1 question from blocking anything else.
@@ -55,9 +65,11 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod acervo;
+pub mod bibliography;
 pub mod corpus;
 pub mod libgen;
 pub mod local;
+mod matching;
 pub mod mock;
 pub mod pdf;
 pub mod scihub;
@@ -65,6 +77,10 @@ pub mod scihub;
 pub use acervo::{
     AcervoReport, ExpectedItem, IdentityCheck, IndexCheck, ItemReport, PageMapCheck, PresenceCheck,
     TextLayerCheck, TocCheck, build_index_cache, validate_acervo,
+};
+pub use bibliography::{
+    BibliographyCache, BibliographyClient, Catalog, Identifier, ProposedItem, VerificationOutcome,
+    verification_plan, verify_bibliography,
 };
 pub use corpus::{Corpus, CorpusError};
 pub use libgen::LibGenSource;
