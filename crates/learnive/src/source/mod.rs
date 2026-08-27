@@ -20,6 +20,14 @@
 //! behind the same facade; they talk only to the mirror URL the user points
 //! them at via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`.
 //!
+//! **`Source::LocalPdf` (PLAN.md S27a, added 2026-08-27):** §11.1's
+//! always-present fallback tier — the user's own `<data>/library/`, scanned
+//! by [`local::LocalPdfSource`]. Not wired in as the active backend yet
+//! (`build_source`/`build_fallback_source` still return `LibGen`/`SciHub`);
+//! this slice only proves the app can see a manually-placed PDF. A local
+//! library is **matched**, not searched, so it opts out of the
+//! `search`/`fetch` shape below (see [`local`]'s module doc).
+//!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
 //! backend is a new variant, no call-site changes — this is what keeps the
 //! open §11.1 question from blocking anything else.
@@ -35,11 +43,13 @@
 
 pub mod corpus;
 pub mod libgen;
+pub mod local;
 pub mod mock;
 pub mod scihub;
 
 pub use corpus::{Corpus, CorpusError};
 pub use libgen::LibGenSource;
+pub use local::{LibraryEntry, LocalPdfSource};
 pub use mock::MockSource;
 pub use scihub::SciHubSource;
 
@@ -226,6 +236,12 @@ pub enum SourceError {
     /// callers/logs can tell "nothing wired up yet" apart from "a real
     /// backend tried and found nothing" — mirrors `ai::ProviderError::Unconfigured`.
     Unconfigured,
+    /// The backend doesn't implement this operation at all — distinct from
+    /// `Unconfigured` (which means "no backend chosen yet"). So far this is
+    /// only `Source::LocalPdf`: a local library is **matched**, not
+    /// **searched** (PLAN.md S28 item 5), so `Source::search`/`Source::fetch`
+    /// are the wrong shape for it — see [`LocalPdfSource`]'s own methods.
+    Unsupported(&'static str),
 }
 
 impl std::fmt::Display for SourceError {
@@ -238,6 +254,7 @@ impl std::fmt::Display for SourceError {
             SourceError::Unconfigured => {
                 write!(f, "no source acquisition backend is configured")
             }
+            SourceError::Unsupported(msg) => write!(f, "unsupported for this backend: {msg}"),
         }
     }
 }
@@ -267,10 +284,17 @@ pub enum Source {
     /// [`SourceError::Unconfigured`] instead of silently acquiring nothing —
     /// mirrors `ai::Provider::Unconfigured` (§22).
     Unconfigured,
+    /// The local PDF library (§11.1's always-present fallback tier, PLAN.md
+    /// S27a) — the user's own `<data>/library/`. **Not wired in as the
+    /// active/chosen backend yet**: `api::cold_start::build_source`/
+    /// `build_fallback_source` still return `Source::LibGen`/`Source::SciHub`
+    /// (S27c/f/g wire this in for real). `search`/`fetch` are the wrong shape
+    /// for it — see the `LocalPdf` arms below and [`LocalPdfSource`]'s doc
+    /// comment ("matched, not searched").
+    LocalPdf(LocalPdfSource),
     // Future, behind the same facade (kept as doc so the seam is explicit):
     //   LibreTexts(LibreTextsSource),
     //   OpenAccess(OpenAccessSource),// DOAB/OAPEN, arXiv/PMC
-    //   LocalPdf(LocalPdfSource),// user's own book/paper library
 }
 
 impl Source {
@@ -281,6 +305,10 @@ impl Source {
             Source::LibGen(b) => b.search(query).await,
             Source::SciHub(b) => b.search(query).await,
             Source::Unconfigured => Err(SourceError::Unconfigured),
+            Source::LocalPdf(_) => Err(SourceError::Unsupported(
+                "local library is matched by bibliographic identity, not searched by \
+                 query — use LocalPdfSource::scan/get",
+            )),
         }
     }
 
@@ -292,6 +320,10 @@ impl Source {
             Source::LibGen(b) => b.fetch(hit).await,
             Source::SciHub(b) => b.fetch(hit).await,
             Source::Unconfigured => Err(SourceError::Unconfigured),
+            Source::LocalPdf(_) => Err(SourceError::Unsupported(
+                "local library is matched by bibliographic identity, not fetched by \
+                 search hit — use LocalPdfSource::scan/get",
+            )),
         }
     }
 }
@@ -390,7 +422,11 @@ mod tests {
     #[test]
     fn pick_best_hit_prefers_book_over_article() {
         let hits = vec![
-            hit("A 3-page journal article", SourceKind::Article, Some(300_000)),
+            hit(
+                "A 3-page journal article",
+                SourceKind::Article,
+                Some(300_000),
+            ),
             hit("Linear Algebra textbook", SourceKind::Book, Some(5_000_000)),
         ];
         let best = pick_best_hit(&hits).expect("should pick a hit");
