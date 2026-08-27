@@ -1711,6 +1711,77 @@ mod tests {
         }
     }
 
+    /// Manual quality probe for grounded `Explain` generation against the
+    /// REAL configured provider (`.env`) — built to test whether a
+    /// smaller/faster model (e.g. `openai/gpt-oss-120b`) can produce good
+    /// grounded prose now that generation is meant to be heavily grounded
+    /// on real source text (PLAN.md's S21/S27), without waiting for the
+    /// pivot's ingestion pipeline (PDF extraction, the acervo gate) to
+    /// exist. Feeds a real excerpt as `ctx.grounding` — the exact field
+    /// `movement::prompt`'s `CITE_CONTRACT` keys off to require inline
+    /// `<cite>` tags — and prints the resulting HTML for a human to judge:
+    /// quality of the rewrite, whether citations look sane, whether
+    /// anything reads as unsupported by the excerpt. No oracle to assert
+    /// against — this is eyeball QA, not a regression test. This test
+    /// never fabricates or embeds source text itself; point it at a file
+    /// with a real excerpt you have the right to use.
+    ///
+    /// Set `LEARNIVE_MODEL_ROBUST` in `.env` to the model under test before
+    /// running (`Explain` is a robust-tier move). Run:
+    /// `LEARNIVE_TEST_GROUNDING_FILE=/path/to/excerpt.txt cargo test -p learnive --lib movement::tests::live_grounded_explain_quality_check -- --ignored --nocapture`
+    /// Optional: `LEARNIVE_TEST_TOPIC`/`LEARNIVE_TEST_TITLE` override the
+    /// node framing (sensible defaults otherwise).
+    #[tokio::test]
+    #[ignore = "hits the real configured AI provider; run manually, see doc comment"]
+    async fn live_grounded_explain_quality_check() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+
+        let grounding_path = std::env::var("LEARNIVE_TEST_GROUNDING_FILE").expect(
+            "set LEARNIVE_TEST_GROUNDING_FILE to a text file containing a real book/article \
+             excerpt — this test never fabricates source text itself",
+        );
+        let grounding = std::fs::read_to_string(&grounding_path)
+            .unwrap_or_else(|e| panic!("failed to read {grounding_path}: {e}"));
+        assert!(
+            !grounding.trim().is_empty(),
+            "grounding file {grounding_path} is empty"
+        );
+
+        let topic = std::env::var("LEARNIVE_TEST_TOPIC").unwrap_or_else(|_| "Test topic".into());
+        let item_title =
+            std::env::var("LEARNIVE_TEST_TITLE").unwrap_or_else(|_| "Test node".into());
+
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-live-grounding-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+
+        let ctx = MoveContext {
+            topic: topic.clone(),
+            item_title: item_title.clone(),
+            objective: format!("Demonstrate understanding of {item_title}."),
+            grounding: grounding.clone(),
+            ..Default::default()
+        };
+
+        println!(
+            "=== grounding excerpt ({} chars) from {grounding_path} ===\n{grounding}\n",
+            grounding.len()
+        );
+        let t0 = std::time::Instant::now();
+        match generate_move_complete(&ai, MoveType::Explain, &ctx).await {
+            Ok(mv) => {
+                println!("=== generated in {:?} ===", t0.elapsed());
+                println!("--- html ---\n{}", mv.html);
+                let cite_count = mv.html.matches("<cite").count();
+                println!("--- {cite_count} <cite> tag(s) found ---");
+            }
+            Err(e) => println!("--- ERROR after {:?}: {e} ---", t0.elapsed()),
+        }
+    }
+
     /// Dumps the REAL request bodies `decide_move` and an `Ask` move's
     /// streamed generation would send — no network — so they can be curled
     /// directly against the provider to isolate raw provider TTFB from
