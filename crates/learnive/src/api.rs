@@ -132,12 +132,7 @@ mod tests {
 
     #[test]
     fn answer_header_names_the_selection_it_was_asked_on() {
-        let plain = question_header(
-            "why?",
-            &Anchor::block("b1"),
-            None,
-            crate::locale::Locale::En,
-        );
+        let plain = question_header("why?", &Anchor::block("b1"), crate::locale::Locale::En);
         assert!(plain.contains("You asked:</strong> why?"));
         assert!(!plain.contains("about"));
 
@@ -151,7 +146,6 @@ mod tests {
                     suffix: None,
                 }),
             },
-            None,
             crate::locale::Locale::En,
         );
         // Question and quote are both escaped — a selection is user-chosen
@@ -171,34 +165,10 @@ mod tests {
                     suffix: None,
                 }),
             },
-            None,
             crate::locale::Locale::En,
         );
         assert!(clipped.contains('…'));
         assert!(clipped.len() < QUOTE_HEADER_BUDGET + 120);
-
-        // §11.1 item 9: a source-panel selection takes priority over the
-        // node anchor's own quote, and is labelled distinctly ("in the
-        // source", not the bare "about").
-        let from_source = question_header(
-            "why?",
-            &Anchor {
-                block_id: "b1".to_string(),
-                quote: Some(QuoteSelector {
-                    exact: "the document's own passage".to_string(),
-                    prefix: None,
-                    suffix: None,
-                }),
-            },
-            Some(&SourceSelection {
-                source_id: "s1".to_string(),
-                locator: "sec:1".to_string(),
-                quote: "the selected passage".to_string(),
-            }),
-            crate::locale::Locale::En,
-        );
-        assert!(from_source.contains("in the source \u{201c}the selected passage\u{201d}"));
-        assert!(!from_source.contains("the document's own passage"));
     }
 
     /// Guards the fix noted at the top of `demo_responder`: without the

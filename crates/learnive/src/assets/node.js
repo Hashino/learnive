@@ -962,33 +962,24 @@ function renderNextTopicPrompt(container) {
 // the new problem and either advances or remediates again.
 // --- Source viewer (§11) -----------------------------------------------
 // A citation (`<cite data-source-id data-locator>`, §4.3/§10) opens the
-// corpus's meta+table-of-contents on the right (`#sourcePanel`) — the seam
-// the eventual PDF split-view (§11.1) will occupy once the acquisition
-// layer stores original files and page locations. Read-only: nothing here
-// is ever written back.
-//
-// §11.1 item 4 (S19): `GET /api/sources/{id}` used to return every section's
-// full text — a whole book per citation click. It now returns meta+toc only;
-// a section's body is fetched separately, on demand, as the learner opens it
-// (starting with whichever one the citation points at).
+// corpus's meta on the right (`#sourcePanel`). Read-only: nothing here is
+// ever written back. **Post-pivot (S28):** the app's own HTML section
+// reader (TOC navigation, section-body fetch/render, passage highlighting)
+// was removed — PDF is now the sole canonical, displayed format and the
+// display surface is meant to be the browser's native PDF viewer, but that
+// retrofit (S27j) hasn't landed yet, so this panel shows meta only for now.
 const sourceIndexCache = new Map();
-const sourceSectionCache = new Map();
 
 // Delegated, not bound per-citation: citations arrive incrementally as
 // prose streams in (§14), so binding at insert time would miss most of them.
 document.addEventListener("click", (e) => {
   const cite = e.target.closest("cite[data-source-id]");
   if (!cite) return;
-  // The citation's own text is the excerpt-derived claim the model wrote —
-  // sent along so the section load can deep-link the exact passage (§11.1
-  // item 8, S19) instead of just landing on the section as a whole.
-  openSourcePanel(cite.dataset.sourceId, cite.dataset.locator || "", cite.textContent || "");
+  openSourcePanel(cite.dataset.sourceId);
 });
 
-async function openSourcePanel(sourceId, locator, quote = "") {
+async function openSourcePanel(sourceId) {
   el("sourcePanel").classList.add("open");
-  // Selection-in-source→document (§11.1 item 9, reading.js): the only way
-  // a selection handler outside this file learns which source is open.
   el("sourcePanel").dataset.sourceId = sourceId;
   // Split-view (§11.1): re-centers `.main-container` in the half of the
   // screen the panel doesn't occupy (`app.css`'s `body.source-open` rule).
@@ -1006,133 +997,16 @@ async function openSourcePanel(sourceId, locator, quote = "") {
       index = await resp.json();
       sourceIndexCache.set(sourceId, index);
     }
-    // No locator (opened from a citation that didn't carry one, or any other
-    // future caller) — default to the first TOC entry rather than leaving
-    // every section body empty with no indication anything is loadable.
-    if (!locator && index.toc && index.toc.length) locator = index.toc[0].locator;
-    renderSourceIndex(sourceId, index, locator);
-    if (locator) await loadSourceSection(sourceId, locator, quote);
+    el("sourceTitle").textContent = index.meta.title;
+    const bits = [];
+    if (index.meta.authors && index.meta.authors.length) {
+      bits.push(index.meta.authors.join(", "));
+    }
+    if (index.meta.license) bits.push(index.meta.license);
+    el("sourceMeta").textContent = bits.join(" · ");
   } catch (err) {
     el("sourceTitle").textContent = t("source.unavailable");
     el("sourceMeta").textContent = String(err);
-  }
-}
-
-function renderSourceIndex(sourceId, index, locator) {
-  el("sourceTitle").textContent = index.meta.title;
-  const bits = [];
-  if (index.meta.authors && index.meta.authors.length) {
-    bits.push(index.meta.authors.join(", "));
-  }
-  if (index.meta.license) bits.push(index.meta.license);
-  el("sourceMeta").textContent = bits.join(" · ");
-
-  const body = el("sourceBody");
-  body.innerHTML = "";
-  let current = null;
-  for (const summary of index.toc || []) {
-    const sec = document.createElement("section");
-    sec.dataset.locator = summary.locator;
-    if (summary.locator === locator) {
-      sec.className = "current";
-      current = sec;
-    }
-    const h = document.createElement("h3");
-    h.textContent = summary.title || summary.locator;
-    h.addEventListener("click", () => loadSourceSection(sourceId, summary.locator));
-    // A `<div>`, not a `<p>` (§11.1 item 7): this now holds real block-level
-    // section HTML (headings, tables, figures) via `renderSectionBody`, and
-    // a `<p>` container has no valid content model for that.
-    const container = document.createElement("div");
-    container.className = "sourceSectionBody";
-    sec.appendChild(h);
-    sec.appendChild(container);
-    body.appendChild(sec);
-  }
-  (current || body.firstElementChild)?.scrollIntoView({ block: "start" });
-}
-
-// Loads (and caches) one section's body on demand and fills it into the
-// already-rendered TOC entry — never the whole book, per §11.1 item 4.
-async function loadSourceSection(sourceId, locator, quote = "") {
-  const container = el("sourceBody").querySelector(
-    `section[data-locator="${CSS.escape(locator)}"]`,
-  );
-  if (!container) return;
-  const body = container.querySelector(".sourceSectionBody");
-  const key = `${sourceId} ${locator} ${quote}`;
-  try {
-    let section = sourceSectionCache.get(key);
-    if (!section) {
-      body.textContent = t("source.sectionLoading");
-      const qs = quote ? `?quote=${encodeURIComponent(quote)}` : "";
-      const resp = await api(
-        `/api/sources/${encodeURIComponent(sourceId)}/sections/${encodeURIComponent(locator)}${qs}`,
-      );
-      if (!resp.ok) throw new Error(await resp.text());
-      section = await resp.json();
-      sourceSectionCache.set(key, section);
-    }
-    renderSectionBody(body, section);
-    container.classList.add("current");
-    (body.querySelector("mark") || container).scrollIntoView({ block: "center" });
-  } catch (err) {
-    body.textContent = t("source.unavailable");
-  }
-}
-
-// Renders the section's real markup (§11.1 item 7) -- headings, lists,
-// tables, figures, code and MathML, instead of the flattened one-paragraph
-// `text` this used to show (that field exists for retrieval, §10, not for
-// display). `html` is server-sanitized (`source::sanitize_html`, ammonia)
-// but routed through the same client-side `sanitizeHtml` every other piece
-// of server HTML goes through before `innerHTML` (defense in depth,
-// consistent with the rest of this file). `#[serde(default)]` on the Rust
-// side means a source acquired before item 1 has an empty `html` — falls
-// back to the old plain-text render rather than showing nothing.
-function renderSectionBody(body, section) {
-  body.innerHTML = "";
-  if (!section.html) {
-    if (!section.highlight) {
-      body.appendChild(document.createTextNode(section.text));
-      return;
-    }
-    const { before, matched, after } = section.highlight;
-    body.appendChild(document.createTextNode(before));
-    const mark = document.createElement("mark");
-    mark.textContent = matched;
-    body.appendChild(mark);
-    body.appendChild(document.createTextNode(after));
-    return;
-  }
-  body.innerHTML = sanitizeHtml(section.html);
-  if (section.highlight && section.highlight.matched) {
-    highlightFirstMatch(body, section.highlight.matched);
-  }
-}
-
-// Wraps the first occurrence of `needle` in a <mark>, searching the
-// rendered HTML's own text nodes rather than re-deriving byte offsets --
-// that cross-language index math (Rust bytes vs. JS UTF-16 units) is
-// exactly the bug §11.1 item 8 already hit once (`resolve_quote`'s
-// before/matched/after triple exists because of it). Whitespace or markup
-// differences between `text` (flattened for retrieval) and `html` (real
-// structure) can make `needle` not appear verbatim in any single text
-// node -- that degrades to no highlight, same posture as an unresolved
-// quote server-side, never a hard failure.
-function highlightFirstMatch(root, needle) {
-  needle = needle.trim();
-  if (!needle) return;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const idx = node.nodeValue.indexOf(needle);
-    if (idx === -1) continue;
-    const after = node.splitText(idx);
-    after.splitText(needle.length);
-    const mark = document.createElement("mark");
-    mark.textContent = needle;
-    after.replaceWith(mark);
-    return;
   }
 }
 

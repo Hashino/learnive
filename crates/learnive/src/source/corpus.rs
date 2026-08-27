@@ -6,20 +6,24 @@
 //!
 //! ```text
 //! <data>/corpus/
-//!   SOURCES.md            # human-readable manifest (esp. required for web sources, §11)
+//!   SOURCES.md            # human-readable manifest, one line per source (§11)
 //!   <source-id>/
 //!     source.json         # meta + table of contents only (§11.1 item 4, S19)
 //!     sections/
-//!       <locator-hash>.json  # one Section (locator, title, text, html) per file
+//!       <locator-hash>.json  # one Section (locator, title, text) per file —
+//!                             # index-only text for grounding/retrieval, never
+//!                             # rendered (§4/§11, PDF is the canonical, displayed
+//!                             # artifact)
 //!     assets/
-//!       <content-hash>.<ext> # downloaded figures (§11.1 item 5), src-rewritten
+//!       source.pdf         # the canonical PDF artifact (§4/§11), when the
+//!                           # backend delivered one
 //! ```
 //!
 //! Split on purpose (§11.1 item 4): before this, `source.json` held every
-//! section's full text+html, so `GET /api/sources/{id}` shipped a whole book
-//! per citation click. Now the addressable unit is one section, loadable on
-//! its own (`load_section`) — the reader navigates and loads on demand, the
-//! agent reads the table of contents instead of the whole book (S21's
+//! section's full text, so `GET /api/sources/{id}` shipped a whole book per
+//! citation click. Now the addressable unit is one section, loadable on its
+//! own (`load_section`, test-only today — see its doc comment) — the agent
+//! reads the table of contents instead of the whole book (S21's
 //! prerequisite), and a citation resolves against one file, not a megabyte
 //! JSON blob.
 //!
@@ -28,25 +32,21 @@
 //! only ever see a source as "acquired" once every section is actually on
 //! disk — an interruption mid-fetch leaves no `source.json`. A retry then
 //! starts by wiping `sections/` (not just skipping ahead), so a retry that
-//! fetches a *different* section set (paginated further, or the two-phase
-//! fetch item 6 will add) never leaves the previous attempt's orphaned files
-//! sitting in an "immutable" corpus dir with nothing in the TOC pointing at
-//! them.
+//! fetches a *different* section set never leaves the previous attempt's
+//! orphaned files sitting in an "immutable" corpus dir with nothing in the
+//! TOC pointing at them.
 //!
 //! A source id is written **once** via `store`: a no-op if the id already exists,
 //! so re-acquiring the same source is free and never clobbers it (§5 non-destructive).
-//! `store_complete` (§11.1 item 6) is the one sanctioned exception — it overwrites
-//! an existing entry, but only to replace a *capped* first acquisition
-//! (`SourceMeta.complete == false`) with a fuller fetch of the same source,
-//! never an arbitrary edit.
 //!
 //! **Backward compatibility**: every source acquired before this split has a
 //! monolithic `source.json` (`{meta, sections: [full Section, ...]}`, no
 //! `toc` key, no `sections/` dir). `load`/`load_index`/`load_section` all
 //! detect this shape (presence of a top-level `"sections"` key) and read it
 //! as-is rather than failing — non-destructive (§5): nothing here silently
-//! rewrites an old source into the new layout. A future completion/re-ingest
-//! pass (§11.1 item 6) is the explicit migration path.
+//! rewrites an old source into the new layout. There is no automatic
+//! migration path; an old entry stays in its original shape until a fresh
+//! acquisition replaces it.
 
 use std::fs;
 use std::io;
@@ -121,26 +121,11 @@ impl Corpus {
         Ok(true)
     }
 
-    /// Overwrites an already-acquired source with a fuller fetch (§11.1 item
-    /// 6's background completion pass) — the one sanctioned exception to
-    /// `store`'s no-op-if-exists guard, since this replaces a *capped* first
-    /// acquisition with the same source more complete, not an arbitrary edit.
-    /// Errors if the id isn't already in the corpus (use `store` for a first
-    /// acquisition); doesn't touch `SOURCES.md` — the source is already
-    /// listed there.
-    pub fn store_complete(&self, source: &FetchedSource) -> Result<()> {
-        let id = safe_id(&source.meta.id)?;
-        if !self.root.join(id).join("source.json").is_file() {
-            return Err(CorpusError::NotFound(id.to_string()));
-        }
-        self.write_source(id, source)
-    }
-
-    /// Shared by `store`/`store_complete`: writes every section body first,
+    /// Shared internal helper for `store`: writes every section body first,
     /// `source.json` (meta+toc) last — see the module doc comment on why
     /// `source.json`'s existence is the commit marker. Wipes `sections/`
-    /// first so a retry/completion that fetches a *different* section set
-    /// never leaves the previous attempt's files orphaned in the TOC.
+    /// first so a retry that fetches a *different* section set never leaves
+    /// the previous attempt's files orphaned in the TOC.
     fn write_source(&self, id: &str, source: &FetchedSource) -> Result<()> {
         let dir = self.root.join(id);
         let path = dir.join("source.json");
@@ -258,14 +243,14 @@ impl Corpus {
             .ok_or_else(|| CorpusError::NotFound(format!("{id}#{locator}")))
     }
 
-    /// Stores a downloaded figure's bytes (§11.1 item 5), addressed by a
-    /// content-derived filename (`<sha256-prefix>.<ext>`, mirrors
-    /// `locator_filename`'s hash idiom) rather than the original URL — so
-    /// there's no path-traversal surface and no leak of the source host's
-    /// URL structure into the corpus. Idempotent by construction: the same
-    /// bytes always hash to the same filename, so a re-download harmlessly
-    /// overwrites identical content instead of needing an existence check
-    /// like `store`'s `source.json` guard.
+    /// Stores an asset's bytes under `<id>/assets/<filename>` — today that's
+    /// always the canonical PDF (`source.pdf`, written by `write_source`
+    /// whenever a backend delivered one, §4/§11); the filename-based
+    /// addressing (rather than the original URL) is what makes
+    /// `get_source_asset` safe to serve back with a `nosniff`/immutable
+    /// cache header. Idempotent by construction: writing the same filename
+    /// again harmlessly overwrites, no existence check needed like `store`'s
+    /// `source.json` guard.
     pub fn store_asset(&self, id: &str, filename: &str, bytes: &[u8]) -> Result<()> {
         let id = safe_id(id)?;
         let filename = safe_id(filename)?;
@@ -278,8 +263,9 @@ impl Corpus {
         Ok(())
     }
 
-    /// Loads a previously downloaded figure's bytes (§11.1 item 5) — what
-    /// `GET /api/sources/{id}/assets/{filename}` serves.
+    /// Loads a previously stored asset's bytes — what
+    /// `GET /api/sources/{id}/assets/{filename}` serves (today, always the
+    /// canonical PDF, §4/§11).
     pub fn load_asset(&self, id: &str, filename: &str) -> Result<Vec<u8>> {
         let id = safe_id(id)?;
         let filename = safe_id(filename)?;
@@ -325,8 +311,8 @@ impl Corpus {
         Ok(out)
     }
 
-    /// Appends one human-readable line to `SOURCES.md` (§11 requires this for web
-    /// sources; we do it for every source so the corpus is browsable by a human).
+    /// Appends one human-readable line to `SOURCES.md` — every source gets a
+    /// line (§11) so the corpus is browsable by a human, not just the app.
     fn append_manifest(&self, meta: &SourceMeta) -> Result<()> {
         use std::io::Write;
         let manifest = self.root.join("SOURCES.md");
@@ -349,10 +335,7 @@ impl Corpus {
         } else {
             format!(" — {}", meta.authors.join(", "))
         };
-        let origin = match &meta.origin {
-            Origin::Web { url } => format!("web: {url}"),
-            other => format!("{other:?}"),
-        };
+        let origin = format!("{:?}", meta.origin);
         writeln!(
             f,
             "- `{}` — **{}**{authors} · {origin} · {}",
@@ -434,15 +417,12 @@ mod tests {
                 kind: SourceKind::Book,
                 license: "CC BY 4.0".into(),
                 origin: Origin::OpenStax,
-                handle: String::new(),
-                complete: true,
                 pdf_asset: None,
             },
             sections: vec![Section {
                 locator: "chap:2;sec:1".into(),
                 title: "The Limit of a Function".into(),
                 text: "A limit describes the value a function approaches.".into(),
-                html: "<p>A limit describes the value a function approaches.</p>".into(),
             }],
             pdf: None,
         }
@@ -528,7 +508,6 @@ mod tests {
             locator: "chap:2;sec:2".into(),
             title: "Continuity".into(),
             text: "A function is continuous where it has no breaks.".into(),
-            html: "<p>A function is continuous where it has no breaks.</p>".into(),
         });
         assert!(corpus.store(&first).unwrap(), "first attempt writes");
 
@@ -554,71 +533,6 @@ mod tests {
         let index = corpus.load_index(&second.meta.id).unwrap();
         assert_eq!(index.toc.len(), 1);
         assert_eq!(index.toc[0].locator, "chap:2;sec:1");
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// §11.1 item 6: `store_complete` overwrites an existing entry (the one
-    /// sanctioned exception to `store`'s no-op guard) with a fuller fetch,
-    /// and flips `complete` to `true`.
-    #[test]
-    fn store_complete_overwrites_a_capped_entry() {
-        let dir =
-            std::env::temp_dir().join(format!("learnive-corpus-complete-{}", std::process::id()));
-        fs::remove_dir_all(&dir).ok();
-        let corpus = Corpus::open(&dir).unwrap();
-
-        let mut capped = sample("calculus-v1-complete1234");
-        capped.meta.complete = false;
-        assert!(
-            corpus.store(&capped).unwrap(),
-            "first (capped) store writes"
-        );
-
-        let mut full = sample("calculus-v1-complete1234");
-        full.meta.complete = true;
-        full.sections.push(Section {
-            locator: "chap:2;sec:2".into(),
-            title: "Continuity".into(),
-            text: "A function is continuous where it has no breaks.".into(),
-            html: "<p>A function is continuous where it has no breaks.</p>".into(),
-        });
-        corpus
-            .store_complete(&full)
-            .expect("store_complete overwrites");
-
-        let index = corpus.load_index(&full.meta.id).unwrap();
-        assert!(index.meta.complete, "completion marks the source complete");
-        assert_eq!(
-            index.toc.len(),
-            2,
-            "the fuller fetch's sections replace the capped ones"
-        );
-
-        // `store` (not `store_complete`) is still a no-op against the now-complete entry.
-        assert!(
-            !corpus.store(&capped).unwrap(),
-            "store never overwrites an existing entry, even a capped one"
-        );
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// `store_complete` refuses to create a new entry — it exists only to
-    /// replace an already-acquired source, never as a `store` bypass.
-    #[test]
-    fn store_complete_errors_when_the_source_does_not_exist_yet() {
-        let dir = std::env::temp_dir().join(format!(
-            "learnive-corpus-complete-missing-{}",
-            std::process::id()
-        ));
-        fs::remove_dir_all(&dir).ok();
-        let corpus = Corpus::open(&dir).unwrap();
-
-        let src = sample("calculus-v1-nevercalled1234");
-        let err = corpus.store_complete(&src).unwrap_err();
-        assert!(matches!(err, CorpusError::NotFound(_)));
-        assert!(!corpus.has(&src.meta.id));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -654,13 +568,14 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// §S19 item 1 regression: `Section` gained `html` with `#[serde(default)]`
-    /// specifically so every `source.json` already on disk (written before this
-    /// field existed) keeps loading — a source is fetched once and reused
-    /// (§4/§11 immutable corpus), so this file predates the field permanently
-    /// until an explicit re-ingest/completion pass (§11.1 item 6) backfills it.
+    /// A `source.json` written before `SourceMeta`/`Section` carried fields
+    /// that have since been added and removed (`handle`, `complete`, `html`)
+    /// must still load — a source is fetched once and reused (§4/§11
+    /// immutable corpus), so an old entry on disk permanently predates
+    /// whichever fields the struct has gained/dropped since, and there is no
+    /// automatic migration (see the module doc comment).
     #[test]
-    fn loads_a_pre_html_field_source_json_without_the_html_key() {
+    fn loads_a_legacy_source_json_missing_fields_added_or_removed_since() {
         let dir =
             std::env::temp_dir().join(format!("learnive-corpus-oldshape-{}", std::process::id()));
         fs::remove_dir_all(&dir).ok();
@@ -689,10 +604,6 @@ mod tests {
         assert_eq!(
             loaded.sections[0].text,
             "An integral sums infinitesimal pieces."
-        );
-        assert_eq!(
-            loaded.sections[0].html, "",
-            "missing key defaults to empty, not a decode error"
         );
 
         fs::remove_dir_all(&dir).ok();

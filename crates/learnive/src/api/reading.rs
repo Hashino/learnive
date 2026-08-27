@@ -27,18 +27,11 @@ pub(super) fn escape_html(s: &str) -> String {
 
 /// Read-only source viewer (§11): serves the corpus's meta + table of
 /// contents for a citation's `data-source-id`, so `<cite>` has somewhere real
-/// to point — the minimal version of the eventual PDF split-view (§11.1),
-/// which needs the original file and page-level locations neither
-/// acquisition backend nor the corpus currently stores. **Deliberately not
-/// the whole book** (§11.1 item 4, S19): this used to return the entire
-/// `FetchedSource` — every section's text+html — which meant opening the
-/// panel on a full book shipped megabytes of JSON per click. A section's body
-/// now comes separately, on demand, from `get_source_section`. GET, mutates
-/// nothing: the source viewer is read-only by design (§9/§11) — any note the
-/// learner wants to make lands in the living document, never on the source
-/// itself. Not document-scoped: the corpus (`state.corpus`) is one shared,
-/// global store (§4/§11), so this sits beside `/api/documents/...` rather
-/// than under it.
+/// to point. GET, mutates nothing: the source viewer is read-only by design
+/// (§9/§11) — any note the learner wants to make lands in the living
+/// document, never on the source itself. Not document-scoped: the corpus
+/// (`state.corpus`) is one shared, global store (§4/§11), so this sits beside
+/// `/api/documents/...` rather than under it.
 pub async fn get_source(
     State(state): State<AppState>,
     Path(source_id): Path<String>,
@@ -50,108 +43,16 @@ pub async fn get_source(
         .map_err(|e| ApiError::NotFound(e.to_string()))
 }
 
-/// Optional query on [`get_source_section`]: the citation's own text (§11.1
-/// item 8, S19) — resolved against the section to deep-link the exact passage.
-#[derive(Debug, Deserialize)]
-pub struct SectionQuery {
-    #[serde(default)]
-    quote: Option<String>,
-}
-
-/// The matched span, pre-split out of `section.text` (§11.1 item 8) so the
-/// client never has to interpret an offset itself: `resolve_quote` returns a
-/// **UTF-8 byte** range, valid only against the exact Rust `&str` it was
-/// computed from — reusable as-is client-side only by coincidence (ASCII-only
-/// text). JS string indices are UTF-16 code units, so shipping the raw
-/// `(usize, usize)` and re-slicing with `.slice(start, end)` in `node.js`
-/// silently lands on the wrong span the moment anything before the match is
-/// non-ASCII (real book/article text routinely is — verified live against
-/// `euclidean-geometry-3aa895e7`'s Wikipedia-sourced prose, which is full of
-/// multi-byte dashes and quotes: a byte offset sent as-is highlighted "ty
-/// follows, one conclude" for the query "the law of contradiction"). Slicing
-/// once, correctly, on the Rust side removes the ambiguity instead of
-/// asking the client to get UTF-8-vs-UTF-16 indexing right.
-#[derive(Debug, Serialize)]
-pub struct HighlightSpan {
-    before: String,
-    matched: String,
-    after: String,
-}
-
-/// A section plus, when a `quote` was asked for and resolved, the matched
-/// span (§11.1 item 8).
-#[derive(Debug, Serialize)]
-pub struct SectionWithHighlight {
-    #[serde(flatten)]
-    section: crate::source::Section,
-    highlight: Option<HighlightSpan>,
-}
-
-/// One section's full body (text + sanitized HTML), addressed by locator
-/// (§11.1 item 4, S19) — what a citation click loads once it knows which
-/// section it's pointing at, and what the reader loads as the learner
-/// navigates the table of contents. Read-only, same rationale as `get_source`.
-///
-/// §11.1 item 8: a citation's own text is the excerpt-derived claim the model
-/// wrote (`Citation.text`, `learnive_core::node`) — passed here as `?quote=`
-/// and resolved with `learnive_core::resolve_quote` (the same fuzzy
-/// exact/whitespace matcher already used for user text selections) against
-/// the section's plain text, which is what the client actually renders today
-/// (the real HTML reader, item 7, is not built yet — resolving against
-/// `section.html` instead is deferred until something renders it). No match
-/// (a paraphrase too far from the source, or a hallucinated locator) just
-/// means no highlight — never an error, the section still loads.
-pub async fn get_source_section(
-    State(state): State<AppState>,
-    Path((source_id, locator)): Path<(String, String)>,
-    Query(query): Query<SectionQuery>,
-) -> Result<Json<SectionWithHighlight>, ApiError> {
-    let section = state
-        .corpus
-        .load_section(&source_id, &locator)
-        .map_err(|e| ApiError::NotFound(e.to_string()))?;
-    let highlight = query
-        .quote
-        .as_deref()
-        .map(str::trim)
-        .filter(|q| !q.is_empty())
-        .and_then(|quote| {
-            let (start, end) = learnive_core::resolve_quote(
-                &section.text,
-                &learnive_core::QuoteSelector {
-                    exact: quote.to_string(),
-                    prefix: None,
-                    suffix: None,
-                },
-            )?;
-            Some(HighlightSpan {
-                before: section.text[..start].to_string(),
-                matched: section.text[start..end].to_string(),
-                after: section.text[end..].to_string(),
-            })
-        });
-    Ok(Json(SectionWithHighlight { section, highlight }))
-}
-
-/// Serves a figure downloaded into the corpus by `source::localize_images`
-/// (§11.1 item 5, S19) — what an `<img src>` rewritten in a section's HTML
-/// actually points at. Read-only, same rationale as the other source
-/// endpoints. The filename is `<content-hash>.<ext>`, so the response is
-/// content-addressed and safe to cache forever; `Content-Type` is derived
-/// from the filename's extension the server itself chose at download time
-/// (never sniffed from the bytes), and restricted to the same raster-only
-/// whitelist `source::image_extension` downloads — `image/svg+xml` is
-/// deliberately never in that set (see its doc comment), so this handler
-/// never serves anything a browser would treat as active content.
+/// Serves the canonical PDF artifact for a source (§4/§11: PDF is the sole
+/// canonical, displayed format — a section's extracted text is index-only).
+/// Read-only, same rationale as the other source endpoints. The filename is
+/// always `source.pdf` (`SourceMeta.pdf_asset`); `Content-Type` is fixed,
+/// never sniffed from the bytes.
 pub async fn get_source_asset(
     State(state): State<AppState>,
     Path((source_id, filename)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     let mime = match filename.rsplit('.').next() {
-        Some("png") => "image/png",
-        Some("jpg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
         Some("pdf") => "application/pdf",
         _ => return Err(ApiError::BadRequest("unsupported asset type".to_string())),
     };
@@ -297,35 +198,22 @@ fn interaction_reading_context(node: &Node, anchor: &Anchor) -> Option<String> {
 pub(super) fn question_header(
     question: &str,
     anchor: &Anchor,
-    source: Option<&SourceSelection>,
     locale: crate::locale::Locale,
 ) -> String {
     let asked = crate::locale::pick(locale, "You asked:", "Você perguntou:");
     let about = crate::locale::pick(locale, "about", "sobre");
-    let in_source = crate::locale::pick(locale, "in the source", "na fonte");
     let mut out = format!(
         "<p class=\"question\"><strong>{asked}</strong> {}",
         escape_html(question)
     );
-    // A source-panel selection (§11.1 item 9) takes priority over the node's
-    // own anchor quote when both are present: the anchor quote is `None`
-    // here in that case anyway (the anchor points at the reading-line block,
-    // not a selection — see `ask_question`), but a future caller passing
-    // both should still show what the learner actually selected.
-    let quote = source
-        .map(|s| (s.quote.trim(), Some(in_source)))
-        .filter(|(q, _)| !q.is_empty())
-        .or_else(|| {
-            anchor
-                .quote
-                .as_ref()
-                .map(|q| (q.exact.trim(), None))
-                .filter(|(q, _)| !q.is_empty())
-        });
-    if let Some((exact, label)) = quote {
-        let label = label.unwrap_or(about);
+    let quote = anchor
+        .quote
+        .as_ref()
+        .map(|q| q.exact.trim())
+        .filter(|q| !q.is_empty());
+    if let Some(exact) = quote {
         out.push_str(&format!(
-            " <span class=\"about\">{label} \u{201c}{}\u{201d}</span>",
+            " <span class=\"about\">{about} \u{201c}{}\u{201d}</span>",
             escape_html(&head_chars(exact, QUOTE_HEADER_BUDGET))
         ));
     }
@@ -452,27 +340,10 @@ pub(super) fn folded_node_states(
     Ok(states)
 }
 
-/// A question asked from a selection inside the read-only source panel
-/// (§11.1 item 9), rather than from the living document itself. The panel
-/// has no `data-block-id`s to anchor to (§4.3 anchoring is block-based, and
-/// source sections aren't node content), so `AskReq.anchor` still names a
-/// real block in *this* node — the reading line, same as an unselected
-/// "ask about where I am" — and this field carries the source excerpt as
-/// additional context, the same additive role `grounding_for`'s citations
-/// already play in the prompt.
-#[derive(Debug, Deserialize)]
-pub struct SourceSelection {
-    pub(crate) source_id: String,
-    pub(crate) locator: String,
-    pub(crate) quote: String,
-}
-
 #[derive(Deserialize)]
 pub struct AskReq {
     question: String,
     anchor: Anchor,
-    #[serde(default)]
-    source: Option<SourceSelection>,
 }
 
 /// Discriminated by `kind` (§S8). Both kinds land *in the document*, at
@@ -529,29 +400,6 @@ pub async fn ask_question(
     let node = state.store.read_node(&owner_id, &node_id)?;
     resolve_anchor(&node, &body.anchor)?;
     let context = reading_context(&node, &body.anchor);
-    // §11.1 item 9: a source-panel selection has no block in this node to
-    // resolve against, so it rides alongside the node anchor's own context
-    // instead of replacing it — the tutor sees both where the learner is
-    // reading and what they selected in the source. Best-effort: an
-    // unresolvable `source_id`/`locator` (source deleted from the corpus
-    // between the selection and the send) just drops the extra context,
-    // same graceful-degrade contract every other optional context here uses.
-    let source_context = body.source.as_ref().and_then(|s| {
-        let section = state.corpus.load_section(&s.source_id, &s.locator).ok()?;
-        let quote = s.quote.trim();
-        if quote.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "Selected in the source \"{}\": \"{}\"\n",
-            section.title, quote
-        ))
-    });
-    let context = match (source_context, context) {
-        (Some(sc), Some(c)) => Some(format!("{sc}\n{c}")),
-        (Some(sc), None) => Some(sc),
-        (None, c) => c,
-    };
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let node_tail = tail_chars(&node.content.html, NODE_TAIL_BUDGET);
 
@@ -638,7 +486,7 @@ pub async fn ask_question(
                 ensure_block_ids(&render_math(&generated.html), &format!("{move_id}-b"));
             let body_html = format!(
                 "{}\n<div class=\"answer\">{answer_html}</div>",
-                question_header(question, &body.anchor, body.source.as_ref(), locale)
+                question_header(question, &body.anchor, locale)
             );
             state.store.append_interaction(
                 &owner_id,
@@ -702,7 +550,7 @@ pub async fn ask_question(
             );
             let body_html = format!(
                 "{}\n<p>↳ spawned a new section: {}</p>",
-                question_header(question, &body.anchor, body.source.as_ref(), locale),
+                question_header(question, &body.anchor, locale),
                 escape_html(&sub_title)
             );
             state.store.append_interaction(

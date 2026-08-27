@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::retrieval::Retriever;
-use crate::source::{Corpus, SearchHit, Source};
+use crate::source::{SearchHit, Source};
 
 // ---------------------------------------------------------------------------
 // Cold start (§6.1, §S4): topic → proposed objective → confirmed objective +
@@ -1288,8 +1288,8 @@ pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOu
     }
 }
 
-/// Downloads, localizes, stores, and reindexes a chosen hit. `None` on any
-/// failure — every failure mode is recoverable by the caller trying another
+/// Downloads, stores, and reindexes a chosen hit. `None` on any failure —
+/// every failure mode is recoverable by the caller trying another
 /// hit/query/backend.
 async fn fetch_and_store(
     state: &AppState,
@@ -1298,7 +1298,7 @@ async fn fetch_and_store(
     hit: &SearchHit,
 ) -> Option<String> {
     let corpus = &state.corpus;
-    let mut doc = match source.fetch(hit).await {
+    let doc = match source.fetch(hit).await {
         Ok(d) => d,
         // Download/normalize failure (e.g. mirror reset mid-stream) — log it
         // so a flaky acquisition is visible, then let the caller try the next
@@ -1309,17 +1309,6 @@ async fn fetch_and_store(
         }
     };
     let title = doc.meta.title.clone();
-    // §11.1 item 5: download figures into the corpus and rewrite `src` to
-    // point at them, before `store` ever writes a section to disk.
-    crate::source::localize_images(
-        &crate::source::image_client(),
-        corpus,
-        &doc.meta.id,
-        &mut doc.sections,
-    )
-    .await;
-    let complete = doc.meta.complete;
-    let source_id = doc.meta.id.clone();
     match corpus.store(&doc) {
         Ok(true) => {
             let mut r = retriever.write().await;
@@ -1328,113 +1317,15 @@ async fn fetch_and_store(
                 return None;
             }
             eprintln!("grounded on \"{title}\" ({} chunks)", r.len());
-            // §11.1 item 6: first acquisition was capped (§14 latency bound)
-            // — kick a fire-and-forget background pass to fetch the rest,
-            // same non-blocking convention as `spawn_acquisition` itself.
-            if !complete {
-                spawn_completion(state.clone(), Arc::clone(source), source_id);
-            }
             Some(title)
         }
-        // Already in the corpus and indexed — still a successful ground. Not
-        // a trigger for completion: a legacy/still-partial entry here was
-        // either already completed, or its completion is already running /
-        // will be retried on the next acquisition of it going through the
-        // `Ok(true)` branch above — this is deliberately not a retry loop.
+        // Already in the corpus and indexed — still a successful ground.
         Ok(false) => Some(title),
         Err(e) => {
             eprintln!("corpus store failed: {e}");
             None
         }
     }
-}
-
-/// One search→fetch→store→reindex attempt against a single backend. `None`
-/// on any failure or empty result — every failure mode here is recoverable
-/// by trying the next query/backend in `acquire`'s chain, so this only logs,
-/// never surfaces an error to the caller.
-/// §11.1 item 6: background completion pass for a source whose first
-/// acquisition was capped (`SourceMeta.complete == false`) — re-fetches
-/// ignoring the cap via [`Source::fetch_complete`] and overwrites the corpus
-/// entry with [`Corpus::store_complete`], the one sanctioned exception to
-/// `store`'s no-op-if-exists guard. Fire-and-forget: failures are logged
-/// only, same convention as `fetch_and_store` — a still-partial source
-/// stays fully usable, just missing later sections until this succeeds (or a
-/// future acquisition of the same source retries it; nothing here retries on
-/// its own).
-async fn complete_source(
-    source: &Source,
-    corpus: &Corpus,
-    retriever: &Arc<RwLock<Retriever>>,
-    source_id: &str,
-) {
-    let index = match corpus.load_index(source_id) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("completion: load_index failed for {source_id}: {e}");
-            return;
-        }
-    };
-    if index.meta.complete {
-        return;
-    }
-    if index.meta.handle.is_empty() {
-        // Acquired before `SourceMeta.handle` existed — nothing to re-fetch
-        // against; stays as-is, same non-destructive stance as the `html`
-        // backfill (item 1's `#[serde(default)]`).
-        return;
-    }
-    let hit = crate::source::SearchHit {
-        title: index.meta.title.clone(),
-        authors: index.meta.authors.clone(),
-        kind: index.meta.kind,
-        origin: index.meta.origin.clone(),
-        license: index.meta.license.clone(),
-        handle: index.meta.handle.clone(),
-        pages: None,
-        size_bytes: None,
-    };
-    let mut doc = match source.fetch_complete(&hit).await {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("completion fetch failed for {source_id}: {e}");
-            return;
-        }
-    };
-    // The completion fetch derives its own corpus id from the (re-fetched)
-    // title/handle — force it back to the id already in the corpus so this
-    // overwrites the same entry instead of landing beside it under a
-    // slightly different id.
-    doc.meta.id = source_id.to_string();
-    crate::source::localize_images(
-        &crate::source::image_client(),
-        corpus,
-        source_id,
-        &mut doc.sections,
-    )
-    .await;
-    if let Err(e) = corpus.store_complete(&doc) {
-        eprintln!("completion store failed for {source_id}: {e}");
-        return;
-    }
-    let mut r = retriever.write().await;
-    if let Err(e) = r.reindex(corpus) {
-        eprintln!("reindex after completion failed: {e}");
-        return;
-    }
-    eprintln!("completed \"{}\" ({} chunks)", doc.meta.title, r.len());
-}
-
-/// Spawns [`complete_source`] fire-and-forget, right after a successful
-/// capped first acquisition. No-ops if grounding is disabled (no retriever)
-/// — same guard as `spawn_acquisition`.
-fn spawn_completion(state: AppState, source: Arc<Source>, source_id: String) {
-    let Some(retriever) = state.retriever.clone() else {
-        return;
-    };
-    tokio::spawn(async move {
-        complete_source(&source, &state.corpus, &retriever, &source_id).await;
-    });
 }
 
 /// Background source acquisition (§11.1/§10), fire-and-forget: cold start

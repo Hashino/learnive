@@ -55,7 +55,6 @@ impl MockSource {
                 Section {
                     locator: "chap:1;sec:1".into(),
                     title: format!("What is {topic}?"),
-                    html: format!("<p>{text}</p>"),
                     text,
                 }
             },
@@ -68,7 +67,6 @@ impl MockSource {
                 Section {
                     locator: "chap:1;sec:2".into(),
                     title: format!("Why {topic} matters"),
-                    html: format!("<p>{text}</p>"),
                     text,
                 }
             },
@@ -81,8 +79,6 @@ impl MockSource {
                 kind: hit.kind,
                 license: hit.license.clone(),
                 origin: hit.origin.clone(),
-                handle: hit.handle.clone(),
-                complete: true,
                 pdf_asset: None,
             },
             sections,

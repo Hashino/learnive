@@ -29,10 +29,10 @@ serde_json = "1"
 scraper = "0.20"
 # Hot-swap the AI provider when the user (re)configures it in /setup (§12).
 arc-swap = "1"
-# Source normalization (§11.1): acquired HTML → extracted text.
-html2text = "0.17"
-# Source ingestion sanitization (§11.1/S19): whitelist acquired HTML once,
-# at ingestion, before it's stored in the corpus or ever reaches a browser.
+# HTML sanitization: kept for the model-prose side (§3.1's still-open
+# server-side sanitization item — the client does it today, `core.js:241`).
+# The source-ingestion use of this crate (§11.1/S19) was removed in S28
+# along with the whole HTML-source pipeline; this dependency was not.
 ammonia = "4"
 # Retrieval layer (§10): semantic embeddings (static, no onnxruntime) + chunking.
 model2vec-rs = "0.2"
@@ -41,7 +41,6 @@ async-stream = "0.3"
 futures-util = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
-lol_html = "3.0.1"
 # Source acquisition (§11.1): PDF-backed backends (LibGen/Sci-Hub) extract
 # text from the downloaded PDF into the normalized corpus representation.
 pdf-extract = "0.12"

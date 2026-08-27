@@ -326,6 +326,12 @@ pub struct ProposedOutlineNode {
 /// so the cost tradeoff favors correctness: a wrong answer here isn't graded
 /// and corrected later like a bad exercise — it silently ships a wrong
 /// curriculum shape.
+/// **Superseded-pending-S27e (PLAN.md S28 item 6):** the pivot's reading-list
+/// cold start (§27) replaces this concept-outline-by-prerequisite call with
+/// one that walks a matched bibliography instead — but S27 isn't built yet,
+/// so this stays the app's only working path from a confirmed objective to
+/// an outline. Left wired deliberately: removing it now would break cold
+/// start with no replacement, not just leave dead code.
 pub async fn propose_outline(
     ai: &Ai,
     topic: &str,

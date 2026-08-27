@@ -236,15 +236,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Read-only source viewer (§11) — the corpus is global, not per-document
         // (§4), so this lives outside the `/api/documents/{doc}` tree; a citation
-        // click resolves here for its `data-source-id`. Meta+toc only (§11.1
-        // item 4, S19); a section's body is a separate on-demand fetch below.
+        // click resolves here for its `data-source-id`. Meta+toc only: the
+        // display surface is the browser's native PDF viewer, not this app's
+        // own reader (§4/§11, post-pivot).
         .route("/api/sources/{id}", get(api::get_source))
-        .route(
-            "/api/sources/{id}/sections/{locator}",
-            get(api::get_source_section),
-        )
-        // Downloaded figures (§11.1 item 5, S19) — content-addressed, so the
-        // response is safe to cache forever.
+        // The canonical PDF artifact (§4/§11) — served as-is for the native
+        // viewer to render; content-addressed by source id, safe to cache.
         .route(
             "/api/sources/{id}/assets/{filename}",
             get(api::get_source_asset),

@@ -533,40 +533,6 @@ body.source-resizing #askBar {
   font-weight: 700;
   color: var(--heading-2);
 }
-#sourceBody section {
-  margin-bottom: 1.4rem;
-}
-#sourceBody section > h3 {
-  font-size: 0.95rem;
-  color: var(--muted);
-  margin-bottom: 0.3rem;
-}
-#sourceBody section.current {
-  border-left: 3px solid var(--accent);
-  padding-left: 0.7rem;
-  margin-left: -0.9rem;
-}
-/* §11.1 item 7: `.sourceSectionBody` now renders real section HTML
-   (`renderSectionBody`), not flattened text — `white-space: pre-wrap` used
-   to sit here to wrap that flat text, but against real prose it would
-   preserve the source markup's own incidental whitespace/newlines as
-   visible extra gaps. Plain `p` styling (line-height only) is what real
-   paragraphs need; word-wrap is the browser default already. */
-#sourceBody p {
-  line-height: 1.5;
-}
-#sourceBody figure img {
-  display: block;
-  margin: 0 auto;
-}
-/* Passage deep-link (§11.1 item 8, S19): the browser's UA `mark` style
-   resolves against `color-scheme` (set on `:root`), not against this app's
-   own tokens, so it was never actually verified against the dark theme —
-   pin it to the theme's own accent instead of trusting the default. */
-#sourceBody mark {
-  background: var(--accent);
-  color: var(--nord0);
-}
 
 .sidebar-head {
   display: flex;
