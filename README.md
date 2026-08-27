@@ -8,7 +8,7 @@ A living document is a sequence of **chapter/section-sized nodes**, each generat
 
 ## Status
 
-The core loop works: cold start → outline → streamed node generation → locked-rubric grading → remediation/advance, usable in the browser. A 2026-08-23/26 architecture pivot is in progress (see `PLAN.md`'s S27/S28): node granularity moved from atomic concept to book chapter/section, sources moved to PDF-only with the browser's native viewer, and source acquisition moved to a local file library you supply — no source is fetched from the network. Parts of this are still mid-migration; `PLAN.md` tracks exactly what's built vs. planned.
+The core loop works: cold start → outline → streamed node generation → locked-rubric grading → remediation/advance, usable in the browser. A 2026-08-23/26 architecture pivot is in progress (see `PLAN.md`'s S27/S28): node granularity moved from atomic concept to book chapter/section, sources moved to PDF-only with the browser's native viewer, and source acquisition became two-tier: an automatic backend when one is configured (none is, today — the slot is deliberately empty), falling back to a local file library you supply for anything it doesn't resolve. Parts of this are still mid-migration; `PLAN.md` tracks exactly what's built vs. planned.
 
 ## Requirements
 
