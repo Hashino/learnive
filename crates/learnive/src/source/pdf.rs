@@ -1,0 +1,619 @@
+//! Reading a PDF's structure: text, embedded outline (bookmarks), and page
+//! map (§11, PLAN.md S27b).
+//!
+//! `pdf-extract` (already a dependency — see `fetched_from_pdf`/`extract_pdf_text`
+//! in `source/mod.rs`, used by the remote PDF-backed acquisition backends) only
+//! extracts body text; it does not read a PDF's `/Outlines` (bookmarks) or
+//! `/PageLabels` (front-matter numbering distinct from physical page index).
+//! Both matter for this pivot: the sumário is the input to contextual
+//! chapter/section outline expansion (§6.3, later slices S27e/g), and the page
+//! map is what a citation deep-link (`#page=N`, S27j) needs to point at the
+//! page a book itself calls "page N", not just the Nth physical sheet.
+//! `lopdf` reads both.
+//!
+//! **Deliberately independent of `fetched_from_pdf`/`extract_pdf_text`** even
+//! though it duplicates the "spill best-effort, never panic" shape — sharing
+//! that code would mean touching its call sites, which live in the
+//! LibGen/Sci-Hub backends this slice must not touch (PLAN.md S27b brief).
+//!
+//! **Path-based entry point, not bytes:** `Source::LocalPdf`'s library
+//! (`source/local.rs`) hands out PDFs already sitting on disk under
+//! `<data>/library/`, so there is no in-memory-only caller to serve, and
+//! `pdf-extract`'s own API is path-based anyway.
+//!
+//! **Best-effort like `extract_pdf_text`,** but only for the *parsing*, not
+//! for reading the file: a PDF with no `/Outlines` yields an empty outline,
+//! not an error; a PDF with no `/PageLabels` falls back to plain physical
+//! page numbers ("1", "2", ...), not an error. Only a genuinely
+//! unreadable/corrupt file (`lopdf::Document::load` failing outright) is an
+//! error here.
+//!
+//! No caller yet — this is a standalone, testable utility, matching how S27a
+//! landed with a passing test and no caller. Wiring into `Source::LocalPdf`
+//! and the acervo gate is S27c/e and later, out of this slice's scope.
+
+use std::path::Path;
+
+/// One entry in a PDF's embedded outline (bookmark) tree. Mirrors the PDF's
+/// real `/Outlines` nesting (chapter → section → ...) rather than flattening
+/// it: the pivot's node granularity is exactly chapter/section (§6.3), and
+/// that hierarchy is real information the PDF already carries for free —
+/// losing it here would mean re-deriving it heuristically later for no
+/// reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineEntry {
+    pub title: String,
+    /// 1-based physical page the bookmark's destination points at.
+    pub page: usize,
+    pub children: Vec<OutlineEntry>,
+}
+
+/// A single `/PageLabels` number-tree run: from physical page `start`
+/// (0-based) onward, until the next run's `start`, pages are labelled with
+/// `style` (or no numeric part at all, if the PDF omitted `/S`) prefixed by
+/// `prefix`, counting up from `start_num`.
+#[derive(Debug, Clone, PartialEq)]
+struct PageLabelRun {
+    start: usize,
+    style: Option<LabelStyle>,
+    prefix: String,
+    start_num: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelStyle {
+    Decimal,
+    UpperRoman,
+    LowerRoman,
+    UpperAlpha,
+    LowerAlpha,
+}
+
+/// A PDF's page-numbering map: physical page count, plus — when the PDF
+/// carries a `/PageLabels` number tree — the label the book itself uses for
+/// a given physical page (front matter in roman numerals, body in arabic,
+/// etc.). Falls back to the plain 1-based physical page number when the PDF
+/// has no `/PageLabels`, which is the common case and must never be an
+/// error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageMap {
+    pub page_count: usize,
+    labels: Vec<PageLabelRun>,
+}
+
+impl PageMap {
+    /// The display label for a 1-based physical page. Falls back to the
+    /// plain physical page number (as a string) when the PDF has no
+    /// `/PageLabels` at all (no runs to match against). When it does, the
+    /// last run extends to cover every later page (a number tree has no
+    /// explicit end), so a page past the document's own page count still
+    /// gets a computed label, not a fallback — callers that care should
+    /// bound `page` by `page_count` themselves.
+    pub fn label(&self, page: usize) -> String {
+        if page == 0 {
+            return page.to_string();
+        }
+        let idx0 = page - 1;
+        match self.labels.iter().rev().find(|run| run.start <= idx0) {
+            None => page.to_string(),
+            Some(run) => {
+                let n = run.start_num + (idx0 - run.start) as i64;
+                let numeric = match run.style {
+                    Some(LabelStyle::Decimal) => n.to_string(),
+                    Some(LabelStyle::UpperRoman) => to_roman(n),
+                    Some(LabelStyle::LowerRoman) => to_roman(n).to_lowercase(),
+                    Some(LabelStyle::UpperAlpha) => to_alpha(n, true),
+                    Some(LabelStyle::LowerAlpha) => to_alpha(n, false),
+                    None => String::new(),
+                };
+                format!("{}{numeric}", run.prefix)
+            }
+        }
+    }
+}
+
+/// A PDF's extracted structure: index-only text (never displayed — §11,
+/// the original PDF stays the canonical, displayed artifact), the same text
+/// split per physical page, the embedded outline tree, and the page map.
+///
+/// `page_texts` is carried alongside `text` (not derived from it — `text` is
+/// `pdf_extract::extract_text`'s single-string output, `page_texts` is the
+/// separate `extract_text_by_pages` call) because a later slice needs it:
+/// the outline gives a chapter's starting *page*, and slicing that chapter's
+/// own text out of one flat string would mean re-deriving page boundaries
+/// `pdf-extract` already computed once. `text` stays as `page_texts.join("\n")`
+/// would produce it, for callers that don't care about page boundaries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfDocument {
+    pub text: String,
+    /// `text`, split per 1-based physical page (`page_texts[0]` is page 1).
+    pub page_texts: Vec<String>,
+    pub outline: Vec<OutlineEntry>,
+    pub pages: PageMap,
+}
+
+/// A genuinely unreadable/corrupt PDF — the only failure mode this module
+/// surfaces as an error (see the module doc's best-effort-for-parsing rule).
+#[derive(Debug)]
+pub struct PdfReadError(String);
+
+impl std::fmt::Display for PdfReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PdfReadError {}
+
+/// Reads a PDF from disk: extracted text (best-effort, empty string on
+/// failure — mirrors `extract_pdf_text`'s convention), the embedded outline
+/// (empty when absent), and the page map (plain physical numbers when no
+/// `/PageLabels`). Errors only when the file itself cannot be parsed as a
+/// PDF at all.
+pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
+    let path = path.as_ref();
+    let doc = lopdf::Document::load(path)
+        .map_err(|e| PdfReadError(format!("failed to read {}: {e}", path.display())))?;
+
+    let page_count = doc.get_pages().len();
+    let outline = read_outline(&doc);
+    let labels = read_page_labels(&doc);
+    let text = pdf_extract::extract_text(path).unwrap_or_default();
+    let page_texts = pdf_extract::extract_text_by_pages(path).unwrap_or_default();
+
+    Ok(PdfDocument {
+        text,
+        page_texts,
+        outline,
+        pages: PageMap { page_count, labels },
+    })
+}
+
+/// Reads the embedded outline via `lopdf`'s own `get_toc` (a flat,
+/// level-tagged list resolved against the page tree already), then
+/// reconstructs the hierarchy `get_toc` flattened away. Any failure —
+/// including the common case of no `/Outlines` at all — degrades to an
+/// empty outline, never an error (module doc's best-effort rule).
+fn read_outline(doc: &lopdf::Document) -> Vec<OutlineEntry> {
+    match doc.get_toc() {
+        Ok(toc) => build_outline_tree(&toc.toc),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Rebuilds the hierarchy from `lopdf::TocType`'s flat `(level, title,
+/// page)` list. `lopdf::Document::get_toc` numbers top-level entries level
+/// `1`, incrementing by one per nesting depth in the common case — but it
+/// silently *drops* an entry whose destination isn't in the page map while
+/// still emitting that entry's children at `level + 1` (see its own
+/// `get_toc`, which has no `else` branch when the page lookup misses), so a
+/// level jump of more than one is possible in the flat list. This walk
+/// handles that benignly: a dropped parent's children are simply promoted to
+/// its would-be level (`item.level < level` is the only break condition),
+/// never a panic or lost entries.
+fn build_outline_tree(toc: &[lopdf::TocType]) -> Vec<OutlineEntry> {
+    fn build(items: &[lopdf::TocType], idx: &mut usize, level: usize) -> Vec<OutlineEntry> {
+        let mut nodes = Vec::new();
+        while *idx < items.len() {
+            let item = &items[*idx];
+            if item.level < level {
+                break;
+            }
+            *idx += 1;
+            let children = build(items, idx, level + 1);
+            nodes.push(OutlineEntry {
+                title: item.title.clone(),
+                page: item.page,
+                children,
+            });
+        }
+        nodes
+    }
+    let mut idx = 0;
+    build(toc, &mut idx, 1)
+}
+
+/// Walks the catalog's `/PageLabels` number tree (`/Nums` directly, or
+/// `/Kids` for a subdivided tree) into a flat, sorted list of label runs.
+/// Absent `/PageLabels`, an absent catalog, or any malformed entry along the
+/// way degrades to an empty list — [`PageMap::label`] already falls back to
+/// plain physical numbers for that case.
+fn read_page_labels(doc: &lopdf::Document) -> Vec<PageLabelRun> {
+    let mut runs = Vec::new();
+    if let Ok(catalog) = doc.catalog()
+        && let Ok(root) = doc.get_dict_in_dict(catalog, b"PageLabels")
+    {
+        collect_number_tree(doc, root, &mut runs, 0);
+    }
+    runs.sort_by_key(|r| r.start);
+    runs
+}
+
+/// Recursion depth guard for a malformed/cyclic number tree — real
+/// `/PageLabels` trees are shallow (one level per few thousand pages), so
+/// this is far beyond anything legitimate.
+const MAX_NUMBER_TREE_DEPTH: usize = 16;
+
+fn collect_number_tree(
+    doc: &lopdf::Document,
+    node: &lopdf::Dictionary,
+    out: &mut Vec<PageLabelRun>,
+    depth: usize,
+) {
+    if depth > MAX_NUMBER_TREE_DEPTH {
+        return;
+    }
+    if let Ok(nums) = node.get(b"Nums").and_then(lopdf::Object::as_array) {
+        let mut pairs = nums.iter();
+        while let (Some(key_obj), Some(val_obj)) = (pairs.next(), pairs.next()) {
+            let Ok(start) = key_obj.as_i64() else {
+                continue;
+            };
+            if start < 0 {
+                continue;
+            }
+            let label_dict = match val_obj {
+                lopdf::Object::Reference(id) => {
+                    doc.get_object(*id).ok().and_then(|o| o.as_dict().ok())
+                }
+                lopdf::Object::Dictionary(d) => Some(d),
+                _ => None,
+            };
+            if let Some(label_dict) = label_dict {
+                out.push(parse_page_label(start as usize, label_dict));
+            }
+        }
+    }
+    if let Ok(kids) = node.get(b"Kids").and_then(lopdf::Object::as_array) {
+        for kid in kids {
+            if let lopdf::Object::Reference(id) = kid
+                && let Ok(kid_dict) = doc.get_object(*id).and_then(lopdf::Object::as_dict)
+            {
+                collect_number_tree(doc, kid_dict, out, depth + 1);
+            }
+        }
+    }
+}
+
+fn parse_page_label(start: usize, dict: &lopdf::Dictionary) -> PageLabelRun {
+    let style = dict
+        .get(b"S")
+        .ok()
+        .and_then(|o| o.as_name().ok())
+        .and_then(|name| match name {
+            b"D" => Some(LabelStyle::Decimal),
+            b"R" => Some(LabelStyle::UpperRoman),
+            b"r" => Some(LabelStyle::LowerRoman),
+            b"A" => Some(LabelStyle::UpperAlpha),
+            b"a" => Some(LabelStyle::LowerAlpha),
+            _ => None,
+        });
+    let prefix = dict
+        .get(b"P")
+        .ok()
+        .and_then(|o| o.as_str().ok())
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let start_num = dict
+        .get(b"St")
+        .ok()
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(1);
+    PageLabelRun {
+        start,
+        style,
+        prefix,
+        start_num,
+    }
+}
+
+/// Roman-numeral rendering (uppercase; `PageMap::label` lowercases for the
+/// `r` style) for the `/S /R` and `/S /r` `/PageLabels` styles (PDF 32000-1
+/// §12.4.2). `n <= 0` has no valid roman form and yields an empty string —
+/// PDF page numbering never goes below the label's own `/St`, which the spec
+/// requires to be a positive integer.
+fn to_roman(mut n: i64) -> String {
+    if n <= 0 {
+        return String::new();
+    }
+    const VALUES: [(i64, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    for &(value, symbol) in &VALUES {
+        while n >= value {
+            out.push_str(symbol);
+            n -= value;
+        }
+    }
+    out
+}
+
+/// Letter rendering for the `/S /A` and `/S /a` `/PageLabels` styles (PDF
+/// 32000-1 §12.4.2): `1..=26` is `a..=z`, then the letter repeats —
+/// `27` is `aa`, `28` is `bb`, ..., `52` is `zz`, `53` is `aaa`. This is
+/// **not** bijective base-26 (spreadsheet-column) numbering; the PDF spec's
+/// scheme repeats a single letter rather than combining different ones.
+fn to_alpha(n: i64, upper: bool) -> String {
+    if n <= 0 {
+        return String::new();
+    }
+    let n = n as u64;
+    let cycle = (n - 1) / 26 + 1;
+    let letter_index = ((n - 1) % 26) as u8;
+    let mut letter = (b'a' + letter_index) as char;
+    if upper {
+        letter = letter.to_ascii_uppercase();
+    }
+    std::iter::repeat_n(letter, cycle as usize).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Bookmark, Document, Object, ObjectId, Stream, dictionary};
+
+    /// Builds a minimal multi-page PDF with real, distinct text per page —
+    /// enough for `pdf-extract` to find something, and a page tree `lopdf`
+    /// can enumerate. Returns the document plus each page's `ObjectId`, so
+    /// tests can attach bookmarks/labels to specific pages without
+    /// re-deriving ids from the built document.
+    fn build_test_document(page_texts: &[&str]) -> (Document, Vec<ObjectId>) {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+
+        let mut page_ids = Vec::new();
+        for text in page_texts {
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                    Operation::new("Td", vec![72.into(), 700.into()]),
+                    Operation::new("Tj", vec![Object::string_literal(*text)]),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+
+        let count = page_ids.len() as i64;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().map(|&id| id.into()).collect::<Vec<Object>>(),
+                "Count" => count,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        (doc, page_ids)
+    }
+
+    /// Returns the `TempDir` guard alongside the saved file's path — the
+    /// caller must keep the guard alive (bind it, don't `let _ = `) for as
+    /// long as it needs the file; the directory (and file) are removed when
+    /// the guard drops, same convention `events.rs`/`store.rs` use.
+    fn save_to_temp(doc: &mut Document, name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join(name);
+        doc.save(&path).expect("save fixture pdf");
+        (dir, path)
+    }
+
+    #[test]
+    fn extracts_text_from_a_real_pdf() {
+        let (mut doc, _pages) = build_test_document(&["Hello World"]);
+        let (_dir, path) = save_to_temp(&mut doc, "text-only.pdf");
+
+        let read = read_pdf(&path).expect("read a valid pdf");
+        assert!(
+            read.text.contains("Hello World"),
+            "expected extracted text to contain the page's content, got: {:?}",
+            read.text
+        );
+        assert_eq!(read.pages.page_count, 1);
+        assert!(read.outline.is_empty(), "no bookmarks were added");
+    }
+
+    #[test]
+    fn page_texts_are_split_per_physical_page() {
+        let (mut doc, _pages) = build_test_document(&["First page body", "Second page body"]);
+        let (_dir, path) = save_to_temp(&mut doc, "two-pages.pdf");
+
+        let read = read_pdf(&path).expect("read a valid pdf");
+        assert_eq!(read.page_texts.len(), 2, "one entry per physical page");
+        assert!(read.page_texts[0].contains("First page body"));
+        assert!(read.page_texts[1].contains("Second page body"));
+        assert!(
+            !read.page_texts[0].contains("Second page body"),
+            "page 1's text must not leak page 2's content"
+        );
+    }
+
+    #[test]
+    fn outline_comes_back_empty_when_the_pdf_has_no_bookmarks() {
+        let (mut doc, _pages) = build_test_document(&["One", "Two", "Three"]);
+        let (_dir, path) = save_to_temp(&mut doc, "no-outline.pdf");
+
+        let read = read_pdf(&path).expect("read a valid pdf");
+        assert_eq!(read.outline, Vec::new());
+        assert_eq!(read.pages.page_count, 3);
+    }
+
+    #[test]
+    fn outline_hierarchy_mirrors_the_pdfs_real_outlines_tree() {
+        let (mut doc, pages) = build_test_document(&[
+            "Cover",
+            "Chapter One body",
+            "Section 1.1 body",
+            "Section 1.2 body",
+            "Chapter Two body",
+        ]);
+
+        // Chapter 1 (page 2) has two children, Section 1.1 (page 3) and
+        // Section 1.2 (page 4); Chapter 2 (page 5) is a sibling top-level
+        // entry with no children — a real chapter/section shape (§6.3).
+        let ch1 = doc.add_bookmark(
+            Bookmark::new("Chapter 1".to_string(), [0.0, 0.0, 0.0], 0, pages[1]),
+            None,
+        );
+        doc.add_bookmark(
+            Bookmark::new("1.1 Intro".to_string(), [0.0, 0.0, 0.0], 0, pages[2]),
+            Some(ch1),
+        );
+        doc.add_bookmark(
+            Bookmark::new("1.2 Details".to_string(), [0.0, 0.0, 0.0], 0, pages[3]),
+            Some(ch1),
+        );
+        doc.add_bookmark(
+            Bookmark::new("Chapter 2".to_string(), [0.0, 0.0, 0.0], 0, pages[4]),
+            None,
+        );
+        let outlines_id = doc.build_outline().expect("bookmarks were added");
+        doc.catalog_mut()
+            .expect("catalog exists")
+            .set("Outlines", outlines_id);
+
+        let (_dir, path) = save_to_temp(&mut doc, "with-outline.pdf");
+        let read = read_pdf(&path).expect("read a valid pdf");
+
+        assert_eq!(read.outline.len(), 2, "two top-level chapters");
+        assert_eq!(read.outline[0].title, "Chapter 1");
+        assert_eq!(read.outline[0].page, 2);
+        assert_eq!(
+            read.outline[0].children.len(),
+            2,
+            "two sections under chapter 1"
+        );
+        assert_eq!(read.outline[0].children[0].title, "1.1 Intro");
+        assert_eq!(read.outline[0].children[0].page, 3);
+        assert!(read.outline[0].children[0].children.is_empty());
+        assert_eq!(read.outline[0].children[1].title, "1.2 Details");
+        assert_eq!(read.outline[0].children[1].page, 4);
+
+        assert_eq!(read.outline[1].title, "Chapter 2");
+        assert_eq!(read.outline[1].page, 5);
+        assert!(read.outline[1].children.is_empty());
+    }
+
+    #[test]
+    fn page_labels_fall_back_to_physical_numbers_when_absent() {
+        let (mut doc, _pages) = build_test_document(&["One", "Two", "Three"]);
+        let (_dir, path) = save_to_temp(&mut doc, "no-page-labels.pdf");
+
+        let read = read_pdf(&path).expect("read a valid pdf");
+        assert_eq!(read.pages.label(1), "1");
+        assert_eq!(read.pages.label(2), "2");
+        assert_eq!(read.pages.label(3), "3");
+    }
+
+    #[test]
+    fn page_labels_apply_roman_front_matter_and_arabic_body() {
+        let (mut doc, _pages) =
+            build_test_document(&["Cover", "Preface", "Ch1 p1", "Ch1 p2", "Ch2 p1"]);
+
+        // Physical pages 1-2 (0-based 0-1): lowercase roman, default start 1.
+        // Physical pages 3-5 (0-based 2-4): decimal, restarting at 1.
+        let nums = vec![
+            0.into(),
+            Object::Dictionary(dictionary! { "S" => "r" }),
+            2.into(),
+            Object::Dictionary(dictionary! { "S" => "D", "St" => 1 }),
+        ];
+        let page_labels_id = doc.add_object(dictionary! { "Nums" => nums });
+        doc.catalog_mut()
+            .expect("catalog exists")
+            .set("PageLabels", page_labels_id);
+
+        let (_dir, path) = save_to_temp(&mut doc, "with-page-labels.pdf");
+        let read = read_pdf(&path).expect("read a valid pdf");
+
+        assert_eq!(read.pages.label(1), "i");
+        assert_eq!(read.pages.label(2), "ii");
+        assert_eq!(read.pages.label(3), "1");
+        assert_eq!(read.pages.label(4), "2");
+        assert_eq!(read.pages.label(5), "3");
+    }
+
+    #[test]
+    fn page_labels_support_a_prefix_and_uppercase_alpha_style() {
+        let (mut doc, _pages) = build_test_document(&["Appendix A", "Appendix A p2", "Appendix B"]);
+
+        let nums = vec![
+            0.into(),
+            Object::Dictionary(
+                dictionary! { "S" => "A", "P" => Object::string_literal("Appendix ") },
+            ),
+        ];
+        let page_labels_id = doc.add_object(dictionary! { "Nums" => nums });
+        doc.catalog_mut()
+            .expect("catalog exists")
+            .set("PageLabels", page_labels_id);
+
+        let (_dir, path) = save_to_temp(&mut doc, "with-alpha-prefix-labels.pdf");
+        let read = read_pdf(&path).expect("read a valid pdf");
+
+        assert_eq!(read.pages.label(1), "Appendix A");
+        assert_eq!(read.pages.label(2), "Appendix B");
+        assert_eq!(read.pages.label(3), "Appendix C");
+    }
+
+    #[test]
+    fn roman_and_alpha_label_rendering() {
+        assert_eq!(to_roman(1), "I");
+        assert_eq!(to_roman(4), "IV");
+        assert_eq!(to_roman(9), "IX");
+        assert_eq!(to_roman(1994), "MCMXCIV");
+        assert_eq!(to_roman(0), "");
+
+        assert_eq!(to_alpha(1, true), "A");
+        assert_eq!(to_alpha(26, true), "Z");
+        assert_eq!(to_alpha(27, true), "AA");
+        assert_eq!(to_alpha(52, true), "ZZ");
+        assert_eq!(to_alpha(53, true), "AAA");
+        assert_eq!(to_alpha(1, false), "a");
+    }
+
+    #[test]
+    fn a_corrupt_file_is_an_error_not_a_silent_empty_result() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("not-a-pdf.pdf");
+        std::fs::write(&path, b"this is not a pdf at all").expect("write junk file");
+
+        assert!(read_pdf(&path).is_err());
+    }
+}

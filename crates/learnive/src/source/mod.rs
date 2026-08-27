@@ -28,6 +28,11 @@
 //! library is **matched**, not searched, so it opts out of the
 //! `search`/`fetch` shape below (see [`local`]'s module doc).
 //!
+//! **PDF structure reading (PLAN.md S27b, added 2026-08-27):** [`pdf::read_pdf`]
+//! turns a PDF on disk into text + embedded outline + page map — the sumário
+//! and mapa de páginas the S27a library scan deliberately didn't build (see
+//! `local`'s module doc). Standalone, no caller yet; see [`pdf`]'s module doc.
+//!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
 //! backend is a new variant, no call-site changes — this is what keeps the
 //! open §11.1 question from blocking anything else.
@@ -45,12 +50,14 @@ pub mod corpus;
 pub mod libgen;
 pub mod local;
 pub mod mock;
+pub mod pdf;
 pub mod scihub;
 
 pub use corpus::{Corpus, CorpusError};
 pub use libgen::LibGenSource;
 pub use local::{LibraryEntry, LocalPdfSource};
 pub use mock::MockSource;
+pub use pdf::{OutlineEntry, PageMap, PdfDocument, PdfReadError, read_pdf};
 pub use scihub::SciHubSource;
 
 /// What kind of thing a source is — steers how a locator is read (§4.3).

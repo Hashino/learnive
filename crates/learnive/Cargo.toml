@@ -46,6 +46,12 @@ base64 = "0.22"
 pdf-extract = "0.12"
 # Shared `url::Url` for building mirror/search/download URLs in the sources.
 url = "2"
+# Source acquisition (§11.1, PLAN.md S27b): reads a PDF's `/Outlines`
+# (bookmarks) and `/PageLabels` for the sumário/mapa de páginas — neither is
+# something `pdf-extract` (above) can read, it only extracts body text.
+# Default features (chrono/jiff/rayon/time) are all optional date-formatting
+# and parallel-decode conveniences this slice doesn't touch.
+lopdf = { version = "0.44.0", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
