@@ -33,6 +33,14 @@
 //! and mapa de páginas the S27a library scan deliberately didn't build (see
 //! `local`'s module doc). Standalone, no caller yet; see [`pdf`]'s module doc.
 //!
+//! **Acervo validation gate (PLAN.md S27c, added 2026-08-27):**
+//! [`acervo::validate_acervo`] runs SPEC §11.1's six checks (presence,
+//! identity, text layer, table of contents, page map, retrieval index) as a
+//! pure function over the local library + a small [`acervo::ExpectedItem`]
+//! list, returning a per-item [`acervo::AcervoReport`]. Standalone, no
+//! caller yet (the cold-start wiring is S27g+); see [`acervo`]'s module doc,
+//! including its scope note on the retrieval-index check.
+//!
 //! Swap seam: [`Source`] is an enum facade (same idiom as `ai::Provider`); a new
 //! backend is a new variant, no call-site changes — this is what keeps the
 //! open §11.1 question from blocking anything else.
@@ -46,6 +54,7 @@
 //! `allow`s (mirrors `ai::mod`).
 #![allow(dead_code, unused_imports)]
 
+pub mod acervo;
 pub mod corpus;
 pub mod libgen;
 pub mod local;
@@ -53,6 +62,10 @@ pub mod mock;
 pub mod pdf;
 pub mod scihub;
 
+pub use acervo::{
+    AcervoReport, ExpectedItem, IdentityCheck, IndexCheck, ItemReport, PageMapCheck, PresenceCheck,
+    TextLayerCheck, TocCheck, build_index_cache, validate_acervo,
+};
 pub use corpus::{Corpus, CorpusError};
 pub use libgen::LibGenSource;
 pub use local::{LibraryEntry, LocalPdfSource};

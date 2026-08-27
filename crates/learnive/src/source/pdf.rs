@@ -82,6 +82,16 @@ pub struct PageMap {
 }
 
 impl PageMap {
+    /// Whether the PDF carried a real `/PageLabels` number tree, rather than
+    /// [`label`](Self::label) falling back to plain physical numbering. Added
+    /// for PLAN.md S27c's acervo-gate page-map check, which needs to report
+    /// *which* mode applied (per §11.1: real numbering is a pass, physical
+    /// fallback is also a pass — neither blocks — but the report should say
+    /// which one it saw).
+    pub fn has_labels(&self) -> bool {
+        !self.labels.is_empty()
+    }
+
     /// The display label for a 1-based physical page. Falls back to the
     /// plain physical page number (as a string) when the PDF has no
     /// `/PageLabels` at all (no runs to match against). When it does, the
