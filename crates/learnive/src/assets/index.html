@@ -75,6 +75,19 @@
             button — nothing else earns permanent space next to the
             document; theme and language live inside the dialog it opens. -->
       <div class="sidebar-foot">
+        <!-- S27f: opens #acervoGate in "review" mode. Only meaningful once
+             a document exists, so it stays hidden until one is (toggled in
+             documents.js, `setCurrentDocument`/`newDocBtn`). -->
+        <button
+          id="acervoBtn"
+          class="icon-btn"
+          type="button"
+          hidden
+          data-i18n-aria="acervo.openBtn"
+          data-i18n-title="acervo.openBtn"
+          aria-label="Library check"
+          title="Library check"
+        >📚</button>
         <button
           id="settingsBtn"
           class="icon-btn"
@@ -178,6 +191,62 @@
           </p>
         </div>
       </main>
+
+      <!-- S27f: acervo gate ("what's missing"), PDF<->item matching, and
+           TOC confirmation. Surfaces `source::acervo::validate_acervo`
+           (S27c) and its matching primitives (S27d) — informational only in
+           this slice, never a blocking gate (that's S27h). Opened either
+           right after a document with book/article sources is created
+           (`openAcervoGate("coldstart", ...)`, a "Continue" button proceeds
+           regardless) or later from the sidebar (`#acervoBtn`, "review"
+           mode, a "Close" button, no auto-advance). Three sub-views inside
+           one section, toggled by `showAcervoView` in acervo.js. -->
+      <section id="acervoGate" hidden class="card" aria-label="Library check">
+        <div id="acervoReportView">
+          <h1 data-i18n="acervo.title">Library check</h1>
+          <p class="muted" data-i18n="acervo.hint">
+            What your reading list needs, matched against your local
+            library.
+          </p>
+          <p id="acervoStatus" class="muted"></p>
+          <ul id="acervoList"></ul>
+          <p>
+            <button type="button" id="acervoRecheckBtn" data-i18n="acervo.recheck">Re-check</button>
+            <button type="button" id="acervoMatchesBtn" data-i18n="acervo.reviewMatch">Resolve match</button>
+            <button type="button" id="acervoContinueBtn" hidden data-i18n="acervo.continueBtn">Continue</button>
+            <button type="button" id="acervoCloseBtn" hidden data-i18n="acervo.close">Close</button>
+          </p>
+        </div>
+
+        <div id="acervoMatchesView" hidden>
+          <h1 data-i18n="acervo.matches.title">Match PDFs to your reading list</h1>
+          <p class="muted" data-i18n="acervo.matches.hint">
+            Some items match more than one file in your library, or a
+            library file matches none of them yet.
+          </p>
+          <p id="acervoMatchesStatus" class="muted"></p>
+          <div id="acervoAmbiguousList"></div>
+          <h2 data-i18n="acervo.matches.unmatchedTitle">Unmatched library files</h2>
+          <ul id="acervoUnmatchedList"></ul>
+          <p>
+            <button type="button" id="acervoMatchesBackBtn" data-i18n="acervo.matches.back">Back</button>
+          </p>
+        </div>
+
+        <div id="acervoTocView" hidden>
+          <h1 data-i18n="acervo.toc.title">Confirm table of contents</h1>
+          <p id="acervoTocSourceNote" class="muted"></p>
+          <p id="acervoTocStatus" class="muted"></p>
+          <ol id="acervoTocEntries"></ol>
+          <p>
+            <button type="button" id="acervoTocAddBtn" data-i18n="acervo.toc.add">Add chapter</button>
+          </p>
+          <p>
+            <button type="button" id="acervoTocSaveBtn" data-i18n="acervo.toc.save">Save</button>
+            <button type="button" id="acervoTocBackBtn" data-i18n="acervo.toc.back">Back</button>
+          </p>
+        </div>
+      </section>
     </div>
 
     <!-- §S6/§9 ask bar: one textbox anchored to the bottom of the window.
@@ -340,6 +409,7 @@
     <script src="/assets/core.js?token={{TOKEN}}"></script>
     <script src="/assets/settings.js?token={{TOKEN}}"></script>
     <script src="/assets/documents.js?token={{TOKEN}}"></script>
+    <script src="/assets/acervo.js?token={{TOKEN}}"></script>
     <script src="/assets/outline.js?token={{TOKEN}}"></script>
     <script src="/assets/reading.js?token={{TOKEN}}"></script>
     <script src="/assets/node.js?token={{TOKEN}}"></script>

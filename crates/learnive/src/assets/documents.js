@@ -188,7 +188,6 @@ async function createLivingDocument(objective_text, nodes) {
     setCurrentDocument(data.doc_id, data.name);
     el("coldstart").hidden = true;
     el("prereqConfirm").hidden = true;
-    el("doc").hidden = false;
     renderOutline();
     showOutlinePane();
     await refreshDocumentList();
@@ -196,7 +195,11 @@ async function createLivingDocument(objective_text, nodes) {
     // first thing to open — a confirmed prerequisite tree can gate it, in
     // which case the first available node is a prerequisite leaf instead.
     const first = state.allItems.find((it) => it.state === "available");
-    if (first) generateNode(first.id);
+    // S27f: a courtesy stop before the first token generates — reveals
+    // #doc and generates `first` itself once done (or immediately, if this
+    // reading list has no book/article sources to check). Never blocking:
+    // see acervo.js's `openAcervoGate`/`loadAcervoReport`.
+    openAcervoGate("coldstart", data.doc_id, first ? first.id : null);
   } catch (err) {
     el("startStatus").innerHTML =
       '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
@@ -219,6 +222,9 @@ function setCurrentDocument(docId, name) {
   state.docName = name || "";
   localStorage.setItem(LAST_DOC_KEY, docId);
   el("docName").textContent = state.docName;
+  // S27f: the sidebar library-check entry point only makes sense once a
+  // document exists.
+  el("acervoBtn").hidden = false;
   renderDocList();
 }
 
@@ -395,12 +401,14 @@ el("newDocBtn").addEventListener("click", () => {
   state.docName = "";
   localStorage.removeItem(LAST_DOC_KEY);
   el("docName").textContent = "";
+  el("acervoBtn").hidden = true;
   resetNodeView();
   state.items = [];
   state.allItems = [];
   renderOutline();
   showOutlinePane();
   el("doc").hidden = true;
+  el("acervoGate").hidden = true;
   el("coldstart").hidden = false;
   el("startForm").hidden = false;
   el("prereqConfirm").hidden = true;

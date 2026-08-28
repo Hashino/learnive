@@ -293,6 +293,7 @@ async fn asset(Path(file): Path<String>) -> Response {
         "i18n.js" => (JS, include_str!("assets/i18n.js")),
         "core.js" => (JS, include_str!("assets/core.js")),
         "documents.js" => (JS, include_str!("assets/documents.js")),
+        "acervo.js" => (JS, include_str!("assets/acervo.js")),
         "outline.js" => (JS, include_str!("assets/outline.js")),
         "reading.js" => (JS, include_str!("assets/reading.js")),
         "node.js" => (JS, include_str!("assets/node.js")),
