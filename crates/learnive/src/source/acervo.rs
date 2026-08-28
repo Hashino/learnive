@@ -522,7 +522,7 @@ fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
 /// that, "Chapter N" / numbered-heading lines (`1.2 Title`) scattered through
 /// the body. Deliberately unsophisticated — the real safety net is the S27f
 /// user-confirmation screen, not this heuristic.
-fn heuristic_toc(pdf: &PdfDocument) -> Vec<String> {
+pub(crate) fn heuristic_toc(pdf: &PdfDocument) -> Vec<String> {
     let from_contents_page = toc_page_heuristic(pdf);
     if !from_contents_page.is_empty() {
         return from_contents_page;
@@ -599,7 +599,7 @@ fn looks_like_numbered_heading(line: &str) -> bool {
 
 /// SHA-256 hex digest of a PDF's bytes — the content-addressed key both the
 /// retrieval-index cache and [`build_index_cache`] use.
-fn content_hash(bytes: &[u8]) -> String {
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -634,6 +634,127 @@ fn read_info_metadata(path: &Path) -> (Option<String>, Option<String>) {
             .map(|b| String::from_utf8_lossy(b).into_owned())
     };
     (field(b"Title"), field(b"Author"))
+}
+
+/// How strongly one library candidate matches an expected item, for the
+/// S27f manual-pairing screen's ranking — coarser than [`IdentityCheck`]
+/// (which only ever runs on an already presence-matched candidate); this
+/// scores *every* candidate the same way [`check_identity`] scores the one
+/// [`find_candidate`] happened to pick first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchConfidence {
+    /// Title and at least one author surname both found.
+    Strong,
+    /// Only the title matched.
+    Weak,
+}
+
+/// One library PDF that plausibly matches an expected item — the S27f
+/// matching screen's raw material. **`filename` only, never a contract**
+/// (same caveat as [`LibraryEntry::filename`]): a caller needs to go back
+/// through [`LocalPdfSource`] to actually open the file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateMatch {
+    pub filename: String,
+    pub confidence: MatchConfidence,
+}
+
+/// All plausible candidates for one expected item, not just the first.
+/// [`find_candidate`]'s own doc comment flags this as its scope reduction —
+/// "real disambiguation between several plausible candidates is the S27f
+/// manual-match screen's job, not this engine's." This is that job's data
+/// source. Reads the whole library on every call (like [`validate_acervo`]
+/// itself) — a caller checking many items at once should use
+/// [`match_report`] instead, which reads the library once for the whole
+/// batch.
+pub(crate) fn candidate_matches(
+    library: &LocalPdfSource,
+    item: &ExpectedItem,
+) -> std::io::Result<Vec<CandidateMatch>> {
+    let candidates = load_candidates(library)?;
+    Ok(candidate_matches_over(item, &candidates))
+}
+
+fn candidate_matches_over(
+    item: &ExpectedItem,
+    candidates: &[LibraryCandidate],
+) -> Vec<CandidateMatch> {
+    let target_title = normalize(primary_title(&item.title));
+    if target_title.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for cand in candidates {
+        let haystack = candidate_haystack(cand);
+        if !haystack.contains(&target_title) {
+            continue;
+        }
+        let confidence = if item.authors.iter().any(|a| {
+            let surname = normalize(surname_of(a));
+            !surname.is_empty() && haystack.contains(&surname)
+        }) {
+            MatchConfidence::Strong
+        } else {
+            MatchConfidence::Weak
+        };
+        out.push(CandidateMatch {
+            filename: cand.entry.filename.clone(),
+            confidence,
+        });
+    }
+    out
+}
+
+/// Library PDFs that don't plausibly match *any* expected item — the S27f
+/// matching screen's other ambiguous case ("an unmatched library PDF"): a
+/// book the user dropped in that the reading list doesn't know about yet.
+/// Like [`candidate_matches`], reads the whole library on every call; prefer
+/// [`match_report`] when checking a whole reading list at once.
+pub(crate) fn unmatched_library_files(
+    library: &LocalPdfSource,
+    expected: &[ExpectedItem],
+) -> std::io::Result<Vec<String>> {
+    let candidates = load_candidates(library)?;
+    let matched: std::collections::HashSet<String> = expected
+        .iter()
+        .flat_map(|item| candidate_matches_over(item, &candidates))
+        .map(|m| m.filename)
+        .collect();
+    Ok(candidates
+        .into_iter()
+        .map(|c| c.entry.filename)
+        .filter(|f| !matched.contains(f))
+        .collect())
+}
+
+/// One combined pass over the library for the S27f matching screen: every
+/// expected item's plausible candidates (parallel to `expected`, one vec per
+/// item) plus every library file matched by none of them. Reads the library
+/// **once** regardless of how many items are being checked — unlike calling
+/// [`candidate_matches`]/[`unmatched_library_files`] once per item, which
+/// each re-read and re-parse every PDF in the library from scratch. A caller
+/// checking a whole reading list (the matching screen's actual shape) should
+/// always prefer this.
+pub(crate) fn match_report(
+    library: &LocalPdfSource,
+    expected: &[ExpectedItem],
+) -> std::io::Result<(Vec<Vec<CandidateMatch>>, Vec<String>)> {
+    let candidates = load_candidates(library)?;
+    let per_item: Vec<Vec<CandidateMatch>> = expected
+        .iter()
+        .map(|item| candidate_matches_over(item, &candidates))
+        .collect();
+    let matched: std::collections::HashSet<String> = per_item
+        .iter()
+        .flatten()
+        .map(|m| m.filename.clone())
+        .collect();
+    let unmatched = candidates
+        .into_iter()
+        .map(|c| c.entry.filename)
+        .filter(|f| !matched.contains(f))
+        .collect();
+    Ok((per_item, unmatched))
 }
 
 #[cfg(test)]
@@ -1148,5 +1269,113 @@ mod tests {
         assert!(item.passes(), "{item:?}");
         assert!(report.all_pass());
         assert!(report.failing_items().is_empty());
+    }
+
+    // -- S27f: candidate matching (matching screen) ------------------------
+
+    fn place_two_in_library(
+        doc_a: &mut Document,
+        filename_a: &str,
+        doc_b: &mut Document,
+        filename_b: &str,
+    ) -> (tempfile::TempDir, LocalPdfSource) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let lib = LocalPdfSource::open(dir.path().join("data")).expect("open library");
+        doc_a
+            .save(lib.root().join(filename_a))
+            .expect("save fixture pdf a");
+        doc_b
+            .save(lib.root().join(filename_b))
+            .expect("save fixture pdf b");
+        (dir, lib)
+    }
+
+    #[test]
+    fn candidate_matches_returns_every_plausible_candidate_not_just_the_first() {
+        // Two library PDFs both plausibly titled the expected work — exactly
+        // `find_candidate`'s flagged scope reduction ("real disambiguation...
+        // is the S27f manual-match screen's job"). One has the right author
+        // (strong), one doesn't (weak) — both must come back, not just
+        // whichever `find_candidate` would have picked first.
+        let (mut doc_a, _) = build_document(
+            &["A textbook by Michael Sipser."],
+            Some("Introduction to the Theory of Computation"),
+            Some("Michael Sipser"),
+        );
+        let (mut doc_b, _) = build_document(
+            &["A different edition, different author."],
+            Some("Introduction to the Theory of Computation"),
+            Some("Someone Else"),
+        );
+        let (_tmp, lib) = place_two_in_library(&mut doc_a, "a.pdf", &mut doc_b, "b.pdf");
+
+        let item = ExpectedItem {
+            title: "Introduction to the Theory of Computation".into(),
+            authors: vec!["Michael Sipser".into()],
+            kind: SourceKind::Book,
+        };
+        let mut matches = candidate_matches(&lib, &item).expect("match");
+        matches.sort_by(|a, b| a.filename.cmp(&b.filename));
+        assert_eq!(
+            matches,
+            vec![
+                CandidateMatch {
+                    filename: "a.pdf".into(),
+                    confidence: MatchConfidence::Strong,
+                },
+                CandidateMatch {
+                    filename: "b.pdf".into(),
+                    confidence: MatchConfidence::Weak,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unmatched_library_files_lists_a_pdf_that_matches_no_expected_item() {
+        let (mut doc, _) = build_document(
+            &["A completely unrelated cookbook, by Jane Chef."],
+            Some("The Joy of Baking"),
+            Some("Jane Chef"),
+        );
+        let (_tmp, lib) = place_in_library(&mut doc, "baking.pdf");
+
+        let expected = vec![ExpectedItem {
+            title: "Introduction to the Theory of Computation".into(),
+            authors: vec!["Michael Sipser".into()],
+            kind: SourceKind::Book,
+        }];
+        let unmatched = unmatched_library_files(&lib, &expected).expect("scan");
+        assert_eq!(unmatched, vec!["baking.pdf".to_string()]);
+    }
+
+    #[test]
+    fn match_report_combines_per_item_candidates_and_unmatched_files_in_one_library_pass() {
+        let (mut doc_a, _) = build_document(
+            &["A textbook by Michael Sipser."],
+            Some("Introduction to the Theory of Computation"),
+            Some("Michael Sipser"),
+        );
+        let (mut doc_b, _) = build_document(
+            &["A completely unrelated cookbook, by Jane Chef."],
+            Some("The Joy of Baking"),
+            Some("Jane Chef"),
+        );
+        let (_tmp, lib) = place_two_in_library(&mut doc_a, "sipser.pdf", &mut doc_b, "baking.pdf");
+
+        let expected = vec![ExpectedItem {
+            title: "Introduction to the Theory of Computation".into(),
+            authors: vec!["Michael Sipser".into()],
+            kind: SourceKind::Book,
+        }];
+        let (per_item, unmatched) = match_report(&lib, &expected).expect("match report");
+        assert_eq!(
+            per_item,
+            vec![vec![CandidateMatch {
+                filename: "sipser.pdf".into(),
+                confidence: MatchConfidence::Strong,
+            }]]
+        );
+        assert_eq!(unmatched, vec!["baking.pdf".to_string()]);
     }
 }

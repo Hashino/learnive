@@ -69,14 +69,17 @@ pub mod bibliography;
 pub mod corpus;
 pub mod libgen;
 pub mod local;
+pub mod manual_match;
 mod matching;
 pub mod mock;
 pub mod pdf;
 pub mod scihub;
+pub mod toc_confirm;
 
 pub use acervo::{
-    AcervoReport, ExpectedItem, IdentityCheck, IndexCheck, ItemReport, PageMapCheck, PresenceCheck,
-    TextLayerCheck, TocCheck, build_index_cache, validate_acervo,
+    AcervoReport, CandidateMatch, ExpectedItem, IdentityCheck, IndexCheck, ItemReport,
+    MatchConfidence, PageMapCheck, PresenceCheck, TextLayerCheck, TocCheck, build_index_cache,
+    validate_acervo,
 };
 pub use bibliography::{
     BibliographyCache, BibliographyClient, Catalog, Identifier, ProposedItem, VerificationOutcome,
@@ -85,9 +88,11 @@ pub use bibliography::{
 pub use corpus::{Corpus, CorpusError};
 pub use libgen::LibGenSource;
 pub use local::{LibraryEntry, LocalPdfSource};
+pub use manual_match::{ManualMatch, ManualMatchStore};
 pub use mock::MockSource;
 pub use pdf::{OutlineEntry, PageMap, PdfDocument, PdfReadError, read_pdf};
 pub use scihub::SciHubSource;
+pub use toc_confirm::{ConfirmedToc, ConfirmedTocEntry, TocConfirmStore};
 
 /// What kind of thing a source is — steers how a locator is read (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
