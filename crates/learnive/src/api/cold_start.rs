@@ -183,6 +183,15 @@ pub struct ProposedNode {
 pub struct ProposeOutlineResp {
     /// One ordered sequence — see `ProposedNode`'s doc comment.
     nodes: Vec<ProposedNode>,
+    /// S27e: titles that failed S27d verification even after the one
+    /// bounded retry round — PLAN.md §27's "Tratamento da reprovação" is
+    /// explicit that a rejection is never silently dropped, so these ride
+    /// along on the response for a future screen (S27f) to show, even
+    /// though every one of them also still has a corresponding item in
+    /// `nodes` (with `verification: not_found`) rather than being removed
+    /// from the list outright.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rejected: Vec<String>,
 }
 
 /// Proposes the FULL outline tree for a (possibly not-yet-created)
@@ -209,11 +218,81 @@ pub async fn propose_outline(
     } else {
         body.objective_text.clone()
     };
-    let ai = state.ai.load_full();
-    let tree = engine::propose_outline(&ai, &body.topic, &objective, &[]).await?;
+    let (tree, rejected) = propose_verified_reading_list(&state, &body.topic, &objective).await?;
     let known = known_concepts(&state)?;
     let nodes = resolve_outline_forest(&state, &tree, &known).await;
-    Ok(Json(ProposeOutlineResp { nodes }))
+    Ok(Json(ProposeOutlineResp { nodes, rejected }))
+}
+
+/// Verifies every book/article in a freshly-proposed reading list against
+/// real catalogs (S27d), filling in each item's `ProposedOutlineNode::
+/// verification` in place. The client is `state.bibliography_client` (never
+/// constructed fresh here) — swappable the same way `state.ai`/`state.source`
+/// are, so `app::tests::test_state_with_ai` can wire a fast-failing client
+/// and no integration test that creates a document ever makes a real
+/// network call. The cache IS opened fresh per call (cheap, file-backed, no
+/// state to keep in sync — same idiom `acervo`'s own callers use).
+async fn verify_reading_list(
+    state: &AppState,
+    tree: &mut [engine::ProposedOutlineNode],
+) -> Result<(), ApiError> {
+    let cache = crate::source::BibliographyCache::open(state.data_dir.as_ref())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    for node in tree.iter_mut() {
+        let Some(item) = &node.bibliography else {
+            continue;
+        };
+        node.verification = Some(
+            crate::source::verify_bibliography(&state.bibliography_client, &cache, item).await,
+        );
+    }
+    Ok(())
+}
+
+/// Titles whose verification came back genuinely `NotFound` — deliberately
+/// excludes `Unavailable` (a catalog outage): that outcome degrades, it
+/// does not block (`source::bibliography`'s own doc comment), so it must
+/// never trigger a re-ask that could silently rewrite a good list just
+/// because a catalog was briefly unreachable.
+fn not_found_titles(tree: &[engine::ProposedOutlineNode]) -> Vec<String> {
+    tree.iter()
+        .filter(|n| {
+            matches!(
+                n.verification,
+                Some(crate::source::VerificationOutcome::NotFound)
+            )
+        })
+        .map(|n| n.title.clone())
+        .collect()
+}
+
+/// Proposes the reading list and verifies it (S27d), with ONE bounded
+/// retry round when anything comes back genuinely `NotFound` — same
+/// one-repair-round convention as `movement::generate_move`'s schema
+/// retry. The retry names the rejected titles (`engine::propose_outline`'s
+/// `rejected` parameter) so the model proposes real substitutes instead of
+/// looping on the same unverifiable work (PLAN.md §27, "Tratamento da
+/// reprovação"). Whatever is STILL `NotFound` after the retry is never
+/// dropped — it stays in the returned tree (with its `verification` set,
+/// so nothing downstream mistakes it for confirmed) and its title is also
+/// returned separately, for a future screen to show the learner it wasn't
+/// confirmed, per PLAN.md's explicit "nunca descartada silenciosamente".
+async fn propose_verified_reading_list(
+    state: &AppState,
+    topic: &str,
+    objective: &str,
+) -> Result<(Vec<engine::ProposedOutlineNode>, Vec<String>), ApiError> {
+    let ai = state.ai.load_full();
+    let mut tree = engine::propose_outline(&ai, topic, objective, &[]).await?;
+    verify_reading_list(state, &mut tree).await?;
+    let rejected = not_found_titles(&tree);
+    if rejected.is_empty() {
+        return Ok((tree, Vec::new()));
+    }
+    let mut retry_tree = engine::propose_outline(&ai, topic, objective, &rejected).await?;
+    verify_reading_list(state, &mut retry_tree).await?;
+    let still_rejected = not_found_titles(&retry_tree);
+    Ok((retry_tree, still_rejected))
 }
 
 /// One `Demonstrated` concept already in some document — the candidate pool
@@ -341,10 +420,7 @@ fn resolve_outline_node(
             .collect(),
         item_type: node.item_type,
         bibliography: node.bibliography.clone(),
-        // Verification (S27d) hasn't run yet at this point — filled in by
-        // `propose_reading_list`'s caller before the resolved forest is
-        // actually returned to the client.
-        verification: None,
+        verification: node.verification.clone(),
     }
 }
 
@@ -564,7 +640,7 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             children: auto_confirm_learn(&n.children),
             item_type: n.item_type,
             bibliography: n.bibliography.clone(),
-            verification: None,
+            verification: n.verification.clone(),
         })
         .collect()
 }
@@ -724,6 +800,14 @@ pub struct CreateResp {
     doc_id: String,
     name: String,
     items: Vec<OutlineItemView>,
+    /// S27e: only ever non-empty for the direct-API fallback (`body.nodes`
+    /// empty) — a caller that went through `/api/outline/propose` first
+    /// already saw any rejection there (`ProposeOutlineResp::rejected`)
+    /// before confirming, so this is empty in that path. Never a reason to
+    /// fail the request: PLAN.md §27's "nunca descartada silenciosamente"
+    /// means visible, not blocking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rejected: Vec<String>,
 }
 
 pub async fn create_document(
@@ -755,9 +839,9 @@ pub async fn create_document(
     // the actual bug behind a live report, "Funções Recursivas": prereqs
     // rendered in the sidebar as false decomposition of an unrelated
     // main-line item instead of the sequential background topics they were.
-    let confirmed_nodes = if body.nodes.is_empty() {
-        let ai = state.ai.load_full();
-        let tree = engine::propose_outline(&ai, &body.topic, &objective_text, &[]).await?;
+    let (confirmed_nodes, rejected) = if body.nodes.is_empty() {
+        let (tree, rejected) =
+            propose_verified_reading_list(&state, &body.topic, &objective_text).await?;
         // S27e: a caller that skips the confirmation screen never saw — let
         // alone reviewed — the proposed reading list, but there is no
         // longer a separate "unreviewed prerequisites" category to drop
@@ -766,9 +850,9 @@ pub async fn create_document(
         // concept-tree fallback dropped every prerequisite and kept only
         // the objective's own node, would silently discard every
         // foundational work instead. Auto-confirm the whole list, in order.
-        auto_confirm_learn(&tree)
+        (auto_confirm_learn(&tree), rejected)
     } else {
-        body.nodes
+        (body.nodes, Vec::new())
     };
     let mut items = Vec::new();
     let mut to_skip = Vec::new();
@@ -826,6 +910,7 @@ pub async fn create_document(
         doc_id,
         name,
         items,
+        rejected,
     }))
 }
 
@@ -848,6 +933,9 @@ pub struct NextTopicReq {
 #[derive(Serialize)]
 pub struct NextTopicResp {
     items: Vec<OutlineItemView>,
+    /// S27e — see `CreateResp::rejected`'s doc comment; same rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rejected: Vec<String>,
 }
 
 /// "What are we learning next?" (§S15c, decided in PLAN.md's `TODO
@@ -878,15 +966,15 @@ pub async fn next_topic(
     let existing: Outline =
         serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let confirmed_nodes = if body.nodes.is_empty() {
-        let ai = state.ai.load_full();
-        let tree = engine::propose_outline(&ai, &body.topic, &objective_text, &[]).await?;
+    let (confirmed_nodes, rejected) = if body.nodes.is_empty() {
+        let (tree, rejected) =
+            propose_verified_reading_list(&state, &body.topic, &objective_text).await?;
         // S27e: same reasoning as `create_document`'s identical fallback —
         // auto-confirm the whole reading list, in order, not just the last
         // item (see that function's comment for why).
-        auto_confirm_learn(&tree)
+        (auto_confirm_learn(&tree), rejected)
     } else {
-        body.nodes
+        (body.nodes, Vec::new())
     };
 
     // Continues the main line's single sequential chain (materialize_
@@ -945,7 +1033,7 @@ pub async fn next_topic(
     let outline: Outline =
         serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let items = outline_view(&state, &doc_id, &outline)?;
-    Ok(Json(NextTopicResp { items }))
+    Ok(Json(NextTopicResp { items, rejected }))
 }
 
 #[derive(Deserialize)]
@@ -1645,5 +1733,147 @@ mod tests {
         assert_eq!(items[0].id, "p1");
         assert_eq!(items[0].mode, NodeMode::Review);
         assert!(items[0].prerequisites.is_empty());
+    }
+
+    /// S27e: a reading-list-shaped confirmed tree (flat, `Book`-typed items,
+    /// no `children` — exactly what `resolve_outline_forest` produces from
+    /// `engine::propose_outline`'s new contract) materializes ONLY the
+    /// reading-list items themselves, sequentially chained, each carrying
+    /// its bibliographic `source` pointer and `expansion: NotExpanded` —
+    /// nothing below a book is invented or eagerly materialized, since
+    /// there is nothing in `children` to recurse into in the first place.
+    /// This is `materialize_outline_tree`'s "stops materializing everything
+    /// up front" behavior (PLAN.md §27): it was never special-cased logic
+    /// to remove, it falls out of the reading list never having nested
+    /// children to begin with.
+    #[test]
+    fn materialize_outline_tree_stops_at_the_reading_list_itself() {
+        fn book(id: &str, title: &str) -> ConfirmedNode {
+            ConfirmedNode {
+                id: id.to_string(),
+                title: title.to_string(),
+                action: PrereqAction::Learn,
+                known: None,
+                children: Vec::new(),
+                item_type: OutlineItemType::Book,
+                bibliography: Some(crate::source::ProposedItem {
+                    title: title.to_string(),
+                    authors: vec!["Author, Some".to_string()],
+                    year: Some(2020),
+                    edition: None,
+                    identifier: None,
+                    kind: crate::source::SourceKind::Book,
+                }),
+                verification: Some(crate::source::VerificationOutcome::Verified {
+                    catalog: crate::source::Catalog::OpenLibrary,
+                    matched_title: title.to_string(),
+                }),
+            }
+        }
+        let tree = vec![book("b1", "Pré-Cálculo"), book("b2", "Cálculo, Volume 1")];
+        let mut items = Vec::new();
+        let mut to_skip = Vec::new();
+        materialize_outline_tree(&tree, None, None, &mut items, &mut to_skip);
+
+        assert_eq!(
+            items.len(),
+            2,
+            "only the two reading-list items, nothing invented below them"
+        );
+        assert!(to_skip.is_empty());
+        // Sequentially chained — the second item's own prerequisite is the
+        // first item's id, same "list order IS the prerequisite chain" rule
+        // as any other main-line sequence.
+        assert!(items[0].prerequisites.is_empty());
+        assert_eq!(items[1].prerequisites, vec!["b1".to_string()]);
+        for item in &items {
+            assert_eq!(item.item_type, OutlineItemType::Book);
+            assert_eq!(item.expansion, ExpansionState::NotExpanded);
+            let source = item
+                .source
+                .as_ref()
+                .expect("book item carries a source pointer");
+            assert!(matches!(
+                source.verification,
+                Some(crate::source::VerificationOutcome::Verified { .. })
+            ));
+        }
+    }
+
+    /// Isolates the exact distinction S27e's bounded retry depends on: a
+    /// genuine `NotFound` is a rejection (retry-worthy), a catalog outage
+    /// (`Unavailable`) is a degradation, never a rejection — retrying on
+    /// `Unavailable` would silently rewrite a good list on a network hiccup
+    /// (bibliography.rs's own doc comment, PLAN.md §27).
+    #[test]
+    fn not_found_titles_excludes_catalog_unavailable() {
+        fn node_with(
+            title: &str,
+            verification: crate::source::VerificationOutcome,
+        ) -> engine::ProposedOutlineNode {
+            engine::ProposedOutlineNode {
+                title: title.to_string(),
+                children: Vec::new(),
+                item_type: OutlineItemType::Book,
+                bibliography: None,
+                verification: Some(verification),
+            }
+        }
+        let tree = vec![
+            node_with(
+                "Really Not Found",
+                crate::source::VerificationOutcome::NotFound,
+            ),
+            node_with(
+                "Catalog Was Down",
+                crate::source::VerificationOutcome::Unavailable {
+                    errors: vec!["timeout".to_string()],
+                },
+            ),
+            node_with(
+                "Confirmed",
+                crate::source::VerificationOutcome::Verified {
+                    catalog: crate::source::Catalog::OpenLibrary,
+                    matched_title: "Confirmed".to_string(),
+                },
+            ),
+        ];
+        assert_eq!(
+            not_found_titles(&tree),
+            vec!["Really Not Found".to_string()]
+        );
+    }
+
+    /// S27e regression: the direct-API fallback (`create_document`/
+    /// `next_topic` with `body.nodes` empty) used to keep only the last
+    /// top-level node — correct for the old concept-tree contract, where
+    /// that was "the objective's own topic" and everything before it was an
+    /// unreviewed prerequisite safe to drop. Under the reading list there is
+    /// no such category (PLAN.md §27 decision 3): dropping every item but
+    /// the last would silently discard every foundational work. The whole
+    /// list must be auto-confirmed, in order.
+    #[test]
+    fn auto_confirm_learn_keeps_the_whole_reading_list_in_order() {
+        let tree = vec![
+            engine::ProposedOutlineNode {
+                title: "Foundational Work".to_string(),
+                children: Vec::new(),
+                item_type: OutlineItemType::Book,
+                bibliography: None,
+                verification: None,
+            },
+            engine::ProposedOutlineNode {
+                title: "Objective Work".to_string(),
+                children: Vec::new(),
+                item_type: OutlineItemType::Book,
+                bibliography: None,
+                verification: None,
+            },
+        ];
+        let confirmed = auto_confirm_learn(&tree);
+        assert_eq!(confirmed.len(), 2, "both items kept, not just the last");
+        assert_eq!(confirmed[0].title, "Foundational Work");
+        assert_eq!(confirmed[1].title, "Objective Work");
+        assert!(confirmed.iter().all(|n| n.action == PrereqAction::Learn));
     }
 }

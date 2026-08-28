@@ -65,6 +65,7 @@ pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
                     children: Vec::new(),
                     item_type,
                     bibliography: Some(item),
+                    verification: None,
                 }
             })
             .collect(),

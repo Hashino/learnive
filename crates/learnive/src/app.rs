@@ -66,6 +66,13 @@ pub struct AppState {
     /// Retrieval index for grounding (§10). `None` when the embedding model could
     /// not be loaded — the loop then runs ungrounded rather than failing.
     pub retriever: Option<Arc<RwLock<Retriever>>>,
+    /// S27d/S27e: the real HTTP client `api::cold_start::verify_reading_list`
+    /// checks every proposed book/article against. Swappable the same way
+    /// `ai`/`source` are: `app::tests::test_state_with_ai` wires
+    /// `BibliographyClient::unreachable_for_test()` instead, so an
+    /// integration test that creates a document never makes a real network
+    /// call just because it skipped the outline-confirmation screen.
+    pub bibliography_client: Arc<crate::source::BibliographyClient>,
 }
 
 impl AppState {
@@ -134,6 +141,7 @@ impl AppState {
             fallback_source: Arc::new(api::build_fallback_source()),
             corpus,
             retriever,
+            bibliography_client: Arc::new(crate::source::BibliographyClient::new()),
         }
     }
 }

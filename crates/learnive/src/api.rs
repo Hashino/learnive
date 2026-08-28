@@ -249,6 +249,7 @@ mod tests {
             fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
             corpus: Corpus::open(&dir).unwrap(),
             retriever: None,
+            bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
         };
         // No history yet: the prior passes through unchanged.
         assert_eq!(rung_for(&state, "d1", AgentPolicy::L2), AgentPolicy::L2);

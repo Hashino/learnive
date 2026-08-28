@@ -376,13 +376,23 @@ pub struct ProposedOutlineNode {
     #[serde(default)]
     pub item_type: OutlineItemType,
     /// The proposed bibliographic identity for a `Book`/`Article` item —
-    /// `None` for `Node`/`Chapter`. Not yet a [`SourcePointer`]: verification
-    /// (S27d's `verify_bibliography`) hasn't run at the point this type is
-    /// produced by `parse::outline_tree` — that happens afterward, in
-    /// `api::cold_start`, which is what turns this into a real
-    /// `OutlineItem`'s `source: Some(SourcePointer { .. })`.
+    /// `None` for `Node`/`Chapter`. This alone is not yet a [`SourcePointer`]:
+    /// verification hasn't run at the point `parse::outline_tree` produces
+    /// this value — see [`Self::verification`].
     #[serde(default)]
     pub bibliography: Option<crate::source::ProposedItem>,
+    /// S27d's existence-check outcome for `bibliography` — always `None`
+    /// coming out of `parse::outline_tree` (the model never emits this;
+    /// there is nothing to verify yet at parse time). `api::cold_start`
+    /// fills it in, in place, right after `propose_outline` returns and
+    /// before the tree reaches either `resolve_outline_forest` (the
+    /// confirm-screen path) or `auto_confirm_learn` (the direct-API
+    /// fallback) — both then just copy it into `SourcePointer`/
+    /// `ConfirmedNode` rather than re-deriving it, same "resolved once,
+    /// carried through" shape `ProposedNode`/`ConfirmedNode` already use for
+    /// `known`/`suggested`.
+    #[serde(default)]
+    pub verification: Option<crate::source::VerificationOutcome>,
 }
 
 /// Proposes the initial reading list for an objective (S27e, PLAN.md §27,

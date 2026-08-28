@@ -32,6 +32,9 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
         corpus: Corpus::open(&dir).unwrap(),
         retriever: None,
+        // S27e: never hit a real catalog host from an integration test —
+        // see the field's own doc comment on `AppState`.
+        bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
     }
 }
 

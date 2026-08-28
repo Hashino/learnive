@@ -686,7 +686,12 @@ impl BibliographyClient {
     /// never even invoked; if the cache-first check were ever broken, this
     /// client turns that into a fast, deterministic `Unavailable` instead of
     /// a slow or flaky real round-trip.
-    fn unreachable_for_test() -> Self {
+    ///
+    /// `pub(crate)` (not just private): also used by `app::tests`'
+    /// `test_state_with_ai` (S27e) — `AppState::bibliography_client` must
+    /// never make an integration test hit a real catalog host just because
+    /// it happens to create a document without a pre-confirmed outline.
+    pub(crate) fn unreachable_for_test() -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_millis(1))
