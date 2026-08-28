@@ -143,16 +143,20 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         // engine::prompt::propose_objective (§6.1/§S4) contract.
         return r#"{"text":"Learn the essentials of the requested topic, well enough to explain and apply it","title":"Demo document"}"#.to_string();
     }
-    if text.contains("FULL structure of a living curriculum") {
-        // engine::prompt::propose_outline (§S15/§S16, unified 2026-08-19)
-        // contract — a small, deterministic tree ending in the objective's
-        // own node, decomposed into two sub-items, so demo mode exercises
-        // the toggle-confirmation screen (the leading prerequisite branch)
-        // AND still yields a multi-item, sequentially-gated outline via the
-        // direct-API fallback (`create_document` auto-confirms only this
-        // last element, dropping the unreviewed prerequisite — see its
-        // doc comment), which tests rely on to have a locked item to probe.
-        return r#"[{"title":"Demo prerequisite","children":[{"title":"Demo sub-skill","children":[]}]},{"title":"Demo document","children":[{"title":"Demo document intro","children":[]},{"title":"Demo document core","children":[]}]}]"#.to_string();
+    if text.contains("propose the initial READING LIST") {
+        // engine::prompt::propose_outline (S27e) contract — the schema is
+        // exactly `source::ProposedItem`'s shape, one flat array, no
+        // `children` (see `parse::outline_tree`'s doc comment): a small,
+        // deterministic two-item list — one foundational work, then the
+        // work most directly covering the objective — so demo mode
+        // exercises the toggle-confirmation screen with a real,
+        // multi-item, sequentially-gated outline. The direct-API fallback
+        // (`create_document`'s empty-`nodes` branch, S27e) now
+        // auto-confirms the WHOLE list, in order, not just the last
+        // element (there's no more separate "unreviewed prerequisite"
+        // category to drop — PLAN.md §27 decision 3), so both items land
+        // in the materialized outline either way.
+        return r#"[{"title":"Demo Foundations","authors":["Demo Author"],"year":2020,"edition":null,"identifier":null,"kind":"book"},{"title":"Demo Document","authors":["Demo Author"],"year":2024,"edition":null,"identifier":null,"kind":"book"}]"#.to_string();
     }
     if text.contains("choosing the next move") {
         // movement::decide_move (L1/L2) contract.

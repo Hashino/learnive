@@ -188,147 +188,105 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
     ]
 }
 
-/// Runs on `Tier::Robust` (`engine::propose_outline`) — plans the FULL
-/// outline in one call: prerequisite background the objective presupposes,
-/// then the objective's own content, as ONE ordered JSON array (see
-/// `engine::ProposedOutlineNode`'s doc comment for the exact contract: every
-/// element but the last is a prerequisite, the last is the objective
-/// itself). Unifies what used to be two separate calls (`outline` for the
-/// objective's own flat breakdown, `propose_prerequisites` for a
-/// separately-generated forest) whose independently-generated results then
-/// had to be glued together in Rust — that graft was the actual bug behind
-/// a live report (2026-08-19, "Funções Recursivas"): prerequisites nested
-/// under an unrelated main-line item because the graft code had nothing
-/// better to attach them to. A single call can place prerequisites as
-/// siblings in the right order and give the objective its own titled
-/// container the same way any other bundle of separable sub-skills gets
-/// one, so the structure is correct by construction instead of reassembled
-/// after the fact.
+/// Runs on `Tier::Robust` (`engine::propose_outline`) — proposes the initial
+/// READING LIST for an objective (S27e, PLAN.md §27, replacing the
+/// concept-outline-by-prerequisite prompt this function used to build — see
+/// git history if that prompt's exact wording is ever needed again): real
+/// books and articles, foundational-first, ordered so that array position
+/// alone carries the prerequisite relationship (PLAN.md §27 decision 3 —
+/// there is no separate "prerequisite of concept" category anymore, and no
+/// invented concept titles at all). The schema asked for is exactly
+/// `source::ProposedItem`'s own shape (see `parse::outline_tree`'s doc
+/// comment for why one schema, not a wrapping one) — `{"title":..., \
+/// "authors":[...], "year":..., "edition":..., "identifier":..., \
+/// "kind":"book"|"article"}` per item, nothing else. No `children`, no
+/// chapters: this call must never guess a book's internal structure — that
+/// can only be checked against the real PDF table of contents, which is
+/// S27g's job, later, after the library actually has the file (same
+/// anti-speculation reasoning §14 already applies to prefetch).
 ///
-/// Carries the hard-won lessons of both prompts it replaces:
-/// - Scope discipline for the objective's own decomposition (confirmed live,
-///   2026-08-17: "termodinâmica para engenharia" collapsed to a single node
-///   under an over-terse prompt) — judge scope from the objective, not a
-///   fixed count.
-/// - Inclusion bias for prerequisites (confirmed live, 2026-08-18: the old
-///   "don't scaffold prerequisites the question already assumes the learner
-///   has" guidance produced both a whole document's own topic — "the French
-///   Revolution" — proposed as a prerequisite of ITSELF, and a topic that
-///   should have decomposed — Big-O notation — collapsing to one node with
-///   nothing pushed to prerequisites either) — the confirmation screen
-///   (learn/review/skip, one click per item, prior mastery detected and
-///   pre-filled) is the real backstop against runaway breadth, not prompt
-///   restraint, so this asks for honest, inclusion-biased prerequisites
-///   rather than terseness.
-///
-/// The first example is deliberately in English while the request will
-/// often be Portuguese (this session's live testing so far skews pt-BR) —
-/// the explicit "regardless of the language" instruction below exists
-/// because an early probe run WITHOUT it leaked English into a Portuguese
-/// request's output, the model matching the nearest example's language
-/// instead of the live request's.
-pub fn propose_outline(topic: &str, objective: &str) -> Vec<ChatMessage> {
+/// `rejected` names titles a prior round of this same cold start proposed
+/// that then failed S27d's existence verification (bounded one-round retry,
+/// `api::cold_start::propose_reading_list`) — empty on the first call. When
+/// non-empty, the prompt tells the model plainly which titles did not verify
+/// and asks for a real substitute covering the same role in the list, not a
+/// cosmetic rename of the same unverifiable work.
+pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec<ChatMessage> {
     let request = |t: &str, o: &str| format!("Topic: {t}\nCurriculum objective: {o}");
+    let mut system = String::from(
+        "You propose the initial READING LIST for one learner's curriculum \
+         objective: real, findable books and articles, never invented \
+         concept titles — the list itself IS the curriculum plan, and \
+         chapters/sections inside each work are discovered later, once the \
+         actual book is in hand, not guessed now. Respond with ONE JSON \
+         array, ordered foundational-first, most basic prerequisite work \
+         first and the work(s) most directly covering the objective itself \
+         last (a later step locks the LAST item as unskippable — the \
+         'this is what was actually asked for' item — so order matters, not \
+         just content).\n\n\
+         Each array element is shaped EXACTLY like this, no other fields, \
+         no children: {\"title\":\"...\",\"authors\":[\"Last, First\", ...], \
+         \"year\":1234,\"edition\":\"...\" or null,\"identifier\":null,\
+         \"kind\":\"book\"|\"article\"}. `authors` in \"Last, First\" order \
+         when known; empty array if genuinely unknown (never invent a \
+         name). `year`/`edition` null when unknown. `identifier` stays null \
+         unless you have real, specific certainty of an ISBN/DOI/arXiv id — \
+         guessing one is worse than omitting it, since a wrong identifier \
+         is checked as if it were confirmed fact by the next step.\n\n\
+         Err toward INCLUDING a foundational work whenever you are unsure \
+         the learner already has it: this list is a proposal, not a \
+         commitment — the learner reviews it themselves and marks each \
+         item skip/review/learn with one click before anything happens, \
+         and a work they already finished elsewhere is shown to them \
+         pre-filled and disabled. Only real, specific, findable works: a \
+         famous textbook or a well-known paper by title/author, never a \
+         vague placeholder like \"an introductory algebra textbook\" — if \
+         you cannot name a specific real work for a role, leave that role \
+         out rather than inventing a plausible-sounding title, since every \
+         item is checked against real library catalogs next and a made-up \
+         title will simply fail that check.\n\n\
+         Judge SCOPE from the objective, not a fixed count: a narrow, \
+         self-contained question may need only the one work most directly \
+         covering it; a broad subject needs real foundational works ahead \
+         of it, most basic first. Write every title/author exactly as the \
+         real work is titled (do not translate a real title into the \
+         request's language) but keep this instruction's own language \
+         irrelevant to your choice of works. Respond ONLY with the JSON \
+         array — no comments, no markdown, no prose outside it.",
+    );
+    if !rejected.is_empty() {
+        system.push_str(&format!(
+            "\n\nThe following title(s) you proposed in an earlier attempt \
+             at this SAME list did not verify against real library \
+             catalogs (not found) — propose a real, different, specific \
+             substitute covering the same role in the list, never the same \
+             title again and never a placeholder: {}",
+            rejected.join("; ")
+        ));
+    }
     vec![
-        ChatMessage::system(
-            "You plan the FULL structure of a living curriculum for one \
-             objective, as ONE tree: background prerequisites the learner \
-             needs first, then the objective's own content — in that order, \
-             in a single JSON array, most basic first. The LAST element of \
-             the array is always the objective itself; every element before \
-             it is a prerequisite the objective presupposes.\n\n\
-             PREREQUISITES (every element except the last): background the \
-             learner needs before the objective itself makes sense, never \
-             the objective's own content. Err toward INCLUDING a \
-             prerequisite whenever you are unsure whether the learner \
-             already has it: this tree is a proposal, not a commitment — \
-             the learner reviews it themselves and marks each item \
-             skip/review/learn with one click before anything is generated, \
-             and any item they already demonstrated elsewhere is shown to \
-             them pre-filled and disabled. Assuming familiarity instead of \
-             listing it costs the learner nothing to fix if you are wrong \
-             the other way — silently leaving it out is the mistake, \
-             because a gap the learner cannot see and cannot click away is \
-             a gap that stays. The ONLY time there are NO prerequisites at \
-             all (the array has just the one final element) is an \
-             objective that presupposes nothing beyond basic \
-             literacy/numeracy and everyday reasoning — that floor is low \
-             and should be rare to actually hit; do not treat \"someone \
-             asking this probably already knows X\" as a reason to omit X. \
-             Never restate the objective's own topic as a prerequisite of \
-             itself.\n\n\
-             THE OBJECTIVE (the last element): titled for the topic itself, \
-             at the granularity a good textbook's own table of contents \
-             would use for it — a chapter or section, not the whole field. \
-             Judge the SCOPE from the objective, not a fixed count: a \
-             narrow, self-contained question needs no decomposition at all \
-             (empty children) — do not pad it with sections its own \
-             phrasing doesn't ask for. A broader subject gets one child per \
-             genuinely distinct sub-topic a table of contents would list as \
-             its own section, most basic first; under-planning a broad \
-             objective down to no decomposition is as much a mistake as \
-             over-planning a narrow one. Compress a little more than a real \
-             textbook would, though: this app's real depth grows from the \
-             learner's own follow-up questions and the outline-revision \
-             move that fires as they read, so this initial plan does not \
-             need to enumerate every sub-case, formula variant, or \
-             worked-example category — those emerge later, from questions, \
-             not from you now.\n\n\
-             DECOMPOSITION (applies to any node, prerequisite or objective, \
-             at any depth): give a node its own children only when it is \
-             genuinely a bundle of separable sub-skills that each need to \
-             be demonstrated on their own — apply this same test \
-             recursively at every level. A node that is already atomic gets \
-             no children (an empty array, not omitted).\n\n\
-             Write every title in the SAME language as the request below, \
-             regardless of what language these instructions or the \
-             examples use. Respond ONLY with a JSON array, each element \
-             shaped {\"title\":\"...\",\"children\":[...]} (children is the \
-             same shape, recursively, may be an empty array). No comments, \
-             no markdown, no prose outside the JSON.",
-        ),
+        ChatMessage::system(system),
         ChatMessage::user(request(
             "how does binary search work",
             "Understand how binary search finds a target in a sorted array and implement it correctly",
         )),
-        ChatMessage::assistant(r#"[{"title":"Binary search over a sorted array","children":[]}]"#),
+        ChatMessage::assistant(
+            r#"[{"title":"Introduction to Algorithms","authors":["Cormen, Thomas H.","Leiserson, Charles E.","Rivest, Ronald L.","Stein, Clifford"],"year":2009,"edition":"3rd","identifier":null,"kind":"book"}]"#,
+        ),
         ChatMessage::user(request(
             "cálculo integral",
             "Aprender os fundamentos de cálculo integral: integrais indefinidas, definidas e o teorema fundamental do cálculo",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"Álgebra básica","children":[]},
-                {"title":"Limites","children":[]},
-                {"title":"Derivadas","children":[]},
-                {"title":"Integração","children":[
-                    {"title":"Antiderivadas e a integral indefinida","children":[]},
-                    {"title":"Técnicas de integração: substituição","children":[]},
-                    {"title":"Técnicas de integração: integração por partes","children":[]},
-                    {"title":"Somas de Riemann e a integral definida","children":[]},
-                    {"title":"O teorema fundamental do cálculo","children":[]},
-                    {"title":"Aplicações da integral: área entre curvas e volume de sólidos de revolução","children":[]}
-                ]}]"#,
+            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book"},
+                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book"}]"#,
         ),
         ChatMessage::user(request(
             "recursion in C",
             "Understand how recursive functions work in C and be able to write them correctly",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"C data types and variables","children":[]},
-                {"title":"C functions","children":[
-                    {"title":"Function definition and prototype","children":[]},
-                    {"title":"Parameters and return values","children":[]},
-                    {"title":"Calling functions","children":[]},
-                    {"title":"Local vs global scope","children":[]}
-                ]},
-                {"title":"Recursion in C","children":[
-                    {"title":"What is recursion in C","children":[]},
-                    {"title":"The base case in recursive functions","children":[]},
-                    {"title":"The recursive case in C functions","children":[]},
-                    {"title":"The call stack and how recursion executes","children":[]},
-                    {"title":"Syntax for recursive functions in C","children":[]},
-                    {"title":"Common recursive patterns and pitfalls","children":[]}
-                ]}]"#,
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book"}]"#,
         ),
         ChatMessage::user(request(topic, objective)),
     ]

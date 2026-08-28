@@ -541,6 +541,11 @@ pub async fn ask_question(
                     parent_id: Some(node_id.clone()),
                     mode: NodeMode::Learn,
                     source_doc_id: None,
+                    // A §S8 spawned sub-node is always a directly generable
+                    // concept node (S27e).
+                    item_type: OutlineItemType::Node,
+                    expansion: ExpansionState::NotExpanded,
+                    source: None,
                 });
                 serde_json::to_string(&outline).map_err(|e| e.to_string())
             })?;

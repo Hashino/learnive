@@ -110,6 +110,83 @@ pub struct OutlineItem {
     /// owner and is never rewritten — this pointer is the only new state.
     #[serde(default)]
     pub source_doc_id: Option<String>,
+    /// What this item actually is (S27e, PLAN.md §27): only `Node` is
+    /// directly generable — see [`OutlineItemType`]. `#[serde(default)]`
+    /// reads every pre-S27e `outline.json` (no field on disk at all) as
+    /// `Node`, which is exactly what every one of those items always was.
+    #[serde(default)]
+    pub item_type: OutlineItemType,
+    /// Whether a `Book`/`Chapter` item's children have been discovered yet
+    /// (S27e data shape; the discovery itself is S27g, not built here). See
+    /// [`ExpansionState`]. Meaningless for a `Node`, left at the default.
+    #[serde(default)]
+    pub expansion: ExpansionState,
+    /// The bibliographic identity + S27d verification outcome behind a
+    /// `Book`/`Article` item — `None` for a `Node`/`Chapter` (a chapter
+    /// inherits its parent book's identity, S27g). See [`SourcePointer`].
+    /// Deliberately NOT wired into S21's grounding retrieval here — that's
+    /// `grounding_for`'s job, a later slice.
+    #[serde(default)]
+    pub source: Option<SourcePointer>,
+}
+
+/// What an outline item actually is (S27e, PLAN.md §27): only `Node` is
+/// directly generable — `Book`/`Chapter`/`Article` are reading-list
+/// containers materialized from the confirmed bibliography, whose children
+/// (chapters, then concept nodes) are discovered by S27g's contextual
+/// expansion, not by this slice.
+///
+/// `Chapter` is minted only by that later expansion step — nothing in this
+/// slice's prompt/parse ever proposes one. PLAN.md is explicit about why: a
+/// chapter can only be verified against a real PDF table of contents, not a
+/// bibliographic catalog (unlike a book/article, which S27d's catalog checks
+/// can confirm), so having the model guess chapter structure at cold start
+/// would be exactly the kind of speculative structure §14 already argues
+/// against for prefetch — don't restore chapter proposal to the prompt.
+/// `Chapter` stays in this enum now so `OutlineItem` doesn't need a second
+/// migration when S27g starts minting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineItemType {
+    Book,
+    Chapter,
+    Article,
+    /// A directly generable concept node — every item before S27e, and
+    /// every item this slice still mints itself (a §S8 spawned sub-node,
+    /// `api::generation`'s `plan`-move items). Default so a pre-S27e
+    /// `outline.json` with no `item_type` field deserializes as what its
+    /// items always actually were.
+    #[default]
+    Node,
+}
+
+/// Whether a `Book`/`Chapter` [`OutlineItem`]'s children have been
+/// discovered yet (S27e data shape only — the discovery itself, "contextual
+/// expansion", is S27g and not built here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpansionState {
+    #[default]
+    NotExpanded,
+    Expanded,
+}
+
+/// Which bibliographic entry a `Book`/`Article` [`OutlineItem`] refers to,
+/// and what S27d's existence check said about it.
+///
+/// Deliberately reuses `source::ProposedItem`/`VerificationOutcome` verbatim
+/// rather than inventing a parallel shape — this IS the item S27d's
+/// `verify_bibliography` ran against, so a re-derived equivalent struct here
+/// would just be a second thing to keep in sync with that module's contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourcePointer {
+    pub item: crate::source::ProposedItem,
+    /// `None` only transiently, inside `api::cold_start`'s propose/verify
+    /// loop, for an item not yet checked — every `SourcePointer` that
+    /// actually reaches `Outline::items` carries a real outcome (verified,
+    /// not-found-but-kept-visible, or unavailable), never a bare pointer.
+    #[serde(default)]
+    pub verification: Option<crate::source::VerificationOutcome>,
 }
 
 /// Resolves which document actually owns a node's file/event-log (§S15b) —
@@ -269,80 +346,92 @@ pub async fn propose_search_subject(ai: &Ai, topic: &str) -> Result<String, Engi
     Ok(text.trim().trim_matches('"').to_string())
 }
 
-/// One node of the FULL outline tree an objective needs (§S15/§S16, unified
-/// 2026-08-19): titles only, no ids — `api::cold_start` mints those once the
-/// tree is resolved against existing documents, so the client has something
-/// stable to toggle and confirm against, and materialization decides gating
-/// (`OutlineItem::prerequisites`) and nesting (`OutlineItem::parent_id`) from
-/// tree structure, not from anything carried here.
+/// One item of the reading list an objective needs (S27e, PLAN.md §27,
+/// replacing the pre-pivot concept-decomposition tree this type used to
+/// describe alone — see git history / PLAN.md's S27e entry for that old
+/// shape's contract if archaeology is ever needed).
 ///
-/// The array this appears in is always read as ONE ordered sequence:
-/// every element except the LAST is a prerequisite the objective presupposes
-/// (background, most basic first); the LAST element is the objective's own
-/// topic. This replaces what used to be two independent calls
-/// (`generate_outline` for the objective's own flat breakdown,
-/// `propose_prerequisites` for a separately-generated forest) glued together
-/// afterward by `api::cold_start::materialize_prereq_tree` assigning
-/// `parent_id` — that graft was the actual bug (live report 2026-08-19,
-/// "Funções Recursivas": independently-generated prerequisites "C data
-/// types"/"C functions" were nested under the unrelated main-line item "What
-/// is recursion in C" because the graft code had nothing better to attach
-/// them to). A single call that plans the whole sequence at once can place
-/// prerequisites as siblings in the right order and give the objective its
-/// own titled container the same way any other bundle of separable
-/// sub-skills gets one — see `prompt::propose_outline` for the exact
-/// contract.
-///
-/// A node gets `children` only when it's genuinely a bundle of separable
-/// sub-skills that must each be demonstrated on their own — this test
-/// applies recursively at every level and to prerequisite and objective
-/// nodes alike, there is no structural difference between them beyond
-/// position in the top-level array.
+/// The array this appears in is always read as ONE ordered sequence of real
+/// bibliographic works — books and articles, never invented concept
+/// titles — with foundational/prerequisite works first and the work(s) most
+/// directly covering the objective last. Order alone carries the
+/// prerequisite relationship now (PLAN.md §27 decision 3, "pré-requisito de
+/// conceito não sobrevive como categoria própria"): there is no longer a
+/// separate "prerequisite of concept" category, so `children` is always
+/// empty coming out of `propose_outline` — nothing below a book/article is
+/// discovered at cold start; that's S27g's contextual expansion, later,
+/// against the real PDF. The field stays on this type only because
+/// `api::cold_start`'s materialization still reuses it structurally
+/// (the sidebar tree shape S27g will populate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedOutlineNode {
     pub title: String,
     #[serde(default)]
     pub children: Vec<ProposedOutlineNode>,
+    /// S27e: `Book` or `Article` for every item the new reading-list prompt
+    /// proposes — see [`OutlineItemType`]'s doc comment for why `Chapter`
+    /// never appears here and `Node` only shows up on the old,
+    /// still-compiled-but-unused-by-`propose_outline` concept-tree shape
+    /// this type also used to serve alone.
+    #[serde(default)]
+    pub item_type: OutlineItemType,
+    /// The proposed bibliographic identity for a `Book`/`Article` item —
+    /// `None` for `Node`/`Chapter`. Not yet a [`SourcePointer`]: verification
+    /// (S27d's `verify_bibliography`) hasn't run at the point this type is
+    /// produced by `parse::outline_tree` — that happens afterward, in
+    /// `api::cold_start`, which is what turns this into a real
+    /// `OutlineItem`'s `source: Some(SourcePointer { .. })`.
+    #[serde(default)]
+    pub bibliography: Option<crate::source::ProposedItem>,
 }
 
-/// Proposes the FULL structure of the initial outline in one call (§S15,
-/// §S16, unified 2026-08-19): prerequisite background the objective
-/// presupposes, then the objective's own content, as one ordered sequence —
-/// see [`ProposedOutlineNode`]'s doc comment for the array contract this
-/// returns. An empty result is never valid (the objective's own node is
-/// always at least one element); a parse failure is a hard error, same as
-/// the old `generate_outline` — this is the actual content being confirmed
-/// before generation, not something with a safe silent default the way an
-/// empty prerequisite list used to be.
+/// Proposes the initial reading list for an objective (S27e, PLAN.md §27,
+/// replacing the pre-pivot concept-outline-by-prerequisite call this
+/// function used to make — see git history for that prompt/parse if ever
+/// needed). Real bibliographic works only, ordered foundational-first — see
+/// [`ProposedOutlineNode`]'s doc comment for the array contract. An empty
+/// result is never valid (there is always at least one work covering the
+/// objective itself); a parse failure is a hard error — this is the actual
+/// reading list about to be shown for confirmation, not something with a
+/// safe silent default.
 ///
-/// Robust tier, deliberately: the two calls this replaces already needed
-/// different tiers for the same underlying reason (confirmed live,
-/// 2026-08-17 — the configured Fast-tier model reliably missed real
-/// prerequisites, e.g. answering "no prerequisites" for S15's own spec
-/// example, "integração" → algebra/limites/derivadas, 0-for-6, while Robust
-/// got it right 2-for-2 on the identical prompt) and the unified call now
-/// carries strictly more structural judgment per response, not less. This is
-/// a one-time call per cold start (not per-block like exercise generation),
-/// so the cost tradeoff favors correctness: a wrong answer here isn't graded
-/// and corrected later like a bad exercise — it silently ships a wrong
-/// curriculum shape.
-/// **Superseded-pending-S27e (PLAN.md S28 item 6):** the pivot's reading-list
-/// cold start (§27) replaces this concept-outline-by-prerequisite call with
-/// one that walks a matched bibliography instead — but S27 isn't built yet,
-/// so this stays the app's only working path from a confirmed objective to
-/// an outline. Left wired deliberately: removing it now would break cold
-/// start with no replacement, not just leave dead code.
+/// Verification (S27d's `verify_bibliography`, run per proposed item against
+/// real catalogs) deliberately does NOT happen in here: it needs a
+/// `BibliographyClient`/`BibliographyCache`, which need a data directory —
+/// dragging `source`'s I/O types into `engine`'s signature for this one
+/// call's benefit isn't worth it when `api::cold_start` already holds
+/// `state` with both. See `api::cold_start::propose_reading_list` for the
+/// propose → verify → (bounded) re-propose loop built on top of this.
+///
+/// `rejected` names items a prior round of this same cold start already
+/// tried and had rejected by verification (S27e's bounded retry, one round —
+/// same shape as `movement`'s one-repair-round convention) — empty on the
+/// first call. Passing titles back lets the model avoid proposing the exact
+/// same unverifiable work again instead of looping on it.
+///
+/// Robust tier, deliberately, same reasoning the old concept-decomposition
+/// call used this tier for: real bibliographic judgment (which works are
+/// genuinely foundational for this objective, in what order) is exactly the
+/// kind of structural judgment call that was confirmed live (2026-08-17) to
+/// need it — this is a one-time call per cold start, not a per-block one, so
+/// the cost tradeoff favors correctness.
 pub async fn propose_outline(
     ai: &Ai,
     topic: &str,
     objective: &str,
+    rejected: &[String],
 ) -> Result<Vec<ProposedOutlineNode>, EngineError> {
-    let text = collect(ai, Tier::Robust, prompt::propose_outline(topic, objective)).await?;
+    let text = collect(
+        ai,
+        Tier::Robust,
+        prompt::propose_outline(topic, objective, rejected),
+    )
+    .await?;
     let nodes = parse::outline_tree(&text)
         .ok_or_else(|| EngineError::Parse("could not read outline tree".to_string()))?;
     if nodes.is_empty() {
         return Err(EngineError::Parse(
-            "outline tree had no objective node".to_string(),
+            "outline tree had no reading-list items".to_string(),
         ));
     }
     Ok(nodes)
@@ -709,6 +798,9 @@ mod tests {
             parent_id: None,
             mode: NodeMode::Learn,
             source_doc_id: source_doc_id.map(String::from),
+            item_type: OutlineItemType::Node,
+            expansion: ExpansionState::NotExpanded,
+            source: None,
         }
     }
 
@@ -749,6 +841,28 @@ mod tests {
         )
     }
 
+    /// Same test-double convention as `movement.rs`/`profile.rs`: a
+    /// provider whose reply is computed from the actual request, for
+    /// asserting on prompt CONTENT (e.g. S27e's rejected-title retry) —
+    /// `mock_ai` above only fixes the reply, not what was asked.
+    fn scripted_ai<F>(f: F) -> Ai
+    where
+        F: Fn(&crate::ai::ChatRequest) -> String + Send + Sync + 'static,
+    {
+        Ai::new(
+            Provider::Mock(MockProvider::scripted(f)),
+            Models::single("mock"),
+        )
+    }
+
+    fn full_text(req: &crate::ai::ChatRequest) -> String {
+        req.messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn strip_build_marker_removes_a_leading_stamp_only() {
         let stamped = "  <!--learnive-build: abc1234-->\n<p data-block-id=\"b1\">Hello.</p>";
@@ -770,15 +884,29 @@ mod tests {
 
     #[test]
     fn parse_outline_tree_json() {
+        // S27e: the reading-list schema is exactly `source::ProposedItem`'s
+        // own shape, one object per book/article — no `children`.
         let nodes = parse::outline_tree(
-            r#"[{"title":"Limits","children":[]},{"title":"Derivatives","children":[]}]"#,
+            r#"[{"title":"Calculus, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book"},
+                {"title":"On the fundamental theorem","authors":[],"year":null,"edition":null,"identifier":null,"kind":"article"}]"#,
         )
         .unwrap();
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].title, "Limits");
-        assert_eq!(nodes[1].title, "Derivatives");
+        assert_eq!(nodes[0].title, "Calculus, Volume 1");
+        assert_eq!(nodes[0].item_type, OutlineItemType::Book);
+        assert!(nodes[0].children.is_empty());
+        assert_eq!(
+            nodes[0].bibliography.as_ref().unwrap().kind,
+            crate::source::SourceKind::Book
+        );
+        assert_eq!(nodes[1].title, "On the fundamental theorem");
+        assert_eq!(nodes[1].item_type, OutlineItemType::Article);
 
         assert!(parse::outline_tree("not json").is_none());
+        // Missing required `ProposedItem` fields (no `authors`/`kind`) is a
+        // parse failure too, not a silently-defaulted item — this schema is
+        // strict, unlike the old free-form `{title, children}` shape.
+        assert!(parse::outline_tree(r#"[{"title":"Missing fields"}]"#).is_none());
     }
 
     #[test]
@@ -1062,24 +1190,30 @@ mod tests {
     fn print_outline_tree(nodes: &[ProposedOutlineNode], depth: usize, is_top: bool) {
         for (i, n) in nodes.iter().enumerate() {
             let tag = if is_top && i == nodes.len() - 1 {
-                " [objective]"
+                " [most-specific / objective work]"
             } else {
                 ""
             };
-            eprintln!("{}- {}{tag}", "  ".repeat(depth + 1), n.title);
+            eprintln!(
+                "{}- ({:?}) {}{tag}",
+                "  ".repeat(depth + 1),
+                n.item_type,
+                n.title
+            );
             print_outline_tree(&n.children, depth + 1, false);
         }
     }
 
-    /// Live quality-iteration harness for `prompt::propose_outline` (§S15/
-    /// §S16, unified 2026-08-19) — not a correctness test (nothing to assert
-    /// against), a print-and-eyeball loop for tuning the prompt against the
-    /// REAL configured Robust-tier provider this call runs on. Merges the
-    /// case lists the two separate probes this replaced used to carry
-    /// (`outline_quality_probe` for the objective's own decomposition,
-    /// `prerequisites_quality_probe` for prerequisite judgment) since one
-    /// call now does both jobs at once. Ignored by default: spends real
-    /// tokens. Run with `cargo test -p learnive \
+    /// Live quality-iteration harness for `prompt::propose_outline` — not a
+    /// correctness test (nothing to assert against), a print-and-eyeball
+    /// loop for tuning the prompt against the REAL configured Robust-tier
+    /// provider this call runs on. **S27e:** now judges the reading-list
+    /// prompt (real books/articles, foundational-first) rather than the
+    /// pre-pivot concept-decomposition tree — the case list is kept as-is
+    /// (same topics/objectives are still a reasonable spread to eyeball
+    /// against), only what's printed per case changed (`item_type` +
+    /// title, no more prerequisite-vs-objective framing). Ignored by
+    /// default: spends real tokens. Run with `cargo test -p learnive \
     /// engine::tests::outline_quality_probe -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore = "hits the real configured provider, spends tokens, for manual prompt tuning only"]
@@ -1145,7 +1279,7 @@ mod tests {
         ];
 
         for (topic, objective) in cases {
-            let tree = propose_outline(&ai, topic, objective).await;
+            let tree = propose_outline(&ai, topic, objective, &[]).await;
             eprintln!("\n=== topic: {topic}\n    objective: {objective}");
             match tree {
                 Ok(nodes) => print_outline_tree(&nodes, 0, true),
@@ -1157,47 +1291,74 @@ mod tests {
     #[tokio::test]
     async fn propose_outline_via_mock() {
         let ai = mock_ai(
-            r#"[{"title":"Algebra basics","children":[]},
-               {"title":"Integration","children":[
-                   {"title":"Antiderivatives","children":[]},
-                   {"title":"Definite integrals","children":[]}
-               ]}]"#,
+            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson"],"year":2013,"edition":"9","identifier":null,"kind":"book"},
+               {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book"}]"#,
         );
-        let nodes = propose_outline(&ai, "calculus", "Learn integration")
+        let nodes = propose_outline(&ai, "calculus", "Learn integration", &[])
             .await
             .unwrap();
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].title, "Algebra basics");
+        assert_eq!(nodes[0].title, "Pré-Cálculo");
+        assert_eq!(nodes[0].item_type, OutlineItemType::Book);
         assert!(nodes[0].children.is_empty());
-        // The last element is the objective's own topic, decomposed.
-        assert_eq!(nodes[1].title, "Integration");
-        assert_eq!(nodes[1].children.len(), 2);
-        assert_eq!(nodes[1].children[0].title, "Antiderivatives");
+        // The last element is the work most directly covering the
+        // objective — S27e: order alone carries the prerequisite chain now,
+        // there is no more separate nested-children decomposition here.
+        assert_eq!(nodes[1].title, "Cálculo, Volume 1");
+        assert!(nodes[1].bibliography.is_some());
     }
 
-    /// A self-contained objective with no prerequisites is still a
-    /// single-element array (just the objective's own node) — never empty.
+    /// A self-contained objective still needing only one work is a
+    /// single-element array — never empty.
     #[tokio::test]
     async fn propose_outline_no_prerequisites_is_just_the_objective() {
-        let ai = mock_ai(r#"[{"title":"Say hello in French","children":[]}]"#);
-        let nodes = propose_outline(&ai, "greetings", "Say hello in French")
+        let ai = mock_ai(
+            r#"[{"title":"Le Petit Prince","authors":["Saint-Exupéry, Antoine de"],"year":1943,"edition":null,"identifier":null,"kind":"book"}]"#,
+        );
+        let nodes = propose_outline(&ai, "greetings", "Say hello in French", &[])
             .await
             .unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].title, "Say hello in French");
+        assert_eq!(nodes[0].title, "Le Petit Prince");
     }
 
-    /// Unlike the old prerequisite-only forest, an empty array is never a
-    /// valid answer here — the objective's own node is always at least one
-    /// element, so an empty response can only mean the model got the
-    /// contract wrong.
+    /// An empty array is never a valid answer here — there is always at
+    /// least one work covering the objective itself — so an empty response
+    /// can only mean the model got the contract wrong.
     #[tokio::test]
     async fn propose_outline_empty_array_is_a_parse_error() {
         let ai = mock_ai("[]");
-        let err = propose_outline(&ai, "greetings", "Say hello in French")
+        let err = propose_outline(&ai, "greetings", "Say hello in French", &[])
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::Parse(_)));
+    }
+
+    /// S27e's bounded retry: a re-ask names the rejected title in the
+    /// system prompt so the model can propose a real substitute instead of
+    /// looping on the same unverifiable work.
+    #[tokio::test]
+    async fn propose_outline_carries_rejected_titles_into_the_retry_prompt() {
+        let rejected_title = "A Made-Up Textbook That Does Not Exist".to_string();
+        let for_closure = rejected_title.clone();
+        let ai = scripted_ai(move |req| {
+            let text = full_text(req);
+            assert!(
+                text.contains(&for_closure),
+                "the rejected title must reach the model: {text}"
+            );
+            r#"[{"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book"}]"#.to_string()
+        });
+        let nodes = propose_outline(
+            &ai,
+            "calculus",
+            "Learn integration",
+            std::slice::from_ref(&rejected_title),
+        )
+        .await
+        .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].title, "Cálculo, Volume 1");
     }
 
     #[tokio::test]

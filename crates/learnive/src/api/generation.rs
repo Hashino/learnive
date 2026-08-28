@@ -597,6 +597,13 @@ pub async fn decide_plan_proposal(
                     parent_id: None,
                     mode: NodeMode::Learn,
                     source_doc_id: None,
+                    // A `plan`-move item is always a directly generable
+                    // concept node (S27e: `Book`/`Chapter`/`Article` items
+                    // only ever come from the reading-list cold start, never
+                    // from a mid-document outline revision).
+                    item_type: OutlineItemType::Node,
+                    expansion: ExpansionState::NotExpanded,
+                    source: None,
                 })
                 .collect();
             outline.items.extend(sub_nodes);

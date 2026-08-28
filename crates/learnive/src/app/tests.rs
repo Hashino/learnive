@@ -1402,13 +1402,12 @@ async fn interactive_island_never_leaks_raw_script_but_is_served_sandboxed() {
 
 #[tokio::test]
 async fn outline_proposal_is_a_hard_error_on_unparseable_model_output() {
-    // §S15/§S16 (unified 2026-08-19): `propose_outline` replaced the old
-    // prerequisite-only forest (where a bare `[]` was a normal, common
-    // answer a parse failure could safely degrade to) with a single tree
-    // whose LAST element — the objective's own node — is never optional.
-    // There is no longer a safe empty default to degrade to, so a model
+    // S27e: `propose_outline` now asks for a reading list whose LAST
+    // element — the work most directly covering the objective — is never
+    // optional, same "no safe empty default" reasoning the pre-pivot
+    // concept-tree contract this replaced already established. A model
     // that answers with prose instead of JSON despite the contract must
-    // surface as a hard error instead of silently becoming an empty tree.
+    // surface as a hard error instead of silently becoming an empty list.
     use crate::ai::{Ai, MockProvider, Models, Provider};
 
     let scripted = Provider::Mock(MockProvider::scripted(|req| {
@@ -1418,7 +1417,7 @@ async fn outline_proposal_is_a_hard_error_on_unparseable_model_output() {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        if text.contains("FULL structure of a living curriculum") {
+        if text.contains("propose the initial READING LIST") {
             // No JSON at all — the same shape as a stream whose only
             // content was reasoning prose, never a final tree.
             "I don't think this objective needs any structure.".to_string()

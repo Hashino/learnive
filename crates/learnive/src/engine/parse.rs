@@ -1,4 +1,7 @@
-use super::{AskDecision, Assessment, EngineError, ObjectiveProposal, ProposedOutlineNode};
+use super::{
+    AskDecision, Assessment, EngineError, ObjectiveProposal, OutlineItemType, ProposedOutlineNode,
+};
+use crate::source::{ProposedItem, SourceKind};
 use serde::Deserialize;
 
 /// Cold-start objective proposal (§S4): `{"text":"...","title":"..."}`.
@@ -28,16 +31,44 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
     }
 }
 
-/// Full outline tree (§S15/§S16, unified 2026-08-19): a JSON array of
-/// `{title, children}`, parsed recursively by `serde` directly
-/// (`ProposedOutlineNode::children` already defaults to empty). Unlike the
-/// old prerequisite-only forest this replaces, an empty array is NOT treated
-/// specially here — `engine::propose_outline` rejects it (the objective's
-/// own node is always at least one element) — this function only reports
-/// whether the text was readable JSON at all.
+/// Reading list (S27e, PLAN.md §27): a JSON array shaped exactly like
+/// `source::ProposedItem` — `{title, authors, year, edition, identifier,
+/// kind}` — one object per book/article, foundational-first. Deliberately
+/// the SAME schema the model is asked for as what S27d's
+/// `verify_bibliography` consumes, rather than a wrapping `{title,
+/// children}` shape that then carries a nested bibliography object: one
+/// schema for the whole round trip is less for the model to get wrong, and
+/// nothing about `children` needs to appear here (see
+/// `ProposedOutlineNode`'s doc comment — it's always empty coming out of
+/// this call). `kind` becomes `item_type` (`Book`/`Article` only — `parse`
+/// itself is what enforces that a reading-list response can never mint a
+/// `Chapter`/`Node` item, since `SourceKind` has no such variants to parse
+/// into in the first place).
+///
+/// An empty array is NOT treated specially here — `engine::propose_outline`
+/// rejects it (there is always at least one work covering the objective
+/// itself) — this function only reports whether the text was readable,
+/// schema-conforming JSON at all.
 pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
     let json = extract_json(text)?;
-    serde_json::from_str::<Vec<ProposedOutlineNode>>(json).ok()
+    let items = serde_json::from_str::<Vec<ProposedItem>>(json).ok()?;
+    Some(
+        items
+            .into_iter()
+            .map(|item| {
+                let item_type = match item.kind {
+                    SourceKind::Book => OutlineItemType::Book,
+                    SourceKind::Article => OutlineItemType::Article,
+                };
+                ProposedOutlineNode {
+                    title: item.title.clone(),
+                    children: Vec::new(),
+                    item_type,
+                    bibliography: Some(item),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Extracts the first JSON block (`{...}` or `[...]`) from the text, tolerating

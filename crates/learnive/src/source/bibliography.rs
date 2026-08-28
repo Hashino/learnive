@@ -101,7 +101,13 @@ pub enum Identifier {
 /// prose (SPEC's own instruction — "o modelo emite campos estruturados").
 /// Produced by a later slice's LLM call site (S27e); this module only
 /// defines the shape and the verification logic that consumes it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Eq` (added alongside S27e, which embeds this inside
+/// `engine::SourcePointer`/`OutlineItem`): every field here was already
+/// `Eq`-capable (`Option<u32>`, `Option<String>`, `Option<Identifier>` —
+/// `Identifier` itself derives `Eq` — and `SourceKind`); the original
+/// `PartialEq`-only derive was incidental, not a deliberate exclusion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedItem {
     pub title: String,
     /// "First Last" order assumed, same as [`super::acervo::ExpectedItem::authors`]
@@ -130,7 +136,10 @@ pub enum Catalog {
 /// Three distinct outcomes, deliberately not a boolean — a caller (S27f+)
 /// must treat "the catalogs were unreachable" completely differently from
 /// "we asked, and this genuinely doesn't seem to exist" (module doc).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Eq` (added alongside S27e, same reasoning as [`ProposedItem`]'s: every
+/// field — `Catalog`, `String`, `Vec<String>` — was already `Eq`-capable).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum VerificationOutcome {
     /// A plausible match was found in at least one catalog.

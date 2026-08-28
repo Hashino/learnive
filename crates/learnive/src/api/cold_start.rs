@@ -164,6 +164,19 @@ pub struct ProposedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     known: Option<KnownMatch>,
     children: Vec<ProposedNode>,
+    /// S27e: `book`/`article` for every item the new reading-list
+    /// `propose_outline` produces (see `engine::OutlineItemType`) — a future
+    /// screen (S27f) can use this to render bibliographic detail; today's
+    /// client just ignores fields it doesn't render.
+    item_type: OutlineItemType,
+    /// The proposed bibliographic identity, present whenever `item_type` is
+    /// `book`/`article`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bibliography: Option<crate::source::ProposedItem>,
+    /// S27d's existence-check outcome for `bibliography`, once
+    /// `propose_outline`'s verify step has run — `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<crate::source::VerificationOutcome>,
 }
 
 #[derive(Serialize)]
@@ -197,7 +210,7 @@ pub async fn propose_outline(
         body.objective_text.clone()
     };
     let ai = state.ai.load_full();
-    let tree = engine::propose_outline(&ai, &body.topic, &objective).await?;
+    let tree = engine::propose_outline(&ai, &body.topic, &objective, &[]).await?;
     let known = known_concepts(&state)?;
     let nodes = resolve_outline_forest(&state, &tree, &known).await;
     Ok(Json(ProposeOutlineResp { nodes }))
@@ -326,6 +339,12 @@ fn resolve_outline_node(
             .iter()
             .map(|c| resolve_outline_node(c, known, known_vecs, embedder))
             .collect(),
+        item_type: node.item_type,
+        bibliography: node.bibliography.clone(),
+        // Verification (S27d) hasn't run yet at this point — filled in by
+        // `propose_reading_list`'s caller before the resolved forest is
+        // actually returned to the client.
+        verification: None,
     }
 }
 
@@ -347,6 +366,16 @@ pub struct ConfirmedNode {
     known: Option<KnownMatch>,
     #[serde(default)]
     children: Vec<ConfirmedNode>,
+    /// S27e: echoed back verbatim from `ProposedNode::item_type` — the
+    /// server never re-derives it, same convention as `id`/`title`.
+    #[serde(default)]
+    item_type: OutlineItemType,
+    /// Echoed back verbatim from `ProposedNode::bibliography`.
+    #[serde(default)]
+    bibliography: Option<crate::source::ProposedItem>,
+    /// Echoed back verbatim from `ProposedNode::verification`.
+    #[serde(default)]
+    verification: Option<crate::source::VerificationOutcome>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +473,13 @@ fn materialize_outline_node(
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Learn,
                 source_doc_id: Some(known.doc_id.clone()),
+                item_type: node.item_type,
+                // The referenced item's real expansion state lives on the
+                // OWNER document's own `OutlineItem` (not resolved here — a
+                // reference only points at it, `owner_of`); left at the
+                // default rather than guessed.
+                expansion: ExpansionState::NotExpanded,
+                source: source_pointer_from(node),
             });
             return known.node_id.clone();
         }
@@ -459,6 +495,9 @@ fn materialize_outline_node(
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Review,
                 source_doc_id: None,
+                item_type: node.item_type,
+                expansion: ExpansionState::NotExpanded,
+                source: source_pointer_from(node),
             });
         }
         PrereqAction::Learn => {
@@ -476,10 +515,25 @@ fn materialize_outline_node(
                 parent_id: parent_id.map(String::from),
                 mode: NodeMode::Learn,
                 source_doc_id: None,
+                item_type: node.item_type,
+                expansion: ExpansionState::NotExpanded,
+                source: source_pointer_from(node),
             });
         }
     }
     node.id.clone()
+}
+
+/// Builds an `OutlineItem::source` pointer from a `ConfirmedNode`'s
+/// echoed-back bibliography/verification (S27e) — `None` when the node
+/// carries no bibliography (a plain `Node`-typed item, e.g. one confirmed
+/// via `auto_confirm_learn`'s direct-API fallback, which never populates
+/// `verification`).
+fn source_pointer_from(node: &ConfirmedNode) -> Option<SourcePointer> {
+    node.bibliography.clone().map(|item| SourcePointer {
+        item,
+        verification: node.verification.clone(),
+    })
 }
 
 /// Every descendant of a `skip`ped node is skipped too, unconditionally —
@@ -508,6 +562,9 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             action: PrereqAction::Learn,
             known: None,
             children: auto_confirm_learn(&n.children),
+            item_type: n.item_type,
+            bibliography: n.bibliography.clone(),
+            verification: None,
         })
         .collect()
 }
@@ -700,16 +757,16 @@ pub async fn create_document(
     // main-line item instead of the sequential background topics they were.
     let confirmed_nodes = if body.nodes.is_empty() {
         let ai = state.ai.load_full();
-        let mut tree = engine::propose_outline(&ai, &body.topic, &objective_text).await?;
-        // A caller that skips the confirmation screen never saw — let alone
-        // approved — the proposed prerequisites, so only auto-confirm the
-        // objective's own (last) top-level node and drop the rest, rather
-        // than silently committing a learner to a prerequisite chain nobody
-        // reviewed.
-        let objective_node = tree
-            .pop()
-            .ok_or_else(|| ApiError::Internal("outline proposal returned no nodes".to_string()))?;
-        auto_confirm_learn(std::slice::from_ref(&objective_node))
+        let tree = engine::propose_outline(&ai, &body.topic, &objective_text, &[]).await?;
+        // S27e: a caller that skips the confirmation screen never saw — let
+        // alone reviewed — the proposed reading list, but there is no
+        // longer a separate "unreviewed prerequisites" category to drop
+        // (PLAN.md §27 decision 3: the list's own order IS the prerequisite
+        // chain) — auto-confirming just the last item, the way the old
+        // concept-tree fallback dropped every prerequisite and kept only
+        // the objective's own node, would silently discard every
+        // foundational work instead. Auto-confirm the whole list, in order.
+        auto_confirm_learn(&tree)
     } else {
         body.nodes
     };
@@ -823,11 +880,11 @@ pub async fn next_topic(
 
     let confirmed_nodes = if body.nodes.is_empty() {
         let ai = state.ai.load_full();
-        let mut tree = engine::propose_outline(&ai, &body.topic, &objective_text).await?;
-        let objective_node = tree
-            .pop()
-            .ok_or_else(|| ApiError::Internal("outline proposal returned no nodes".to_string()))?;
-        auto_confirm_learn(std::slice::from_ref(&objective_node))
+        let tree = engine::propose_outline(&ai, &body.topic, &objective_text, &[]).await?;
+        // S27e: same reasoning as `create_document`'s identical fallback —
+        // auto-confirm the whole reading list, in order, not just the last
+        // item (see that function's comment for why).
+        auto_confirm_learn(&tree)
     } else {
         body.nodes
     };
@@ -1361,7 +1418,8 @@ fn spawn_acquisition(state: AppState, topic: String) {
 // works where `.se`/`.st`/`.wf` are challenged. libgen.im/libgen.li are tried
 // first because they answer from more networks; libgen.is/rs/st are the older
 // generation that still works where reachable.
-const DEFAULT_LIBGEN_URLS: &str = "https://libgen.li,https://libgen.im,https://libgen.is,https://libgen.rs,https://libgen.st";
+const DEFAULT_LIBGEN_URLS: &str =
+    "https://libgen.li,https://libgen.im,https://libgen.is,https://libgen.rs,https://libgen.st";
 const DEFAULT_SCIHUB_URLS: &str = "https://sci-hub.ee,https://sci-hub.se,https://sci-hub.st,https://sci-hub.wf,https://sci-hub.ren";
 
 /// The §11.1 primary acquisition backend: LibGen (books). The mirror list comes
@@ -1398,6 +1456,9 @@ mod tests {
             action: PrereqAction::Learn,
             known: None,
             children,
+            item_type: OutlineItemType::Node,
+            bibliography: None,
+            verification: None,
         }
     }
 
@@ -1408,6 +1469,9 @@ mod tests {
             action,
             known: None,
             children: Vec::new(),
+            item_type: OutlineItemType::Node,
+            bibliography: None,
+            verification: None,
         }
     }
 
@@ -1504,6 +1568,9 @@ mod tests {
             action: PrereqAction::Skip,
             known: None,
             children: vec![leaf("c1", "Epsilon-delta", PrereqAction::Learn)],
+            item_type: OutlineItemType::Node,
+            bibliography: None,
+            verification: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1536,6 +1603,9 @@ mod tests {
                 node_id: "real-node-id".to_string(),
             }),
             children: vec![leaf("c1", "Factoring", PrereqAction::Learn)],
+            item_type: OutlineItemType::Book,
+            bibliography: None,
+            verification: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1545,6 +1615,9 @@ mod tests {
         assert!(to_skip.is_empty(), "a reference is not a NodeSkipped event");
         assert_eq!(items[0].id, "real-node-id");
         assert_eq!(items[0].source_doc_id.as_deref(), Some("other-doc"));
+        // S27e: item_type is echoed through from the confirmed node, not
+        // dropped by the reference-materialization path.
+        assert_eq!(items[0].item_type, OutlineItemType::Book);
         // whatever follows gates on the real node id, not the proposal id
         assert_eq!(exit, Some("real-node-id".to_string()));
     }
@@ -1560,6 +1633,9 @@ mod tests {
             action: PrereqAction::Review,
             known: None,
             children: vec![leaf("c1", "Factoring", PrereqAction::Learn)],
+            item_type: OutlineItemType::Node,
+            bibliography: None,
+            verification: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();

@@ -33,7 +33,8 @@ use crate::ai::{Ai, MockProvider, Models, OpenAiCompat, Provider, Tier};
 use crate::app::AppState;
 use crate::config::{AppConfig, Intent, ProviderKind};
 use crate::engine::{
-    self, AskDecision, Grade, NodeMode, ObjectiveGrade, Outline, OutlineItem, Rubric,
+    self, AskDecision, ExpansionState, Grade, NodeMode, ObjectiveGrade, Outline, OutlineItem,
+    OutlineItemType, Rubric, SourcePointer,
 };
 use crate::events::EventKind;
 use crate::events::aggregate::{
