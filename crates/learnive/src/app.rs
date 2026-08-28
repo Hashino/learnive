@@ -242,6 +242,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/documents/{doc}/profile",
             get(api::get_profile).post(api::revise_profile),
         )
+        // S27f: the acervo gate report ("what's missing"), PDF<->item
+        // manual matching, and TOC-confirmation screens. On-demand only —
+        // never wired into the mandatory generation flow (S27h's job).
+        .route("/api/documents/{doc}/acervo", get(api::get_acervo_report))
+        .route(
+            "/api/documents/{doc}/acervo/matches",
+            get(api::get_acervo_matches).post(api::set_acervo_match),
+        )
+        .route(
+            "/api/documents/{doc}/acervo/toc/{item}",
+            get(api::get_acervo_toc).put(api::put_acervo_toc),
+        )
         // Read-only source viewer (§11) — the corpus is global, not per-document
         // (§4), so this lives outside the `/api/documents/{doc}` tree; a citation
         // click resolves here for its `data-source-id`. Meta+toc only: the

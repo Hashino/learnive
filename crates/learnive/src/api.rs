@@ -112,6 +112,7 @@ struct RubricSidecar {
     topic: String,
 }
 
+mod acervo;
 mod cold_start;
 mod generation;
 mod grading;
@@ -119,6 +120,7 @@ mod provider;
 mod reading;
 mod setup;
 
+pub use acervo::*;
 pub use cold_start::*;
 pub use generation::*;
 pub use grading::*;
