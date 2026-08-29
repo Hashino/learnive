@@ -107,25 +107,17 @@ fn find_expected_item(
 }
 
 /// Resolves the single filename currently understood to represent an
-/// expected item: a recorded manual pairing wins outright; otherwise a
-/// unique automatic candidate; anything else (no candidate, or more than
-/// one) is unresolved — the caller (the TOC endpoints) can't proceed without
-/// the matching screen settling it first.
+/// expected item — the TOC endpoints' own alias for
+/// [`source::acervo::resolve_matched_filename`], promoted to `source::acervo`
+/// by S27m (2026-08-29) so this screen and the grounding gate
+/// (`api::reading::ground_node`) share one resolution rule instead of two
+/// copies that could silently drift apart.
 fn resolve_matched_filename(
     library: &LocalPdfSource,
     manual: &ManualMatchStore,
     item: &ExpectedItem,
 ) -> std::io::Result<Option<String>> {
-    if let Some(m) = manual.get(item) {
-        return Ok(Some(m.filename));
-    }
-    let candidates = source::acervo::candidate_matches(library, item)?;
-    match candidates.len() {
-        1 => Ok(Some(
-            candidates.into_iter().next().expect("len == 1").filename,
-        )),
-        _ => Ok(None),
-    }
+    source::acervo::resolve_matched_filename(library, manual, item)
 }
 
 fn flatten_outline(entries: &[OutlineEntry], out: &mut Vec<TocEntryResp>) {
@@ -678,9 +670,10 @@ mod tests {
         assert_eq!(report["all_pass"], false);
         // Bug reported live 2026-08-29: the report said "Missing" with no
         // indication of where to put the file. `library_path` closes that.
-        let expected_path =
-            std::fs::canonicalize(std::path::PathBuf::from(state.data_dir.as_ref()).join("library"))
-                .unwrap();
+        let expected_path = std::fs::canonicalize(
+            std::path::PathBuf::from(state.data_dir.as_ref()).join("library"),
+        )
+        .unwrap();
         assert_eq!(
             report["library_path"],
             expected_path.to_string_lossy().as_ref()
@@ -708,7 +701,12 @@ mod tests {
         assert_eq!(report["all_pass"], true);
         // The path must be present even on the early-return (empty-outline)
         // branch — a document that later gains a book source still needs it.
-        assert!(report["library_path"].as_str().unwrap().ends_with("library"));
+        assert!(
+            report["library_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("library")
+        );
     }
 
     #[tokio::test]

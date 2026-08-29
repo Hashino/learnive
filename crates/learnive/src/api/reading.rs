@@ -1,6 +1,9 @@
 use super::*;
 
+use std::fs;
+
 use super::generation::NODE_TAIL_BUDGET;
+use crate::source;
 // ---------------------------------------------------------------------------
 // §S6 — reading interactions ("the document is the answer", §9). All three
 // endpoints below anchor against the node file on disk, which since the §S6
@@ -980,7 +983,26 @@ pub(super) async fn prepare(
     }
 
     let context = prior_content_context(state, doc_id, &outline.items[..idx]);
-    let grounding = grounding_for(state, &item.title).await;
+    let grounding = match ground_node(state, &outline, &item).await {
+        Ok(text) => text,
+        Err(reason) => {
+            // S27m minimum floor (PLAN.md, 2026-08-29): nothing is persisted
+            // to the frozen content layer — `prepare` returning `Err` here
+            // means `generate_node` never reaches its move loop at all — the
+            // event log records why, and the caller's `error` SSE frame is
+            // what the learner sees (never model prose papering over the
+            // gap, never a silent skip).
+            if let Err(e) = event_log.append(
+                Some(&item.id),
+                EventKind::GenerationBlocked {
+                    reason: reason.clone(),
+                },
+            ) {
+                eprintln!("event log append failed: {e}");
+            }
+            return Err(reason);
+        }
+    };
     let objective = objective_for(state, doc_id);
     let profile = profile_for(state, doc_id);
     let outline_titles = outline.items.iter().map(|i| i.title.clone()).collect();
@@ -1254,6 +1276,119 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
         }
         Err(e) => eprintln!("profile distillation failed: {e}"),
     }
+}
+
+/// S27m (PLAN.md, 2026-08-29) — "o nó se funda no livro dele, ou não
+/// nasce". Resolves what grounds this item via
+/// [`engine::resolve_grounding_source`] and, when it has a bibliographic
+/// ancestor, refuses to generate at all unless that exact book/article has
+/// an approved, indexed match in the local library — the fix for the live
+/// bug the S27f verification found: a node whose expected book was
+/// "Missing" in the acervo report still generated, because the network
+/// fallback (`acquire`/LibGen, unchanged by this slice) silently grounded
+/// it in an unrelated downloaded article instead.
+///
+/// An item with **no** bibliographic ancestor at all (legacy/demo/pre-S27e
+/// documents, or a spawned sub-node under a plain `Node` parent) is
+/// deliberately untouched: falls through to the old unscoped-similarity
+/// [`grounding_for`], exactly as it behaved before this slice. S27m's own
+/// scope note is explicit that only the bibliographically-sourced path is
+/// being fixed, not every node in the app.
+async fn ground_node(
+    state: &AppState,
+    outline: &Outline,
+    item: &OutlineItem,
+) -> Result<String, String> {
+    let Some(ptr) = engine::resolve_grounding_source(outline, item) else {
+        return Ok(grounding_for(state, &item.title).await);
+    };
+
+    let expected = source::ExpectedItem {
+        title: ptr.item.title.clone(),
+        authors: ptr.item.authors.clone(),
+        kind: ptr.item.kind,
+    };
+
+    let library = source::LocalPdfSource::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open local library: {e}"))?;
+    let manual = source::ManualMatchStore::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open manual-match store: {e}"))?;
+    let index_cache_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("library");
+
+    let filename = source::resolve_matched_filename(&library, &manual, &expected)
+        .map_err(|e| format!("could not scan the local library: {e}"))?;
+    let Some(filename) = filename else {
+        return Err(format!(
+            "\"{}\" has no approved match in the local library yet — check the acervo gate before this node can generate",
+            expected.title
+        ));
+    };
+
+    // Re-derive the same six-check report the S27f screen shows, scoped to
+    // this one item, so a book that's present but fails identity/text-layer
+    // can't sneak through here either — `resolve_matched_filename` only
+    // answers "which file", not "is that file actually acceptable".
+    let report =
+        source::validate_acervo(&library, std::slice::from_ref(&expected), &index_cache_dir)
+            .map_err(|e| format!("could not validate the acervo gate: {e}"))?;
+    let Some(item_report) = report.items.into_iter().next() else {
+        return Err(format!(
+            "could not validate the acervo gate for \"{}\"",
+            expected.title
+        ));
+    };
+    if !item_report.passes() {
+        return Err(format!(
+            "\"{}\" fails the acervo gate ({}) — fix it there before this node can generate",
+            expected.title,
+            item_report.blocking_failures().join(", ")
+        ));
+    }
+
+    let Some(embedder) = (match &state.retriever {
+        Some(r) => Some(r.read().await.embedder().clone()),
+        None => None,
+    }) else {
+        return Err("no embedding model is loaded — cannot ground this node".to_string());
+    };
+
+    let path = library.root().join(&filename);
+    let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+    let hash = source::acervo::content_hash(&bytes);
+
+    // Piece 1 (S27m): the S27c index-cache build, triggered lazily here
+    // rather than eagerly for every library item at gate-view time (that
+    // would make a read-only report screen pay for a model download/embed
+    // pass on GET, forbidden by §3.1) — first generation attempt against an
+    // approved-but-not-yet-indexed book pays it once; every later node
+    // grounded in the same book reuses the cache.
+    if matches!(item_report.index, source::IndexCheck::Missing) {
+        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
+            .map_err(|e| format!("could not index {filename}: {e}"))?;
+    }
+
+    let hits = source::search_index_cache(&index_cache_dir, &hash, &embedder, &item.title, 4)
+        .map_err(|e| format!("could not search the index for {filename}: {e}"))?;
+    if hits.is_empty() {
+        return Err(format!(
+            "\"{}\" produced no retrievable content for this node",
+            expected.title
+        ));
+    }
+
+    Ok(hits
+        .iter()
+        .map(|(page, text, _score)| {
+            format!(
+                "[id: {} | loc: p:{page} | {}]\n{}",
+                hash, expected.title, text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n"))
 }
 
 /// Retrieves grounding passages for a concept and formats them so the model can

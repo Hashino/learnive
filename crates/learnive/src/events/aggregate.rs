@@ -66,7 +66,8 @@ pub fn tactic_outcomes(events: impl Iterator<Item = Event>) -> HashMap<String, T
             | EventKind::QuestionAsked { .. }
             | EventKind::AnnotationAdded { .. }
             | EventKind::NodeReadToEnd
-            | EventKind::NodeGenerated { .. } => {}
+            | EventKind::NodeGenerated { .. }
+            | EventKind::GenerationBlocked { .. } => {}
         }
     }
     out
@@ -109,7 +110,8 @@ pub fn ladder_signals(events: impl Iterator<Item = Event>) -> LadderSignals {
             | EventKind::QuestionAsked { .. }
             | EventKind::AnnotationAdded { .. }
             | EventKind::NodeReadToEnd
-            | EventKind::NodeGenerated { .. } => {}
+            | EventKind::NodeGenerated { .. }
+            | EventKind::GenerationBlocked { .. } => {}
         }
     }
     signals

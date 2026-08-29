@@ -110,6 +110,15 @@ pub enum EventKind {
     /// exercise, long after generation. `move_id` joins back to the graded
     /// move's `MoveGenerated` event, same pattern as `PlanDecided`.
     NodeGenerated { move_id: String },
+    /// Generation refused outright for this node (S27m, PLAN.md, 2026-08-29
+    /// — "o nó se funda no livro dele, ou não nasce"): its bibliographic
+    /// source has no approved, indexed match in the local library. Nothing
+    /// is persisted to the frozen content layer when this fires — it is
+    /// appended instead of a `NodeGenerated`, not alongside one. `reason` is
+    /// the human-readable refusal (no approved source / acervo gate failed /
+    /// nothing retrievable), the minimum floor PLAN.md's S27m asks for since
+    /// the failure *experience* (retry UX) is explicitly deferred.
+    GenerationBlocked { reason: String },
 }
 
 /// Event-log errors.

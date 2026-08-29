@@ -189,6 +189,31 @@ pub struct SourcePointer {
     pub verification: Option<crate::source::VerificationOutcome>,
 }
 
+/// Which [`SourcePointer`] grounds a given outline item (S27m, PLAN.md,
+/// 2026-08-29) — the item's own, if it's a `Book`/`Article`; otherwise the
+/// nearest ancestor's, found by walking `parent_id` (a `Node`/`Chapter` has
+/// no source of its own — "a chapter inherits its parent book's identity",
+/// generalized here to today's pre-S27g shape where a directly-generable
+/// item can itself already be a `Book`/`Article`, or a spawned sub-node a
+/// few `parent_id` hops below one). `None` for an item with no
+/// bibliographic ancestor anywhere in its chain — the legacy/demo/pre-S27e
+/// case, which S27m's grounding gate deliberately leaves untouched (its own
+/// scope note: only the bibliographically-sourced path is being fixed).
+pub fn resolve_grounding_source(outline: &Outline, item: &OutlineItem) -> Option<SourcePointer> {
+    if let Some(ptr) = &item.source {
+        return Some(ptr.clone());
+    }
+    let mut current = item.parent_id.clone();
+    while let Some(pid) = current {
+        let parent = outline.items.iter().find(|i| i.id == pid)?;
+        if let Some(ptr) = &parent.source {
+            return Some(ptr.clone());
+        }
+        current = parent.parent_id.clone();
+    }
+    None
+}
+
 /// Resolves which document actually owns a node's file/event-log (§S15b) —
 /// the item's own document unless it's a reference (`source_doc_id: Some`),
 /// in which case the pointed-to document. Every call site that turns
@@ -842,6 +867,64 @@ mod tests {
             owner_of(&outline, "doc-visitor", "no-such-id"),
             "doc-visitor"
         );
+    }
+
+    fn book_pointer(title: &str) -> SourcePointer {
+        SourcePointer {
+            item: crate::source::ProposedItem {
+                title: title.to_string(),
+                authors: vec!["Author".to_string()],
+                year: None,
+                edition: None,
+                identifier: None,
+                kind: crate::source::SourceKind::Book,
+            },
+            verification: None,
+        }
+    }
+
+    #[test]
+    fn resolve_grounding_source_returns_a_books_own_pointer() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        book.source = Some(book_pointer("Rosen"));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book.clone()],
+        };
+        assert_eq!(
+            resolve_grounding_source(&outline, &book),
+            Some(book_pointer("Rosen"))
+        );
+    }
+
+    #[test]
+    fn resolve_grounding_source_walks_parent_id_to_an_ancestor_book() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        book.source = Some(book_pointer("Rosen"));
+        let mut chapter = outline_item("ch1", None);
+        chapter.parent_id = Some("book1".to_string());
+        let mut node = outline_item("node1", None);
+        node.parent_id = Some("ch1".to_string());
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book, chapter, node.clone()],
+        };
+        assert_eq!(
+            resolve_grounding_source(&outline, &node),
+            Some(book_pointer("Rosen"))
+        );
+    }
+
+    #[test]
+    fn resolve_grounding_source_is_none_with_no_bibliographic_ancestor() {
+        let node = outline_item("node1", None);
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![node.clone()],
+        };
+        assert_eq!(resolve_grounding_source(&outline, &node), None);
     }
 
     fn mock_ai(reply: &str) -> Ai {

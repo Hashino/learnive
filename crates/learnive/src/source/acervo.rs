@@ -45,15 +45,33 @@
 //! `retriever_live_end_to_end` in `retrieval/index.rs`), but **not called
 //! by [`validate_acervo`]** itself, so a plain validation pass never forces
 //! a model download.
+//!
+//! **Closed by S27m (PLAN.md, 2026-08-29):** "how library PDFs' chunks
+//! eventually join real grounding" (this comment used to defer that
+//! question) is resolved as its own small path, not folded into the
+//! corpus-shaped `retrieval::VectorIndex`/`Retriever` — pushing local
+//! library PDFs through `Corpus` would mean inventing `Section`s/locators
+//! for them, re-entrenching exactly the HTML-ingestion shape S28 is slated
+//! to delete, and PDF text is index-only now (never a display source, per
+//! the pivot). [`search_index_cache`] reads one PDF's own cache file back;
+//! scoping to one source needs no filter because the cache file already
+//! *is* one source. [`resolve_matched_filename`] is the S27f matching
+//! screen's own resolution rule, promoted here so the S27m grounding gate
+//! (`api::reading::ground_node`) can never disagree with what that screen
+//! showed the user (this module used to keep a private copy in
+//! `api::acervo` alone; that copy now just calls this one).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::SourceKind;
 use super::local::{LibraryEntry, LocalPdfSource};
+use super::manual_match::ManualMatchStore;
 use super::matching::{normalize, primary_title, surname_of};
 use super::pdf::{OutlineEntry, PdfDocument, read_pdf};
-use crate::retrieval::{Embedder, chunk_text};
+use crate::retrieval::{Embedder, chunk_text, cosine};
 
 /// A minimal, standalone description of one reading-list item to validate
 /// against the library. **Deliberately not `OutlineItem`/`ProposedOutlineNode`**
@@ -469,6 +487,32 @@ fn check_index_cache(content_hash: &str, index_cache_dir: &Path) -> IndexCheck {
     }
 }
 
+/// Resolves the single filename currently understood to represent an
+/// expected item: a recorded manual pairing wins outright; otherwise a
+/// unique automatic candidate; anything else (no candidate, or more than
+/// one) is unresolved — the caller can't proceed without the matching
+/// screen (or, as of S27m, the grounding gate refusing to generate)
+/// settling it first. Promoted here from `api::acervo` (S27m, 2026-08-29)
+/// so the grounding gate (`api::reading::ground_node`) shares the exact
+/// same resolution rule as the S27f matching screen, instead of a second
+/// copy silently drifting out of sync with it.
+pub fn resolve_matched_filename(
+    library: &LocalPdfSource,
+    manual: &ManualMatchStore,
+    item: &ExpectedItem,
+) -> std::io::Result<Option<String>> {
+    if let Some(m) = manual.get(item) {
+        return Ok(Some(m.filename));
+    }
+    let candidates = candidate_matches(library, item)?;
+    match candidates.len() {
+        1 => Ok(Some(
+            candidates.into_iter().next().expect("len == 1").filename,
+        )),
+        _ => Ok(None),
+    }
+}
+
 /// Builds and persists a minimal chunk+embedding cache for one PDF's
 /// extracted text, keyed by its content hash. The real builder behind check
 /// 6 — **not called by [`validate_acervo`]** (see the module doc's scope
@@ -477,11 +521,26 @@ fn check_index_cache(content_hash: &str, index_cache_dir: &Path) -> IndexCheck {
 /// directly, then re-runs [`validate_acervo`] (or just checks
 /// [`IndexCheck::Cached`] itself) to see it reflected.
 ///
-/// The cache format here (`Vec<(chunk text, vector)>`) is deliberately
-/// minimal, not the corpus-shaped `retrieval::VectorIndex` — how library
-/// PDFs' chunks eventually join real grounding/retrieval (their own index,
-/// or folded into the existing one) is exactly the "genuinely large, separate
-/// design surface" this slice defers, per the task brief.
+/// One cached, embedded chunk of a library PDF — page-tagged (S27m,
+/// 2026-08-29 revision) so a hit can produce a real `p:N` locator for
+/// `CITE_CONTRACT`/`#page=N` deep-links, not an empty one. The original
+/// shape chunked `pdf.text` (the whole book concatenated) and lost the page
+/// boundary entirely; chunking `pdf.page_texts` instead costs nothing extra
+/// (same total text, same embedder calls) and closes that gap before
+/// anything downstream comes to depend on the page-less shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedChunk {
+    /// 1-based physical page number (`pdf.page_texts`' index + 1) — matches
+    /// what `PageMapCheck`/`#page=N` already use elsewhere in this module.
+    pub page: usize,
+    pub text: String,
+    pub vector: Vec<f32>,
+}
+
+/// The cache format here (page-tagged chunk + vector, [`CachedChunk`]) is
+/// deliberately minimal, not the corpus-shaped `retrieval::VectorIndex` —
+/// see the module doc's "Closed by S27m" note for why library PDFs get their
+/// own small path instead of joining `Corpus`.
 pub fn build_index_cache(
     pdf: &PdfDocument,
     content_hash: &str,
@@ -491,13 +550,25 @@ pub fn build_index_cache(
     fs::create_dir_all(index_cache_dir)?;
     let path = index_cache_dir.join(format!("{content_hash}.json"));
 
-    let chunks = chunk_text(&pdf.text);
+    let mut pages = Vec::new();
+    let mut chunks = Vec::new();
+    for (i, page_text) in pdf.page_texts.iter().enumerate() {
+        for chunk in chunk_text(page_text) {
+            pages.push(i + 1);
+            chunks.push(chunk);
+        }
+    }
     let vectors = if chunks.is_empty() {
         Vec::new()
     } else {
         embedder.embed_batch(&chunks)
     };
-    let cached: Vec<(String, Vec<f32>)> = chunks.into_iter().zip(vectors).collect();
+    let cached: Vec<CachedChunk> = pages
+        .into_iter()
+        .zip(chunks)
+        .zip(vectors)
+        .map(|((page, text), vector)| CachedChunk { page, text, vector })
+        .collect();
 
     let json = serde_json::to_vec(&cached)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -505,6 +576,37 @@ pub fn build_index_cache(
     fs::write(&tmp, &json)?;
     fs::rename(&tmp, &path)?;
     Ok(path)
+}
+
+/// Reads one PDF's cache back and ranks its chunks by cosine similarity to
+/// `query`, page number carried along (S27m piece 2, PLAN.md). Scoped to
+/// exactly this source by construction — the cache file already is one
+/// PDF's content, so there is no `source_id` to filter by, unlike the
+/// corpus-shaped `Retriever` this deliberately doesn't reuse (module doc).
+/// Errors only on I/O/corruption; an empty/missing cache is the caller's
+/// job to have ruled out via [`IndexCheck`] first.
+pub fn search_index_cache(
+    index_cache_dir: &Path,
+    content_hash: &str,
+    embedder: &Embedder,
+    query: &str,
+    k: usize,
+) -> std::io::Result<Vec<(usize, String, f32)>> {
+    let path = index_cache_dir.join(format!("{content_hash}.json"));
+    let json = fs::read(&path)?;
+    let cached: Vec<CachedChunk> = serde_json::from_slice(&json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let query_vector = embedder.embed(query);
+    let mut scored: Vec<(usize, String, f32)> = cached
+        .into_iter()
+        .map(|c| {
+            let score = cosine(&query_vector, &c.vector);
+            (c.page, c.text, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    Ok(scored)
 }
 
 fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
@@ -1236,6 +1338,49 @@ mod tests {
         }];
         let report = validate_acervo(&lib, &expected, &cache_dir).expect("validate");
         assert_eq!(report.items[0].index, IndexCheck::Cached { path: built });
+    }
+
+    /// S27m (PLAN.md, 2026-08-29): proves the read side of the gate's
+    /// grounding fix — a hit carries the **physical page** it actually came
+    /// from (the gap the old `pdf.text`-chunked cache had no way to close),
+    /// and a query about one page's topic ranks that page's chunk first
+    /// among a book that also discusses something unrelated elsewhere.
+    /// Ignored by default (downloads the embedding model); run with
+    /// `cargo test -p learnive search_index_cache_scores_the_right_page_first -- --ignored`.
+    #[test]
+    #[ignore = "downloads the embedding model"]
+    fn search_index_cache_scores_the_right_page_first() {
+        let (mut doc, _pages) = build_document(
+            &[
+                "Baking bread requires flour, water, yeast and salt.",
+                "A recursive function calls itself with a smaller input until it reaches a base case.",
+            ],
+            Some("Mixed Topics"),
+            None,
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "mixed.pdf");
+        let cache_dir = index_dir(&tmp);
+
+        let path = lib.root().join("mixed.pdf");
+        let bytes = fs::read(&path).unwrap();
+        let hash = content_hash(&bytes);
+        let pdf = read_pdf(&path).unwrap();
+
+        let embedder = Embedder::default_model().expect("load embedder");
+        build_index_cache(&pdf, &hash, &cache_dir, &embedder).expect("build cache");
+
+        let hits = search_index_cache(
+            &cache_dir,
+            &hash,
+            &embedder,
+            "recursive functions in programming",
+            2,
+        )
+        .expect("search");
+        assert!(!hits.is_empty(), "expected at least one hit");
+        let (top_page, top_text, _score) = &hits[0];
+        assert_eq!(*top_page, 2, "the recursion page should rank first");
+        assert!(top_text.to_lowercase().contains("recursive"));
     }
 
     // -- Full report shape ------------------------------------------------
