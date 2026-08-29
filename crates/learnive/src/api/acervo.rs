@@ -162,10 +162,14 @@ pub struct AcervoItemResp {
 pub struct AcervoReportResp {
     pub items: Vec<AcervoItemResp>,
     pub all_pass: bool,
-    /// Absolute path to `<data>/library/`, the one place a missing PDF must
-    /// be dropped for `presence: "missing"` to clear on re-check. The
-    /// report used to say "Missing" with no indication of where to put the
-    /// file — this closes that gap (bug reported live, 2026-08-29).
+    /// **Always absolute** — canonicalized, never `state.data_dir` echoed
+    /// as-is. `LEARNIVE_DATA_DIR` defaults to the relative string
+    /// `"learnive-data"` (`app.rs`), so joining it with `library` without
+    /// resolving against the working directory showed a path that was only
+    /// meaningful from the server process's CWD, not to a user reading it
+    /// in the browser (bug reported live, 2026-08-29, right after the path
+    /// was first added for the *previous* live bug — "Missing" with no
+    /// indication of where to put the file).
     pub library_path: String,
 }
 
@@ -180,7 +184,18 @@ pub async fn get_acervo_report(
     let outline = load_outline(&state, &doc)?;
     let expected = expected_items(&outline);
     let lib = library(&state)?;
-    let library_path = lib.root().to_string_lossy().into_owned();
+    // `lib.root()` is `state.data_dir`/library as configured — possibly
+    // relative (default `LEARNIVE_DATA_DIR` is the relative string
+    // "learnive-data"). Canonicalize so what the browser shows is a path
+    // meaningful from wherever the user is, not just from the server
+    // process's CWD. `LocalPdfSource::open` already created this directory,
+    // so canonicalize only fails on a genuinely broken environment (e.g.
+    // permissions) — fall back to the uncanonicalized path rather than
+    // erroring the whole report over a display detail.
+    let library_path = fs::canonicalize(lib.root())
+        .unwrap_or_else(|_| lib.root().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
     if expected.is_empty() {
         return Ok(Json(AcervoReportResp {
             items: Vec::new(),
@@ -663,10 +678,21 @@ mod tests {
         assert_eq!(report["all_pass"], false);
         // Bug reported live 2026-08-29: the report said "Missing" with no
         // indication of where to put the file. `library_path` closes that.
-        let expected_path = std::path::PathBuf::from(state.data_dir.as_ref()).join("library");
+        let expected_path =
+            std::fs::canonicalize(std::path::PathBuf::from(state.data_dir.as_ref()).join("library"))
+                .unwrap();
         assert_eq!(
             report["library_path"],
             expected_path.to_string_lossy().as_ref()
+        );
+        // Second bug, reported live the same day right after the first fix
+        // landed: this must be absolute, never `state.data_dir` echoed
+        // as-is — the default `LEARNIVE_DATA_DIR` is the relative string
+        // "learnive-data", meaningless outside the server process's CWD.
+        assert!(
+            std::path::Path::new(report["library_path"].as_str().unwrap()).is_absolute(),
+            "library_path must be absolute: {}",
+            report["library_path"]
         );
     }
 
