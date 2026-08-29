@@ -858,6 +858,20 @@ body.source-resizing #askBar {
   background: var(--nord11);
   color: var(--nord6);
 }
+.acervo-library-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.acervo-library-path-link {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.acervo-copy-path-btn {
+  font-size: 0.8rem;
+  padding: 0.1rem 0.5rem;
+}
 .acervo-ambiguous-item {
   padding: 0.8rem 0;
   border-bottom: 1px solid var(--card-border);

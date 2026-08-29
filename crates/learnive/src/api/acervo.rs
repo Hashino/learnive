@@ -162,6 +162,11 @@ pub struct AcervoItemResp {
 pub struct AcervoReportResp {
     pub items: Vec<AcervoItemResp>,
     pub all_pass: bool,
+    /// Absolute path to `<data>/library/`, the one place a missing PDF must
+    /// be dropped for `presence: "missing"` to clear on re-check. The
+    /// report used to say "Missing" with no indication of where to put the
+    /// file — this closes that gap (bug reported live, 2026-08-29).
+    pub library_path: String,
 }
 
 /// The acervo gate's own report — real and actionable, but deliberately
@@ -174,14 +179,16 @@ pub async fn get_acervo_report(
 ) -> Result<Json<AcervoReportResp>, ApiError> {
     let outline = load_outline(&state, &doc)?;
     let expected = expected_items(&outline);
+    let lib = library(&state)?;
+    let library_path = lib.root().to_string_lossy().into_owned();
     if expected.is_empty() {
         return Ok(Json(AcervoReportResp {
             items: Vec::new(),
             all_pass: true,
+            library_path,
         }));
     }
 
-    let lib = library(&state)?;
     let idx_dir = index_cache_dir(&state);
     let ids: Vec<String> = expected.iter().map(|(id, _)| id.clone()).collect();
     let items_only: Vec<ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
@@ -247,7 +254,11 @@ pub async fn get_acervo_report(
         .collect();
 
     let all_pass = items.iter().all(|i| i.passes);
-    Ok(Json(AcervoReportResp { items, all_pass }))
+    Ok(Json(AcervoReportResp {
+        items,
+        all_pass,
+        library_path,
+    }))
 }
 
 // -- GET/POST /api/documents/{doc}/acervo/matches -- PDF<->item matching --
@@ -650,6 +661,13 @@ mod tests {
         );
         assert!(report["items"][0]["filename"].is_null());
         assert_eq!(report["all_pass"], false);
+        // Bug reported live 2026-08-29: the report said "Missing" with no
+        // indication of where to put the file. `library_path` closes that.
+        let expected_path = std::path::PathBuf::from(state.data_dir.as_ref()).join("library");
+        assert_eq!(
+            report["library_path"],
+            expected_path.to_string_lossy().as_ref()
+        );
     }
 
     #[tokio::test]
@@ -662,6 +680,9 @@ mod tests {
         let report: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(report["items"].as_array().unwrap().is_empty());
         assert_eq!(report["all_pass"], true);
+        // The path must be present even on the early-return (empty-outline)
+        // branch — a document that later gains a book source still needs it.
+        assert!(report["library_path"].as_str().unwrap().ends_with("library"));
     }
 
     #[tokio::test]

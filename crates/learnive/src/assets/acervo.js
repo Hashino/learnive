@@ -66,6 +66,7 @@ el("acervoTocBackBtn").addEventListener("click", () => {
 async function loadAcervoReport() {
   el("acervoStatus").textContent = t("acervo.loading");
   el("acervoList").innerHTML = "";
+  el("acervoLibraryPath").innerHTML = "";
   try {
     const resp = await api(`/api/documents/${acervoState.docId}/acervo`);
     if (!resp.ok) throw new Error(await resp.text());
@@ -77,8 +78,10 @@ async function loadAcervoReport() {
       continueFromAcervoGate();
       return;
     }
+    renderLibraryPath(report.library_path);
     el("acervoStatus").textContent = report.all_pass ? t("acervo.allGood") : "";
     renderAcervoReport(report);
+    refreshAcervoMatchesBtn();
   } catch (err) {
     if (acervoState.mode === "coldstart") {
       // Informational only in this slice (S27h makes it a real gate) — a
@@ -89,6 +92,73 @@ async function loadAcervoReport() {
     el("acervoStatus").innerHTML =
       '<span class="error">' + t("acervo.error") + escapeHtml(String(err)) + "</span>";
   }
+}
+
+// Shows "Resolve match" only when there's actually something to resolve —
+// it used to be shown unconditionally, so a user with a clean library saw a
+// button that opened an empty "Nothing needs manual matching right now."
+// screen every time (bug reported live, 2026-08-29). Needs its own
+// `/acervo/matches` fetch: "ambiguous"/"unmatched" isn't derivable from the
+// main report's data, `match_report` (source/acervo.rs) is a second full
+// library scan on top of the one `loadAcervoReport` already ran. Accepted
+// cost — this screen is already documented as on-demand, CPU-bound, no
+// caching (`api/acervo.rs`'s own module doc); doubling it is not a new
+// class of cost, and a wrong-but-safe fallback (leave the button visible)
+// covers a failed check rather than hiding something the user might need.
+async function refreshAcervoMatchesBtn() {
+  const btn = el("acervoMatchesBtn");
+  try {
+    const resp = await api(`/api/documents/${acervoState.docId}/acervo/matches`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    btn.hidden = data.ambiguous.length === 0 && data.unmatched_files.length === 0;
+  } catch {
+    // Unknown is not the same as "not needed" — default to showing it.
+    btn.hidden = false;
+  }
+}
+
+// Shows the absolute `<data>/library/` path a missing PDF must be dropped
+// into — the report used to say "Missing" with no indication of where to
+// put the file (bug reported live, 2026-08-29). A `file://` link is offered
+// on a best-effort basis: most browsers refuse to navigate to `file://`
+// from an `http(s)://` origin (this app's own origin, since §3 runs it as a
+// real local HTTP server, not a webview), so it may silently do nothing —
+// the selectable/copyable path text next to it is the reliable fallback,
+// never the other way around.
+function renderLibraryPath(path) {
+  const container = el("acervoLibraryPath");
+  container.innerHTML = "";
+  if (!path) return;
+
+  const label = document.createElement("span");
+  label.textContent = t("acervo.libraryPath.label");
+  container.appendChild(label);
+
+  const link = document.createElement("a");
+  link.href = "file://" + path;
+  link.textContent = path;
+  link.className = "acervo-library-path-link";
+  container.appendChild(link);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "acervo-copy-path-btn";
+  copyBtn.textContent = t("acervo.libraryPath.copy");
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(path);
+      const original = t("acervo.libraryPath.copy");
+      copyBtn.textContent = t("acervo.libraryPath.copied");
+      setTimeout(() => {
+        copyBtn.textContent = original;
+      }, 1500);
+    } catch {
+      // Clipboard API unavailable/denied (e.g. insecure context) — the
+      // path text next to this button is still selectable by hand.
+    }
+  });
+  container.appendChild(copyBtn);
 }
 
 function renderAcervoReport(report) {
