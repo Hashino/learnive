@@ -1,3 +1,5 @@
+check library at start of session
+configurable data dir
 fix 18 failing tests
 console error: thread 'tokio-rt-worker' (1733803) panicked at /home/hashino/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pdf-extract-0.12.0/src/lib.rs:1801:81: index out of bounds: the len is 0 but the index is 0
 change default data dir to sensible (OS specific) appdata dir

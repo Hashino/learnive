@@ -16,8 +16,41 @@ fn test_state() -> AppState {
 // store/secret/source setup as `test_state`, just a different provider.
 fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
     // Store in a unique temp directory; AI in demo mode (scripted mock);
-    // acquisition mocked (no network) and grounding off (no model download).
+    // acquisition mocked (no network).
     let dir = std::env::temp_dir().join(format!("learnive-test-{}", crate::engine::new_id()));
+
+    // S27m closed the acervo gate hard: `demo_responder`'s reading-list
+    // proposal ("propose the initial READING LIST") always names two
+    // bibliographic items, "Demo Foundations" and "Demo Document" by "Demo
+    // Author" (`api/provider.rs`) — every demo-mode document is now
+    // bibliographically sourced, and `ensure_document_grounded`/`ground_node`
+    // both hard-refuse to generate without a real, indexed PDF backing each
+    // one. Deferred at the time (user, mid-session: "for now continue.
+    // later we'll add a pdf specifically for demo mode") — this is that pdf,
+    // now built. Both entries are `"kind":"book"`, which enforces an
+    // `MIN_PLAUSIBLE_BOOK_PAGES` floor (`source::acervo`), hence 8 pages.
+    let library = crate::source::LocalPdfSource::open(&dir).unwrap();
+    write_book_pdf(
+        &library.root().join("demo-foundations.pdf"),
+        "Demo Foundations",
+        "Demo Author",
+    );
+    write_book_pdf(
+        &library.root().join("demo-document.pdf"),
+        "Demo Document",
+        "Demo Author",
+    );
+
+    let corpus = Corpus::open(&dir).unwrap();
+    // A retriever is likewise now load-bearing for every bibliographic node
+    // (`ground_node` hard-requires `state.retriever` to embed its query
+    // against the acervo gate's per-PDF cache) — `Embedder::Mock` gives
+    // tests a real, working `Embedder` with no model download, same spirit
+    // as `Ai::Mock`/`Source::Mock` above.
+    let retriever =
+        crate::retrieval::Retriever::open(&dir, &corpus, crate::retrieval::Embedder::Mock)
+            .unwrap();
+
     AppState {
         token: Arc::from(TOKEN),
         allowed_origins: Arc::new(HashSet::from([ORIGIN.to_string()])),
@@ -30,12 +63,72 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         data_dir: Arc::from(dir.to_string_lossy().as_ref()),
         source: Arc::new(Source::Mock(crate::source::MockSource::new())),
         fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-        corpus: Corpus::open(&dir).unwrap(),
-        retriever: None,
+        corpus,
+        retriever: Some(Arc::new(RwLock::new(retriever))),
         // S27e: never hit a real catalog host from an integration test —
         // see the field's own doc comment on `AppState`.
         bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
     }
+}
+
+/// Writes a minimal but acervo-gate-passing PDF fixture: `page_count` pages
+/// (8, `source::acervo::MIN_PLAUSIBLE_BOOK_PAGES`, so a `"kind":"book"`
+/// expected item doesn't trip the "too short to plausibly be the claimed
+/// book" identity check), `/Info` Title+Author metadata, and the same text
+/// on the first page (belt-and-suspenders: identity matches on metadata OR
+/// first-page text, either is enough). Same technique
+/// `api::acervo`'s/`source::acervo`'s own test modules already use
+/// (`lopdf::Document`, one shared content stream reused across every page
+/// dict) — duplicated here rather than shared, matching how those two
+/// modules already keep their own separate copies rather than a
+/// production-code test-util.
+fn write_book_pdf(path: &std::path::Path, title: &str, author: &str) {
+    use lopdf::{Document, Object, Stream, dictionary};
+
+    const PAGE_COUNT: usize = 8;
+
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Courier",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content = format!("BT /F1 12 Tf 20 700 Td ({title}, by {author}.) Tj ET");
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+    let mut page_ids = Vec::with_capacity(PAGE_COUNT);
+    for _ in 0..PAGE_COUNT {
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        page_ids.push(page_id);
+    }
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().map(|&id| id.into()).collect::<Vec<Object>>(),
+            "Count" => PAGE_COUNT as i64,
+        }),
+    );
+    let info_id = doc.add_object(dictionary! {
+        "Title" => Object::string_literal(title),
+        "Author" => Object::string_literal(author),
+    });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+    doc.trailer.set("Info", info_id);
+    doc.save(path).expect("save book pdf fixture");
 }
 
 fn router() -> Router {
@@ -2054,6 +2147,26 @@ fn research_once_responder(req: &crate::ai::ChatRequest) -> String {
 /// `demo_responder` drive the rest of the node once `research_attempted`
 /// withdraws the option from the menu (`movement::prompt::menu`, covered
 /// unit-level by `research_offered_only_when_ungrounded_and_unattempted`).
+///
+/// Rewritten 2026-08-29 for S27m: `test_state_with_ai` now seeds a real
+/// (mock-embedder) retriever plus the two demo library PDFs, so a document
+/// created via the DEFAULT `/api/documents {"topic":...}` cold-start path
+/// is bibliographically sourced (`demo_responder`'s reading list) — its
+/// node carries a real `source` pointer and `ground_node` grounds it for
+/// real, so `research` is legitimately never offered on its menu again.
+/// The old comment's premise ("tests never construct a real retriever") no
+/// longer holds. This test's actual subject was always the `research` move
+/// itself, not the reading-list flow, so it now supplies `nodes` directly
+/// (the pre-S27e/direct-API shape, `OutlineItemType::Node` default, no
+/// `source`) to get a genuinely ungrounded node without disabling the
+/// retriever every other test now depends on. `state.source`/
+/// `fallback_source` are swapped to `Source::Unconfigured` so (a) the
+/// explicit `research` move's own `acquire()` call has something to
+/// legitimately fail against, matching "no adequate source found" below,
+/// and (b) `create_document`'s unconditional background `spawn_acquisition`
+/// can't race in and ground the node itself first via `Source::Mock`
+/// (which — unlike the old `retriever: None` no-op — would otherwise
+/// sometimes succeed now that a real retriever backs it).
 #[tokio::test]
 async fn research_move_acquires_then_resumes_the_real_move_loop() {
     use crate::ai::{Ai, MockProvider, Models, Provider};
@@ -2063,11 +2176,9 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
         Provider::Mock(MockProvider::scripted(research_once_responder)),
         Models::single("demo"),
     );
-    let state = test_state_with_ai(ai);
-    // Tests never construct a real retriever (it'd need a model download),
-    // so `acquire` takes its `retriever: None` no-op path — meaning this
-    // also pins the "no adequate source found" branch of the research move,
-    // not just its happy path.
+    let mut state = test_state_with_ai(ai);
+    state.source = Arc::new(Source::Unconfigured);
+    state.fallback_source = Arc::new(Source::Unconfigured);
     state.policy.store(Arc::new(AgentPolicy::L1));
     let call = |req: Request<Body>| {
         let state = state.clone();
@@ -2079,7 +2190,12 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
         }
     };
 
-    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"fractions","nodes":[{"id":"n1","title":"Fractions","action":"learn"}]}"#,
+    ))
+    .await;
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
     let doc_id = created["doc_id"].as_str().unwrap().to_string();
     let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
@@ -2100,8 +2216,8 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
     assert!(body.contains("Looking for sources"));
     assert!(
         body.contains("No adequate source found"),
-        "retriever is None in tests, so acquisition must report failure, \
-         not silently claim a source: {body}"
+        "state.source/fallback_source are Source::Unconfigured in this test, \
+         so acquisition must report failure, not silently claim a source: {body}"
     );
     // ...and the loop still closed in a graded check afterward, despite
     // research eating one of MAX_MOVES_PER_NODE's four slots.

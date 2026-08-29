@@ -57,6 +57,43 @@ pub struct Chunk {
 pub enum Embedder {
     /// `model2vec-rs` static embeddings — semantic, offline after first download.
     Static { model: Arc<StaticModel>, id: String },
+    /// Deterministic, offline, non-semantic bag-of-hashed-words embedding —
+    /// no model file, no download, no network. Exists solely so integration
+    /// tests (and the keyless demo path, §22) can exercise the real
+    /// retrieval/acervo-gate pipeline (S27m's `ensure_document_grounded` +
+    /// `ground_node` both hard-require *some* `Embedder`, not just a
+    /// retrieval index) without paying for a real model load in every test
+    /// run. Never selected by `build_ai`/`build_source`/any real-user config
+    /// path — added 2026-08-29 alongside the demo-mode library fixtures in
+    /// `app::tests`. Cosine similarity between two `Mock` vectors correlates
+    /// with shared vocabulary, which is enough for tests to get non-empty,
+    /// plausible-looking retrieval hits; it is not a real semantic space.
+    Mock,
+}
+
+/// Fixed dimensionality of [`Embedder::Mock`]'s vectors — arbitrary, just
+/// small enough to be cheap and large enough that hash collisions between
+/// unrelated words are rare in test-sized vocabularies.
+const MOCK_EMBED_DIM: usize = 64;
+
+fn mock_embed(text: &str) -> Vec<f32> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut v = vec![0f32; MOCK_EMBED_DIM];
+    for word in text.split_whitespace() {
+        let mut hasher = DefaultHasher::new();
+        word.to_lowercase().hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % MOCK_EMBED_DIM;
+        v[idx] += 1.0;
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+    v
 }
 
 impl Embedder {
@@ -90,6 +127,7 @@ impl Embedder {
     pub fn embed_batch(&self, texts: &[String]) -> Vec<Vec<f32>> {
         match self {
             Embedder::Static { model, .. } => model.encode(texts),
+            Embedder::Mock => texts.iter().map(|t| mock_embed(t)).collect(),
         }
     }
 
@@ -98,6 +136,7 @@ impl Embedder {
     pub fn tag(&self) -> String {
         match self {
             Embedder::Static { id, .. } => format!("model2vec:{id}"),
+            Embedder::Mock => "mock".to_string(),
         }
     }
 }
