@@ -2,6 +2,8 @@ use super::*;
 
 use std::fs;
 
+use tokio::task::spawn_blocking;
+
 use super::generation::NODE_TAIL_BUDGET;
 use crate::source;
 // ---------------------------------------------------------------------------
@@ -983,6 +985,21 @@ pub(super) async fn prepare(
     }
 
     let context = prior_content_context(state, doc_id, &outline.items[..idx]);
+    // S27m (reshaped 2026-08-29): the acervo gate is a document-level
+    // precondition, checked once against the whole reading list, before any
+    // per-node lookup — see `ensure_document_grounded`'s doc comment for why
+    // this replaced the original per-item version.
+    if let Err(reason) = ensure_document_grounded(state, &outline).await {
+        if let Err(e) = event_log.append(
+            Some(&item.id),
+            EventKind::GenerationBlocked {
+                reason: reason.clone(),
+            },
+        ) {
+            eprintln!("event log append failed: {e}");
+        }
+        return Err(reason);
+    }
     let grounding = match ground_node(state, &outline, &item).await {
         Ok(text) => text,
         Err(reason) => {
@@ -1279,21 +1296,137 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
 }
 
 /// S27m (PLAN.md, 2026-08-29) — "o nó se funda no livro dele, ou não
-/// nasce". Resolves what grounds this item via
-/// [`engine::resolve_grounding_source`] and, when it has a bibliographic
-/// ancestor, refuses to generate at all unless that exact book/article has
-/// an approved, indexed match in the local library — the fix for the live
-/// bug the S27f verification found: a node whose expected book was
-/// "Missing" in the acervo report still generated, because the network
-/// fallback (`acquire`/LibGen, unchanged by this slice) silently grounded
-/// it in an unrelated downloaded article instead.
+/// nasce", **reshaped same day** after a live regression report: the
+/// original version of this gate ran per-node, resolving and checking only
+/// the ONE book a given item resolves to, from inside `prepare` (before
+/// `generate_node`'s move loop starts). That made `research`'s LibGen
+/// download unreachable for every bibliographically-sourced node —
+/// `MoveType::Research` can only ever be selected from inside the move
+/// loop, so a node whose book was missing could never even reach the move
+/// that might have fixed it.
+///
+/// The correct shape, per the user: "nodes are only generated after the
+/// source acquisition is already done... unless something is wrong in the
+/// code" — the acervo gate is a PRECONDITION FOR THE DOCUMENT, evaluated
+/// once against the whole reading list ([`engine::expected_items`]), not a
+/// per-item lookup resolved lazily at generation time. `research` stays
+/// reachable for what this gate never claimed to cover: a book a live
+/// question needs that was never on the reading list at all. Where that
+/// download should land (the real local library vs. today's separate
+/// `Corpus`/`Retriever` path) is a still-open follow-up — see PLAN.md's
+/// S27m entry.
+///
+/// Legacy/demo/pre-S27e documents with no bibliographic items at all are
+/// untouched (`Ok(())` immediately) — S27m's own scope note is explicit
+/// that only the bibliographically-sourced path is being fixed, not every
+/// document in the app.
+///
+/// Piece 1 (S27c's index-cache build) lives here too now, for every
+/// approved item that doesn't have one yet — triggered by this mutating
+/// POST path rather than the read-only gate-report GET (§3.1).
+pub(super) async fn ensure_document_grounded(
+    state: &AppState,
+    outline: &Outline,
+) -> Result<(), String> {
+    let expected = engine::expected_items(outline);
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let library = source::LocalPdfSource::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open local library: {e}"))?;
+    let manual = source::ManualMatchStore::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open manual-match store: {e}"))?;
+    let index_cache_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("library");
+
+    let items: Vec<source::ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
+    // `validate_acervo` re-parses every PDF in the library (`pdf-extract` +
+    // a `lopdf` metadata pass, per `api::acervo`'s own module doc) — real,
+    // synchronous, CPU-bound work, run here in `spawn_blocking` for the same
+    // reason every handler in `api::acervo` already does: it must never
+    // block the async runtime's worker threads.
+    let lib_for_validate = library.clone();
+    let items_for_validate = items.clone();
+    let idx_dir_for_validate = index_cache_dir.clone();
+    let report = spawn_blocking(move || {
+        source::validate_acervo(&lib_for_validate, &items_for_validate, &idx_dir_for_validate)
+    })
+    .await
+    .map_err(|e| format!("acervo validation task panicked: {e}"))?
+    .map_err(|e| format!("could not validate the acervo gate: {e}"))?;
+
+    if !report.all_pass() {
+        let failing: Vec<String> = report
+            .failing_items()
+            .iter()
+            .map(|r| {
+                format!(
+                    "\"{}\" ({})",
+                    r.expected.title,
+                    r.blocking_failures().join(", ")
+                )
+            })
+            .collect();
+        return Err(format!(
+            "the acervo gate isn't clear yet — check it before this document can generate: {}",
+            failing.join("; ")
+        ));
+    }
+
+    let missing_index: Vec<&source::ExpectedItem> = report
+        .items
+        .iter()
+        .filter(|r| matches!(r.index, source::IndexCheck::Missing))
+        .map(|r| &r.expected)
+        .collect();
+    if missing_index.is_empty() {
+        return Ok(());
+    }
+
+    let Some(embedder) = (match &state.retriever {
+        Some(r) => Some(r.read().await.embedder().clone()),
+        None => None,
+    }) else {
+        return Err("no embedding model is loaded — cannot index the library".to_string());
+    };
+
+    for item in missing_index {
+        // An ambiguous match (more than one plausible candidate file) is
+        // already surfaced by the S27f matching screen; `report.all_pass()`
+        // above only proves a candidate was FOUND for presence purposes,
+        // not that it's uniquely resolved — this can legitimately skip
+        // here, and `ground_node` below will then correctly report the gap
+        // as an internal inconsistency instead of silently indexing the
+        // wrong file.
+        let Some(filename) = source::resolve_matched_filename(&library, &manual, item)
+            .map_err(|e| format!("could not scan the local library: {e}"))?
+        else {
+            continue;
+        };
+        let path = library.root().join(&filename);
+        let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        let hash = source::acervo::content_hash(&bytes);
+        let pdf =
+            source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
+            .map_err(|e| format!("could not index {filename}: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// The per-node half of S27m's gate: once [`ensure_document_grounded`] has
+/// passed for the whole document, resolves and retrieves THIS item's own
+/// grounding passages. A failure here after the document gate already
+/// passed reads as an internal inconsistency, not a "go fix your library"
+/// state — the error messages say so deliberately.
 ///
 /// An item with **no** bibliographic ancestor at all (legacy/demo/pre-S27e
 /// documents, or a spawned sub-node under a plain `Node` parent) is
 /// deliberately untouched: falls through to the old unscoped-similarity
-/// [`grounding_for`], exactly as it behaved before this slice. S27m's own
-/// scope note is explicit that only the bibliographically-sourced path is
-/// being fixed, not every node in the app.
+/// [`grounding_for`], exactly as it behaved before S27m.
 async fn ground_node(
     state: &AppState,
     outline: &Outline,
@@ -1321,31 +1454,10 @@ async fn ground_node(
         .map_err(|e| format!("could not scan the local library: {e}"))?;
     let Some(filename) = filename else {
         return Err(format!(
-            "\"{}\" has no approved match in the local library yet — check the acervo gate before this node can generate",
+            "internal error: \"{}\" passed the document acervo gate but has no resolved file in the library — this should not happen",
             expected.title
         ));
     };
-
-    // Re-derive the same six-check report the S27f screen shows, scoped to
-    // this one item, so a book that's present but fails identity/text-layer
-    // can't sneak through here either — `resolve_matched_filename` only
-    // answers "which file", not "is that file actually acceptable".
-    let report =
-        source::validate_acervo(&library, std::slice::from_ref(&expected), &index_cache_dir)
-            .map_err(|e| format!("could not validate the acervo gate: {e}"))?;
-    let Some(item_report) = report.items.into_iter().next() else {
-        return Err(format!(
-            "could not validate the acervo gate for \"{}\"",
-            expected.title
-        ));
-    };
-    if !item_report.passes() {
-        return Err(format!(
-            "\"{}\" fails the acervo gate ({}) — fix it there before this node can generate",
-            expected.title,
-            item_report.blocking_failures().join(", ")
-        ));
-    }
 
     let Some(embedder) = (match &state.retriever {
         Some(r) => Some(r.read().await.embedder().clone()),
@@ -1358,23 +1470,11 @@ async fn ground_node(
     let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
     let hash = source::acervo::content_hash(&bytes);
 
-    // Piece 1 (S27m): the S27c index-cache build, triggered lazily here
-    // rather than eagerly for every library item at gate-view time (that
-    // would make a read-only report screen pay for a model download/embed
-    // pass on GET, forbidden by §3.1) — first generation attempt against an
-    // approved-but-not-yet-indexed book pays it once; every later node
-    // grounded in the same book reuses the cache.
-    if matches!(item_report.index, source::IndexCheck::Missing) {
-        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
-        source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
-            .map_err(|e| format!("could not index {filename}: {e}"))?;
-    }
-
     let hits = source::search_index_cache(&index_cache_dir, &hash, &embedder, &item.title, 4)
         .map_err(|e| format!("could not search the index for {filename}: {e}"))?;
     if hits.is_empty() {
         return Err(format!(
-            "\"{}\" produced no retrievable content for this node",
+            "internal error: \"{}\" produced no retrievable content — this should not happen after the acervo gate passed",
             expected.title
         ));
     }

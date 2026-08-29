@@ -214,6 +214,43 @@ pub fn resolve_grounding_source(outline: &Outline, item: &OutlineItem) -> Option
     None
 }
 
+/// Every `Book`/`Article` outline item with a bibliographic source pointer,
+/// paired with the outline item id — the reading list's full acquisition
+/// checklist. A `Node`/`Chapter` item has no bibliographic identity of its
+/// own and is skipped.
+///
+/// Promoted here from a private copy in `api::acervo` (S27m, 2026-08-29) so
+/// the S27f gate-report screen and S27m's document-level generation gate
+/// (`api::reading::ensure_document_grounded`) read the reading list's
+/// expectations through one function, not two that could silently drift.
+/// Lives in `engine.rs` rather than `source::acervo` because it bridges
+/// `Outline`/`OutlineItem` (owned here) with `source::ExpectedItem` — moving
+/// it into `source` would invert the dependency (`engine` already depends
+/// on `source` for `SourcePointer`'s `ProposedItem`, not the other way).
+pub fn expected_items(outline: &Outline) -> Vec<(String, crate::source::ExpectedItem)> {
+    outline
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.item_type,
+                OutlineItemType::Book | OutlineItemType::Article
+            )
+        })
+        .filter_map(|item| {
+            let ptr = item.source.as_ref()?;
+            Some((
+                item.id.clone(),
+                crate::source::ExpectedItem {
+                    title: ptr.item.title.clone(),
+                    authors: ptr.item.authors.clone(),
+                    kind: ptr.item.kind,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Resolves which document actually owns a node's file/event-log (§S15b) —
 /// the item's own document unless it's a reference (`source_doc_id: Some`),
 /// in which case the pointed-to document. Every call site that turns

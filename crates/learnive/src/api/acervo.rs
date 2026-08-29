@@ -66,31 +66,10 @@ fn load_outline(state: &AppState, doc: &str) -> Result<Outline, ApiError> {
         .map_err(|e| ApiError::Internal(format!("corrupt outline.json: {e}")))
 }
 
-/// Every `Book`/`Article` outline item with a bibliographic source pointer,
-/// paired with the outline item id the S27f screens address it by. A
-/// `Node`/`Chapter` item has no bibliographic identity and is skipped.
+/// Alias for [`engine::expected_items`] (promoted there 2026-08-29 so this
+/// screen and S27m's document-level generation gate share one function).
 fn expected_items(outline: &Outline) -> Vec<(String, ExpectedItem)> {
-    outline
-        .items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.item_type,
-                OutlineItemType::Book | OutlineItemType::Article
-            )
-        })
-        .filter_map(|item| {
-            let ptr = item.source.as_ref()?;
-            Some((
-                item.id.clone(),
-                ExpectedItem {
-                    title: ptr.item.title.clone(),
-                    authors: ptr.item.authors.clone(),
-                    kind: ptr.item.kind,
-                },
-            ))
-        })
-        .collect()
+    engine::expected_items(outline)
 }
 
 fn find_expected_item(
