@@ -6,3 +6,13 @@
 resolver = "3"
 members = ["crates/core", "crates/learnive"]
 default-members = ["crates/learnive"]
+
+# vendor/pdf-extract carries a one-file bugfix over pdf-extract 0.12.0: real
+# PDFs can contain a malformed content-stream operator (observed live: a
+# bare `w` with no operands), which the upstream crate handles by panicking
+# instead of returning Err — and since it processes a page in one pass, the
+# panic on operation N silently discards every other operation's extracted
+# text on that page (or, in the whole-document entry points, every other
+# page too). See vendor/pdf-extract/PATCH.md for the exact fix.
+[patch.crates-io]
+pdf-extract = { path = "vendor/pdf-extract" }

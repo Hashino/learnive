@@ -126,13 +126,16 @@ impl PageMap {
 /// the original PDF stays the canonical, displayed artifact), the same text
 /// split per physical page, the embedded outline tree, and the page map.
 ///
-/// `page_texts` is carried alongside `text` (not derived from it — `text` is
-/// `pdf_extract::extract_text`'s single-string output, `page_texts` is the
-/// separate `extract_text_by_pages` call) because a later slice needs it:
+/// `page_texts` is carried alongside `text` because a later slice needs it:
 /// the outline gives a chapter's starting *page*, and slicing that chapter's
 /// own text out of one flat string would mean re-deriving page boundaries
-/// `pdf-extract` already computed once. `text` stays as `page_texts.join("\n")`
-/// would produce it, for callers that don't care about page boundaries.
+/// this module already computed once. **`text` is derived from
+/// `page_texts`** (`page_texts.join("\n")`, see [`read_pdf`]) — the other
+/// way around, on purpose: extraction runs per page (`extract_pages_resilient`)
+/// so one page's malformed content stream can't take the rest of the
+/// document's text down with it (2026-08-29 live bug, see `read_pdf`'s doc
+/// comment), so `page_texts` is the real source and `text` is just its join,
+/// for callers that don't care about page boundaries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfDocument {
     pub text: String,
@@ -176,15 +179,21 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
     // `.unwrap_or_default()` and crashed the `spawn_blocking` task calling
     // this (`source::acervo::validate_acervo`) — the module doc's own
     // "best-effort, never an error for extraction" promise didn't hold
-    // because a panic isn't a `Result`. `catch_unwind` closes that gap: a
-    // panicking extraction degrades to the same empty-text fallback an
-    // `Err` already would, instead of taking down the caller.
-    let text = std::panic::catch_unwind(|| pdf_extract::extract_text(path))
-        .unwrap_or_else(|_| Ok(String::new()))
-        .unwrap_or_default();
-    let page_texts = std::panic::catch_unwind(|| pdf_extract::extract_text_by_pages(path))
-        .unwrap_or_else(|_| Ok(Vec::new()))
-        .unwrap_or_default();
+    // because a panic isn't a `Result`. A first fix wrapped the two
+    // whole-document calls in `catch_unwind` (closed the crash), but the
+    // SAME live book (reported again, same day) then came back "no text
+    // layer" for a real book with genuine, selectable text (confirmed
+    // independently with `pdftotext` and Python's `pypdf`, both read it
+    // cleanly). Root cause: `extract_text`/`extract_text_by_pages` process
+    // pages sequentially and the panic aborts the WHOLE call on the first
+    // bad page — verified directly against this book (1,308 pages): only
+    // 12 pages carry the malformed operator, but the whole-document
+    // functions lost the text of all 1,308 along with them. Fixed by
+    // driving `pdf_extract`'s own per-page primitive ([`extract_pages_resilient`])
+    // ourselves, `catch_unwind`-ing each page individually — a bad page now
+    // degrades to an empty string for just that page, not the whole book.
+    let page_texts = extract_pages_resilient(path);
+    let text = page_texts.join("\n");
 
     Ok(PdfDocument {
         text,
@@ -192,6 +201,51 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
         outline,
         pages: PageMap { page_count, labels },
     })
+}
+
+/// Extracts text one physical page at a time via `pdf_extract`'s own
+/// lower-level primitives (`output_doc_page`/`PlainTextOutput`) instead of
+/// its whole-document `extract_text{,_by_pages}` — see `read_pdf`'s doc
+/// comment for why: those functions abort the entire extraction on the
+/// first page whose content stream panics the crate, discarding every good
+/// page's text along with the bad one. Wrapping `catch_unwind` around each
+/// page individually instead means a bad page degrades to `""` on its own,
+/// with the rest of the document unaffected.
+///
+/// Loads its own `pdf_extract::Document` — deliberately **not** reusing the
+/// `lopdf::Document` already loaded in [`read_pdf`]: `pdf_extract` vendors
+/// and re-exports its own `lopdf` (`pub use lopdf::*`), pinned to a
+/// different version (0.42) than this crate's own direct `lopdf` dependency
+/// (0.44, used for `read_outline`/`read_page_labels` above) — the two
+/// `Document` types aren't interchangeable, so this is a second, separate
+/// parse of the same file. A file whose `pdf_extract::Document::load` (or
+/// `get_pages`) itself fails degrades to no pages at all, consistent with
+/// `read_pdf`'s own "genuinely unreadable file" case being the only hard
+/// error this module surfaces.
+fn extract_pages_resilient(path: &Path) -> Vec<String> {
+    let Ok(doc) = pdf_extract::Document::load(path) else {
+        return Vec::new();
+    };
+    let mut page_nums: Vec<u32> = doc.get_pages().keys().copied().collect();
+    page_nums.sort_unstable();
+
+    page_nums
+        .into_iter()
+        .map(|page_num| {
+            let mut s = String::new();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut output = pdf_extract::PlainTextOutput::new(&mut s);
+                pdf_extract::output_doc_page(&doc, &mut output, page_num)
+            }));
+            match result {
+                Ok(Ok(())) => s,
+                // Either this page's own extraction returned `Err`, or it
+                // panicked (caught) — both degrade to an empty page, never
+                // propagate, matching the module's best-effort rule.
+                _ => String::new(),
+            }
+        })
+        .collect()
 }
 
 /// Reads the embedded outline via `lopdf`'s own `get_toc` (a flat,
@@ -502,6 +556,107 @@ mod tests {
         assert!(
             read.text.is_empty(),
             "extraction panicked internally, so text degrades to empty: {:?}",
+            read.text
+        );
+    }
+
+    /// Reported live, same day, right after the fix above landed: the same
+    /// book came back "no text layer" even though it's a real, selectable-
+    /// text book (confirmed independently with `pdftotext`/`pypdf`). Root
+    /// cause found by isolating `pdf_extract`'s own whole-document
+    /// functions from `read_pdf`'s caller in a standalone probe: they
+    /// process pages sequentially and the panic on ONE malformed page
+    /// aborts the ENTIRE call, discarding every other page's text too —
+    /// verified against the real 1,308-page book (only 12 pages malformed,
+    /// but the whole-document call lost the text of all 1,308). A single
+    /// bad page sandwiched between two good ones must not blank the good
+    /// pages' text — this is what `a_malformed_content_stream_panic_
+    /// degrades_to_empty_text_not_a_crash` above couldn't catch, since its
+    /// fixture has only the one (bad) page.
+    #[test]
+    fn a_malformed_page_among_good_pages_only_blanks_that_one_page() {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+
+        let good_content = |text: &str| {
+            Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                    Operation::new("Td", vec![72.into(), 700.into()]),
+                    Operation::new("Tj", vec![Object::string_literal(text)]),
+                    Operation::new("ET", vec![]),
+                ],
+            }
+            .encode()
+            .unwrap()
+        };
+        let bad_content = Content {
+            operations: vec![Operation::new("w", vec![])],
+        }
+        .encode()
+        .unwrap();
+
+        let mut page_ids = Vec::new();
+        for content in [
+            good_content("Page One"),
+            bad_content,
+            good_content("Page Three"),
+        ] {
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().map(|&id| id.into()).collect::<Vec<Object>>(),
+                "Count" => 3,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let (_dir, path) = save_to_temp(&mut doc, "one-bad-page-among-good.pdf");
+
+        let read = read_pdf(&path).expect("must not error, let alone panic");
+        assert_eq!(read.pages.page_count, 3);
+        assert_eq!(read.page_texts.len(), 3, "all three pages present");
+        assert!(
+            read.page_texts[0].contains("Page One"),
+            "page 1 (good) must survive page 2's panic: {:?}",
+            read.page_texts[0]
+        );
+        assert!(
+            read.page_texts[1].is_empty(),
+            "page 2 (malformed) degrades to empty: {:?}",
+            read.page_texts[1]
+        );
+        assert!(
+            read.page_texts[2].contains("Page Three"),
+            "page 3 (good) must survive page 2's panic: {:?}",
+            read.page_texts[2]
+        );
+        assert!(
+            read.text.contains("Page One") && read.text.contains("Page Three"),
+            "the joined `text` must not be blanked by one bad page: {:?}",
             read.text
         );
     }

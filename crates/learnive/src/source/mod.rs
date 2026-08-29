@@ -411,16 +411,51 @@ fn extract_pdf_text(pdf: &[u8]) -> String {
     if std::fs::write(&path, pdf).is_err() {
         return String::new();
     }
-    // `catch_unwind`, not just `.unwrap_or_default()`: a malformed content
-    // stream can make `pdf_extract::extract_text` PANIC rather than return
-    // `Err` (confirmed live, 2026-08-29 — see `source::pdf::read_pdf`'s own
-    // matching fix), which would otherwise skip the cleanup below too and
-    // leak the temp file on top of crashing the caller.
-    let text = std::panic::catch_unwind(|| pdf_extract::extract_text(&path))
-        .unwrap_or_else(|_| Ok(String::new()))
-        .unwrap_or_default();
+    // Per-page extraction, not `pdf_extract::extract_text`'s whole-document
+    // call — matches `source::pdf::read_pdf`'s `extract_pages_resilient`
+    // fix (2026-08-29, live bug twice the same day, see that function's own
+    // doc comment for the full story): a malformed content stream can make
+    // the crate PANIC on one page rather than return `Err`, and the
+    // whole-document functions abort the ENTIRE extraction on the first
+    // such page — verified against a real 1,308-page book where only 12
+    // pages were malformed but the whole-document call lost all 1,308.
+    // `catch_unwind` per page (not just around one whole-document call)
+    // means one bad page degrades to `""` on its own, and also means the
+    // cleanup below always runs — a bare panic would otherwise skip it and
+    // leak the temp file on top of losing the caller's text.
+    let text = extract_pdf_text_resilient(&path);
     let _ = std::fs::remove_file(&path);
     text
+}
+
+/// Standalone copy of `source::pdf::read_pdf`'s per-page extraction
+/// strategy — deliberately not shared code (this module's own doc comment
+/// already states the "independent of `source::pdf`" stance, for the same
+/// reason: sharing would mean a caller neither module wants to touch).
+/// Unlike that sibling, this caller only wants the flat joined text (no
+/// `PageMap`/`OutlineEntry`), so it skips straight to a `String`.
+fn extract_pdf_text_resilient(path: &std::path::Path) -> String {
+    let Ok(doc) = pdf_extract::Document::load(path) else {
+        return String::new();
+    };
+    let mut page_nums: Vec<u32> = doc.get_pages().keys().copied().collect();
+    page_nums.sort_unstable();
+
+    let mut out = String::new();
+    for page_num in page_nums {
+        let mut s = String::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut output = pdf_extract::PlainTextOutput::new(&mut s);
+            pdf_extract::output_doc_page(&doc, &mut output, page_num)
+        }));
+        if let Ok(Ok(())) = result {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&s);
+        }
+    }
+    out
 }
 
 /// Derives a stable corpus id from a title (slug) + a short content hash, so the
