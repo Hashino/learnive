@@ -205,7 +205,7 @@ impl SciHubSource {
     /// `location.href='https://x/y.pdf'`, extract the inner quoted URL.
     fn inner_url(s: &str) -> Option<String> {
         let q = s.chars().find(|c| *c == '\'' || *c == '"')?;
-        let start = s.find(q)? .checked_add(1)?;
+        let start = s.find(q)?.checked_add(1)?;
         let end = s[start..].find(q)? + start;
         Some(Self::sanitize_url(&s[start..end]))
     }
@@ -277,10 +277,7 @@ mod tests {
             .expect("did not find a source");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].origin, Origin::SciHub);
-        let fetched = src
-            .fetch(&hits[0])
-            .await
-            .expect("fetch should succeed");
+        let fetched = src.fetch(&hits[0]).await.expect("fetch should succeed");
         let pdf = fetched.pdf.expect("fetched source should carry the PDF");
         assert!(
             pdf.windows(b"MOCKLIBGENMARKER".len())

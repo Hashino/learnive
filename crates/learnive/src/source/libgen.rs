@@ -36,8 +36,7 @@ use super::{FetchedSource, Origin, SearchHit, SourceError, SourceKind, fetched_f
 
 /// Browser-like UA: libgen.li answers real content to ordinary browser UAs and
 /// may serve a default/blocked page to unknown agents.
-const CHROME_UA: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const CHROME_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 /// A LibGen mirror (or a list of candidate mirrors) to try in order.
 pub struct LibGenSource {
@@ -116,12 +115,13 @@ impl LibGenSource {
             .send()
             .await
             && resp.status().is_success()
-                && let Ok(bytes) = resp.bytes().await {
-                    let hits = parse_html_results(base, &bytes);
-                    if !hits.is_empty() {
-                        return Ok(hits);
-                    }
-                }
+            && let Ok(bytes) = resp.bytes().await
+        {
+            let hits = parse_html_results(base, &bytes);
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
         // 2) `out=json` endpoint (libgen.is-style mirrors).
         if let Ok(resp) = self
             .client
@@ -138,13 +138,14 @@ impl LibGenSource {
             .send()
             .await
             && resp.status().is_success()
-                && let Ok(bytes) = resp.bytes().await
-                    && let Ok(books) = serde_json::from_slice::<Vec<LibGenBook>>(&bytes) {
-                        let hits = books_to_hits(base, &books);
-                        if !hits.is_empty() {
-                            return Ok(hits);
-                        }
-                    }
+            && let Ok(bytes) = resp.bytes().await
+            && let Ok(books) = serde_json::from_slice::<Vec<LibGenBook>>(&bytes)
+        {
+            let hits = books_to_hits(base, &books);
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+        }
         Err(SourceError::NoResult)
     }
 
@@ -169,21 +170,22 @@ impl LibGenSource {
         if bytes.starts_with(b"%PDF") {
             return Url::parse(&hit.handle).map_err(Self::net);
         }
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| SourceError::Normalize("ads.php not HTML".into()))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| SourceError::Normalize("ads.php not HTML".into()))?;
         let dl = extract_get_link(text, base_url.as_ref())
             .ok_or_else(|| SourceError::Normalize("no get.php link in ads.php".into()))?;
         // Some intermediaries nest another HTML page with the real link; detect
         // that via content-type on a HEAD and descend one level if needed.
         if let Ok(head) = self.client.head(dl.clone()).send().await
             && let Some(ct) = head.headers().get(reqwest::header::CONTENT_TYPE)
-                && ct.to_str().unwrap_or("").contains("html")
-                    && let Ok(r) = self.client.get(dl.clone()).send().await
-                        && let Ok(b) = r.bytes().await
-                            && let Ok(t) = std::str::from_utf8(&b)
-                                && let Some(dl2) = extract_get_link(t, Some(&dl)) {
-                                    return Ok(dl2);
-                                }
+            && ct.to_str().unwrap_or("").contains("html")
+            && let Ok(r) = self.client.get(dl.clone()).send().await
+            && let Ok(b) = r.bytes().await
+            && let Ok(t) = std::str::from_utf8(&b)
+            && let Some(dl2) = extract_get_link(t, Some(&dl))
+        {
+            return Ok(dl2);
+        }
         Ok(dl)
     }
 
@@ -226,11 +228,9 @@ impl LibGenSource {
             }
             tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
         }
-        Err(Self::net(
-            last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "libgen download failed after retries".into()),
-        ))
+        Err(Self::net(last_err.map(|e| e.to_string()).unwrap_or_else(
+            || "libgen download failed after retries".into(),
+        )))
     }
 }
 
@@ -390,8 +390,8 @@ fn parse_html_results(base: &Url, html: &[u8]) -> Vec<SearchHit> {
 /// 1234") but those lack "iss./pp.", so they stay classified as books.
 fn looks_like_article(title: &str) -> bool {
     let t = title.to_ascii_lowercase();
-    let journal_citation = t.contains("vol.")
-        && (t.contains("iss.") || t.contains("pp.") || t.contains("no."));
+    let journal_citation =
+        t.contains("vol.") && (t.contains("iss.") || t.contains("pp.") || t.contains("no."));
     let named_serial = t.contains("journal of")
         || t.contains("proceedings of")
         || t.contains("conference on")
@@ -586,13 +586,19 @@ mod tests {
         assert!(looks_like_article(
             "Linear Algebra and its Applications    1990-jul vol. 136 iss. none pp.277—279"
         ));
-        assert!(looks_like_article("Journal of Fluid Mechanics vol. 12 iss. 3 pp. 45-67"));
-        assert!(looks_like_article("Proceedings of the International Conference on ML"));
+        assert!(looks_like_article(
+            "Journal of Fluid Mechanics vol. 12 iss. 3 pp. 45-67"
+        ));
+        assert!(looks_like_article(
+            "Proceedings of the International Conference on ML"
+        ));
         // Real textbooks must stay classified as books.
         assert!(!looks_like_article("Introduction to Linear Algebra"));
         assert!(!looks_like_article("Linear Algebra Done Right"));
         // A book *series* uses "vol." but no issue/pages — must stay a book.
-        assert!(!looks_like_article("Lecture Notes in Computer Science, vol. 1234"));
+        assert!(!looks_like_article(
+            "Lecture Notes in Computer Science, vol. 1234"
+        ));
     }
 
     #[test]
@@ -600,7 +606,11 @@ mod tests {
         assert_eq!(parse_size_bytes("5.2 MB"), Some(5_200_000));
         assert_eq!(parse_size_bytes("524 kB"), Some(524_000));
         assert_eq!(parse_size_bytes("1.3 GB"), Some(1_300_000_000));
-        assert_eq!(parse_size_bytes("8123456"), None, "bare number is not a size");
+        assert_eq!(
+            parse_size_bytes("8123456"),
+            None,
+            "bare number is not a size"
+        );
         assert_eq!(parse_size_bytes("524"), None);
     }
 
@@ -662,9 +672,16 @@ mod tests {
             .await
             .expect("full download of the chosen textbook should succeed");
         let pdf = doc.pdf.expect("fetched source should carry the PDF");
-        assert!(pdf.starts_with(b"%PDF"), "downloaded artifact should be a PDF");
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "downloaded artifact should be a PDF"
+        );
         // A real textbook, not a stub — insist on a non-trivial size.
-        assert!(pdf.len() > 1_000_000, "textbook PDF too small: {} bytes", pdf.len());
+        assert!(
+            pdf.len() > 1_000_000,
+            "textbook PDF too small: {} bytes",
+            pdf.len()
+        );
         eprintln!("downloaded textbook '{}' ({} bytes)", best.title, pdf.len());
     }
 }
