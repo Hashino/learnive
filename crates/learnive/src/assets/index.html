@@ -197,10 +197,15 @@
            (S27c) and its matching primitives (S27d) — informational only in
            this slice, never a blocking gate (that's S27h). Opened either
            right after a document with book/article sources is created
-           (`openAcervoGate("coldstart", ...)`, a "Continue" button proceeds
-           regardless) or later from the sidebar (`#acervoBtn`, "review"
-           mode, a "Close" button, no auto-advance). Three sub-views inside
-           one section, toggled by `showAcervoView` in acervo.js. -->
+           (`openAcervoGate("coldstart", ...)`, auto-advancing into node
+           generation the moment every item has passed the automatic check —
+           2026-08-29 UX request; no "Continue" button, nothing to click) or
+           later from the sidebar (`#acervoBtn`, "review" mode, a "Close"
+           button, no auto-advance). Progress streams in over
+           SSE (`GET .../acervo`, see `api/acervo.rs`'s doc comment) so the
+           list fills in per item/phase instead of one long blank wait.
+           Three sub-views inside one section, toggled by `showAcervoView`
+           in acervo.js. -->
       <section id="acervoGate" hidden class="card" aria-label="Library check">
         <div id="acervoReportView">
           <h1 data-i18n="acervo.title">Library check</h1>
@@ -211,10 +216,9 @@
           <p id="acervoLibraryPath" class="muted acervo-library-path"></p>
           <p id="acervoStatus" class="muted"></p>
           <ul id="acervoList"></ul>
-          <p>
-            <button type="button" id="acervoRecheckBtn" data-i18n="acervo.recheck">Re-check</button>
+          <p class="acervo-actions">
+            <button type="button" id="acervoRecheckBtn" hidden data-i18n="acervo.recheck">Re-check</button>
             <button type="button" id="acervoMatchesBtn" hidden data-i18n="acervo.reviewMatch">Resolve match</button>
-            <button type="button" id="acervoContinueBtn" hidden data-i18n="acervo.continueBtn">Continue</button>
             <button type="button" id="acervoCloseBtn" hidden data-i18n="acervo.close">Close</button>
           </p>
         </div>

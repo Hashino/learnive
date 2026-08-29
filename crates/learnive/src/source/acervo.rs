@@ -287,11 +287,69 @@ pub fn validate_acervo(
     expected: &[ExpectedItem],
     index_cache_dir: impl AsRef<Path>,
 ) -> std::io::Result<AcervoReport> {
+    validate_acervo_with_progress(library, expected, index_cache_dir, |_| {})
+}
+
+/// Which of the six checks is currently running for one item — surfaced so a
+/// caller (S27f's report screen, live-reported 2026-08-29: "a tela de
+/// checando acervo deveria reportar progresso") can show the user something
+/// other than a blank wait while every PDF in a real library gets parsed.
+/// Presence isn't its own phase here — finding (or failing to find) a
+/// candidate is the precondition for every other check, reported once as
+/// part of starting an item, not as a phase transition of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcervoPhase {
+    Presence,
+    Identity,
+    TextLayer,
+    Toc,
+    PageMap,
+    Index,
+}
+
+impl AcervoPhase {
+    /// Stable wire tag — mirrors the `&'static str` fields `api::acervo`
+    /// already serializes the finished check results as, so the frontend
+    /// reuses one vocabulary for "in progress" and "done".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AcervoPhase::Presence => "presence",
+            AcervoPhase::Identity => "identity",
+            AcervoPhase::TextLayer => "text_layer",
+            AcervoPhase::Toc => "toc",
+            AcervoPhase::PageMap => "page_map",
+            AcervoPhase::Index => "index",
+        }
+    }
+}
+
+/// One progress tick: which item, which phase, emitted right before that
+/// phase's check actually runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcervoProgress {
+    pub title: String,
+    pub phase: AcervoPhase,
+}
+
+/// Same as [`validate_acervo`], but calls `on_progress` right before each
+/// check runs for each item — a plain synchronous callback (not a channel)
+/// so this module stays free of any async/tokio dependency (mirrors the
+/// rest of `source`); a caller that needs to stream progress across an
+/// `.await` point (S27f's SSE report endpoint) sends from inside the
+/// callback into whatever channel it owns. Ordering is deterministic: items
+/// in `expected` order, phases in the same presence→identity→text_layer→
+/// toc→page_map→index order the six checks are documented in above.
+pub fn validate_acervo_with_progress(
+    library: &LocalPdfSource,
+    expected: &[ExpectedItem],
+    index_cache_dir: impl AsRef<Path>,
+    mut on_progress: impl FnMut(AcervoProgress),
+) -> std::io::Result<AcervoReport> {
     let candidates = load_candidates(library)?;
     let index_cache_dir = index_cache_dir.as_ref();
     let items = expected
         .iter()
-        .map(|item| build_item_report(item, &candidates, index_cache_dir))
+        .map(|item| build_item_report(item, &candidates, index_cache_dir, &mut on_progress))
         .collect();
     Ok(AcervoReport { items })
 }
@@ -327,7 +385,16 @@ fn build_item_report(
     item: &ExpectedItem,
     candidates: &[LibraryCandidate],
     index_cache_dir: &Path,
+    on_progress: &mut impl FnMut(AcervoProgress),
 ) -> ItemReport {
+    let tick = |phase: AcervoPhase, on_progress: &mut dyn FnMut(AcervoProgress)| {
+        on_progress(AcervoProgress {
+            title: item.title.clone(),
+            phase,
+        });
+    };
+
+    tick(AcervoPhase::Presence, on_progress);
     let Some(cand) = find_candidate(item, candidates) else {
         return ItemReport {
             expected: item.clone(),
@@ -340,16 +407,27 @@ fn build_item_report(
         };
     };
 
+    tick(AcervoPhase::Identity, on_progress);
+    let identity = check_identity(item, cand);
+    tick(AcervoPhase::TextLayer, on_progress);
+    let text_layer = check_text_layer(&cand.pdf);
+    tick(AcervoPhase::Toc, on_progress);
+    let toc = check_toc(&cand.pdf);
+    tick(AcervoPhase::PageMap, on_progress);
+    let page_map = check_page_map(&cand.pdf);
+    tick(AcervoPhase::Index, on_progress);
+    let index = check_index_cache(&cand.hash, index_cache_dir);
+
     ItemReport {
         expected: item.clone(),
         presence: PresenceCheck::Found {
             filename: cand.entry.filename.clone(),
         },
-        identity: check_identity(item, cand),
-        text_layer: check_text_layer(&cand.pdf),
-        toc: check_toc(&cand.pdf),
-        page_map: check_page_map(&cand.pdf),
-        index: check_index_cache(&cand.hash, index_cache_dir),
+        identity,
+        text_layer,
+        toc,
+        page_map,
+        index,
     }
 }
 

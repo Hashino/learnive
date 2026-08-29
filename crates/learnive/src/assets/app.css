@@ -839,6 +839,23 @@ body.source-resizing #askBar {
 .acervo-item-actions {
   margin-top: 0.4rem;
 }
+.acervo-item-phase {
+  margin-top: 0.2rem;
+}
+/* Re-check/Resolve-match sit together on the left (housekeeping actions);
+   Close is the one action that ends this screen (review mode only — the
+   coldstart flow has no button at all, it auto-advances once every item
+   passes, 2026-08-29 UX request), anchored right so it reads as a distinct,
+   final step — not just another item in the row. */
+.acervo-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.acervo-actions #acervoCloseBtn {
+  margin-left: auto;
+}
 .acervo-badge {
   font-size: 0.75rem;
   font-weight: 600;

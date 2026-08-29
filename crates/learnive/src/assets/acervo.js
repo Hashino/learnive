@@ -5,13 +5,26 @@
 // Deliberately NOT a blocking gate (S27h's job, out of scope here): this
 // screen opens (1) right after a document with book/article sources is
 // created, as a courtesy stop between confirmation and the first node's
-// generation — a "Continue" button proceeds regardless of what the report
-// says, and a broken check silently falls through to the old behavior
-// (`continueFromAcervoGate`'s catch branch) rather than stalling the whole
-// flow; and (2) any time later, from the sidebar `#acervoBtn`, in "review"
-// mode (a "Close" button, no auto-advance). Global-scope functions (no IIFE
-// — `documents.js`'s `createLivingDocument` calls `openAcervoGate`
-// directly), same convention as `documents.js`/`outline.js`.
+// generation — it auto-advances into node generation the moment every item
+// has passed the automatic check, no button to click (2026-08-29 UX
+// request: "a aplicação deveria automaticamente prosseguir para a geração
+// do conteúdo"; before that, only "Re-check"/"Resolve match" are
+// available), and a broken check silently falls through to the old
+// behavior (`continueFromAcervoGate`'s catch branch) rather than stalling
+// the whole flow; and (2) any time later, from the sidebar `#acervoBtn`, in
+// "review" mode (a "Close" button, no auto-advance — this mode is a
+// deliberate look, not a step the user is waiting to get past).
+// Global-scope functions (no IIFE — `documents.js`'s `createLivingDocument`
+// calls `openAcervoGate` directly), same convention as
+// `documents.js`/`outline.js`.
+//
+// Progress (2026-08-29, live UX request: "a tela de checando acervo
+// deveria reportar progresso") streams over SSE from `GET .../acervo` (see
+// `api/acervo.rs`'s doc comment for the wire event sequence: `items` →
+// any number of `phase` → `report` → `done`) instead of one blocking
+// request — `renderAcervoChecking`/`setAcervoItemPhase` paint the live
+// per-item status, and `renderAcervoReport` (unchanged) replaces that list
+// wholesale once the terminal `report` event arrives.
 
 // { mode: "coldstart" | "review", docId, continueNodeId }
 let acervoState = { mode: "review", docId: null, continueNodeId: null };
@@ -33,7 +46,10 @@ function openAcervoGate(mode, docId, continueNodeId) {
   el("doc").hidden = true;
   el("acervoGate").hidden = false;
   showAcervoView("report");
-  el("acervoContinueBtn").hidden = mode !== "coldstart";
+  // Re-check depends on the report that's about to load — see
+  // `updateAcervoGateButtons` — so it starts hidden rather than flashing
+  // visible before there's anything to act on.
+  el("acervoRecheckBtn").hidden = true;
   el("acervoCloseBtn").hidden = mode !== "review";
   loadAcervoReport();
 }
@@ -44,7 +60,6 @@ function continueFromAcervoGate() {
   if (acervoState.continueNodeId) generateNode(acervoState.continueNodeId);
 }
 
-el("acervoContinueBtn").addEventListener("click", continueFromAcervoGate);
 el("acervoCloseBtn").addEventListener("click", () => {
   el("acervoGate").hidden = true;
   el("doc").hidden = false;
@@ -63,25 +78,54 @@ el("acervoTocBackBtn").addEventListener("click", () => {
   loadAcervoReport();
 });
 
+// Re-check only makes sense once something has actually failed the
+// automatic pass — a clean library has nothing to re-check (2026-08-29 live
+// UX request).
+function updateAcervoGateButtons(report) {
+  el("acervoRecheckBtn").hidden = report.all_pass;
+}
+
 async function loadAcervoReport() {
   el("acervoStatus").textContent = t("acervo.loading");
   el("acervoList").innerHTML = "";
   el("acervoLibraryPath").innerHTML = "";
+  el("acervoRecheckBtn").hidden = true;
   try {
     const resp = await api(`/api/documents/${acervoState.docId}/acervo`);
     if (!resp.ok) throw new Error(await resp.text());
-    const report = await resp.json();
-    if (acervoState.mode === "coldstart" && report.items.length === 0) {
-      // Nothing to check on this reading list (no book/article sources
-      // yet) — never show an empty gate, proceed exactly as before this
-      // slice existed.
-      continueFromAcervoGate();
-      return;
-    }
-    renderLibraryPath(report.library_path);
-    el("acervoStatus").textContent = report.all_pass ? t("acervo.allGood") : "";
-    renderAcervoReport(report);
-    refreshAcervoMatchesBtn();
+    await readSse(resp, (event, data) => {
+      if (event === "items") {
+        const payload = JSON.parse(data);
+        renderLibraryPath(payload.library_path);
+        if (acervoState.mode === "coldstart" && payload.items.length === 0) {
+          // Nothing to check on this reading list (no book/article sources
+          // yet) — never show an empty gate, proceed exactly as before
+          // this slice existed.
+          continueFromAcervoGate();
+          return;
+        }
+        el("acervoStatus").textContent = t("acervo.checking");
+        renderAcervoChecking(payload.items);
+      } else if (event === "phase") {
+        const payload = JSON.parse(data);
+        setAcervoItemPhase(payload.item_id, payload.phase);
+      } else if (event === "report") {
+        const report = JSON.parse(data);
+        if (acervoState.mode === "coldstart" && report.all_pass) {
+          // Everything the reading list needs is already in the library —
+          // nothing for the user to act on, so don't make them click
+          // through a screen that's already green (2026-08-29 UX request).
+          continueFromAcervoGate();
+          return;
+        }
+        el("acervoStatus").textContent = report.all_pass ? t("acervo.allGood") : "";
+        renderAcervoReport(report);
+        refreshAcervoMatchesBtn();
+        updateAcervoGateButtons(report);
+      } else if (event === "error") {
+        throw new Error(data);
+      }
+    });
   } catch (err) {
     if (acervoState.mode === "coldstart") {
       // Informational only in this slice (S27h makes it a real gate) — a
@@ -91,7 +135,44 @@ async function loadAcervoReport() {
     }
     el("acervoStatus").innerHTML =
       '<span class="error">' + t("acervo.error") + escapeHtml(String(err)) + "</span>";
+    // Something clearly needs another look — never strand the user with no
+    // way to retry.
+    el("acervoRecheckBtn").hidden = false;
   }
+}
+
+// The live-progress list — one row per expected item, filled in with the
+// item's current check phase as `phase` events arrive. Replaced wholesale
+// by `renderAcervoReport` once the terminal `report` event lands.
+function renderAcervoChecking(items) {
+  const list = el("acervoList");
+  list.innerHTML = "";
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = "acervo-item";
+    li.dataset.itemId = item.item_id;
+
+    const title = document.createElement("div");
+    title.className = "acervo-item-title";
+    title.textContent = item.title;
+    li.appendChild(title);
+
+    const phase = document.createElement("div");
+    phase.className = "muted acervo-item-phase";
+    phase.textContent = t("acervo.phase.queued");
+    li.appendChild(phase);
+
+    list.appendChild(li);
+  }
+}
+
+function setAcervoItemPhase(itemId, phase) {
+  const li = el("acervoList").querySelector(
+    `li[data-item-id="${CSS.escape(itemId)}"]`,
+  );
+  if (!li) return;
+  const phaseEl = li.querySelector(".acervo-item-phase");
+  if (phaseEl) phaseEl.textContent = t("acervo.phase." + phase);
 }
 
 // Shows "Resolve match" only when there's actually something to resolve —

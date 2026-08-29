@@ -37,6 +37,7 @@ use crate::source::{
     OutlineEntry, SourceKind, TocConfirmStore,
 };
 
+use super::grading::sse_frame;
 use super::*;
 
 fn library(state: &AppState) -> Result<LocalPdfSource, ApiError> {
@@ -144,14 +145,55 @@ pub struct AcervoReportResp {
     pub library_path: String,
 }
 
+/// One entry of the `items` event's list — sent up front, before any check
+/// has run, so the client can render "checking N items" immediately instead
+/// of waiting for the whole (potentially slow, whole-library-scanning) pass
+/// to finish. Deliberately narrower than [`AcervoItemResp`] — just enough to
+/// paint a row per item; the `phase` events that follow update each row's
+/// status text, and the final `report` event replaces the list with the
+/// real, complete result.
+#[derive(Serialize)]
+struct AcervoListItemResp {
+    item_id: String,
+    title: String,
+}
+
+/// One `phase` event: which item, which of the six checks is now running.
+#[derive(Serialize)]
+struct AcervoPhaseResp {
+    item_id: String,
+    phase: &'static str,
+}
+
 /// The acervo gate's own report — real and actionable, but deliberately
 /// **not enforced** anywhere in the generation flow (S27h's job). Lists
 /// what's missing by bibliographic title, never by filename (SPEC's own
 /// wording).
+///
+/// **Streams progress over SSE (S27f, live-reported 2026-08-29: "a tela de
+/// checando acervo deveria reportar progresso")** — a real library can hold
+/// many PDFs and `validate_acervo` reads/parses every one of them per
+/// expected item, so this used to be one long blocking wait with no
+/// feedback. Still a `GET` (read-only, §3.1 is about state-changing
+/// endpoints, and `EventSource` isn't in play here — the client already has
+/// a POST-only `readSse` helper it reuses for any fetch response, GET
+/// included). Events, in order: one `items` event (the full list to render,
+/// plus `library_path`, sent before any check runs) → any number of `phase`
+/// events (`{item_id, phase}`, one per check as it starts) → one `report`
+/// event (the complete [`AcervoReportResp`], same shape the old plain-JSON
+/// response used to return) → `done`. A validation failure (I/O error, or
+/// the `spawn_blocking` task itself panicking — the exact live bug this
+/// endpoint hit on 2026-08-29 with the `pdf-extract` crash, since fixed)
+/// surfaces as an `error` event instead of an HTTP error status, matching
+/// `generate_node`'s existing SSE convention (`api/generation.rs`) — by the
+/// time validation is running, headers promising `text/event-stream` are
+/// already committed. Failures *before* that point (bad document id, no
+/// outline, can't open the library) still fail the request itself, same as
+/// before this change.
 pub async fn get_acervo_report(
     State(state): State<AppState>,
     Path(doc): Path<String>,
-) -> Result<Json<AcervoReportResp>, ApiError> {
+) -> Result<Response, ApiError> {
     let outline = load_outline(&state, &doc)?;
     let expected = expected_items(&outline);
     let lib = library(&state)?;
@@ -167,84 +209,145 @@ pub async fn get_acervo_report(
         .unwrap_or_else(|_| lib.root().to_path_buf())
         .to_string_lossy()
         .into_owned();
-    if expected.is_empty() {
-        return Ok(Json(AcervoReportResp {
-            items: Vec::new(),
-            all_pass: true,
-            library_path,
-        }));
-    }
-
     let idx_dir = index_cache_dir(&state);
     let ids: Vec<String> = expected.iter().map(|(id, _)| id.clone()).collect();
     let items_only: Vec<ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
 
-    let report =
-        spawn_blocking(move || source::acervo::validate_acervo(&lib, &items_only, &idx_dir))
-            .await
-            .map_err(|e| ApiError::Internal(format!("acervo validation task panicked: {e}")))?
-            .map_err(|e| ApiError::Internal(format!("acervo validation failed: {e}")))?;
+    let stream = async_stream::stream! {
+        let list: Vec<AcervoListItemResp> = ids
+            .iter()
+            .zip(items_only.iter())
+            .map(|(item_id, item)| AcervoListItemResp {
+                item_id: item_id.clone(),
+                title: item.title.clone(),
+            })
+            .collect();
+        yield Ok::<Bytes, std::io::Error>(sse_frame(
+            "items",
+            &serde_json::json!({ "items": list, "library_path": library_path }).to_string(),
+        ));
 
-    let items: Vec<AcervoItemResp> = ids
-        .into_iter()
-        .zip(report.items)
-        .map(|(item_id, r)| {
-            let (filename, presence) = match &r.presence {
-                source::PresenceCheck::Found { filename } => (Some(filename.clone()), "found"),
-                source::PresenceCheck::Missing => (None, "missing"),
-            };
-            let (identity, identity_reason) = match &r.identity {
-                source::IdentityCheck::Match => ("match", None),
-                source::IdentityCheck::Mismatch { reason } => ("mismatch", Some(reason.clone())),
-                source::IdentityCheck::Skipped => ("skipped", None),
-            };
-            let text_layer = match &r.text_layer {
-                source::TextLayerCheck::Extractable { .. } => "extractable",
-                source::TextLayerCheck::NoText => "no_text",
-                source::TextLayerCheck::Skipped => "skipped",
-            };
-            let needs_toc_confirmation = r.toc.needs_user_confirmation();
-            let toc = match &r.toc {
-                source::TocCheck::Embedded { .. } => "embedded",
-                source::TocCheck::Heuristic { .. } => "heuristic",
-                source::TocCheck::Unavailable => "unavailable",
-                source::TocCheck::Skipped => "skipped",
-            };
-            let page_map = match &r.page_map {
-                source::PageMapCheck::Labeled { .. } => "labeled",
-                source::PageMapCheck::PhysicalOnly { .. } => "physical_only",
-                source::PageMapCheck::Skipped => "skipped",
-            };
-            let index = match &r.index {
-                source::IndexCheck::Cached { .. } => "cached",
-                source::IndexCheck::Missing => "missing",
-                source::IndexCheck::Skipped => "skipped",
-            };
-            AcervoItemResp {
-                item_id,
-                title: r.expected.title.clone(),
-                authors: r.expected.authors.clone(),
-                kind: r.expected.kind,
-                filename,
-                presence,
-                identity,
-                identity_reason,
-                text_layer,
-                toc,
-                needs_toc_confirmation,
-                page_map,
-                index,
-                passes: r.passes(),
+        if items_only.is_empty() {
+            let resp = AcervoReportResp { items: Vec::new(), all_pass: true, library_path };
+            yield Ok(sse_frame("report", &serde_json::to_string(&resp).unwrap_or_default()));
+            yield Ok(sse_frame("done", ""));
+            return;
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<source::acervo::AcervoProgress>();
+        let mut task = spawn_blocking(move || {
+            source::acervo::validate_acervo_with_progress(&lib, &items_only, &idx_dir, move |p| {
+                let _ = tx.send(p);
+            })
+        });
+
+        let report = loop {
+            tokio::select! {
+                Some(p) = rx.recv() => {
+                    let Some(item_id) = list.iter().find(|l| l.title == p.title).map(|l| l.item_id.clone()) else { continue };
+                    yield Ok(sse_frame(
+                        "phase",
+                        &serde_json::to_string(&AcervoPhaseResp {
+                            item_id,
+                            phase: p.phase.as_str(),
+                        }).unwrap_or_default(),
+                    ));
+                }
+                joined = &mut task => {
+                    match joined {
+                        Ok(Ok(report)) => break report,
+                        Ok(Err(e)) => {
+                            yield Ok(sse_frame("error", &format!("acervo validation failed: {e}")));
+                            return;
+                        }
+                        Err(e) => {
+                            yield Ok(sse_frame("error", &format!("acervo validation task panicked: {e}")));
+                            return;
+                        }
+                    }
+                }
             }
-        })
-        .collect();
+        };
+        // The blocking task's sender may have queued a few last phase events
+        // right before returning; `select!` can race the task's own
+        // completion ahead of draining them, so mop up anything still
+        // buffered before the terminal `report` event.
+        while let Ok(p) = rx.try_recv() {
+            let Some(item_id) = list.iter().find(|l| l.title == p.title).map(|l| l.item_id.clone()) else { continue };
+            yield Ok(sse_frame(
+                "phase",
+                &serde_json::to_string(&AcervoPhaseResp {
+                    item_id,
+                    phase: p.phase.as_str(),
+                }).unwrap_or_default(),
+            ));
+        }
 
-    let all_pass = items.iter().all(|i| i.passes);
-    Ok(Json(AcervoReportResp {
-        items,
-        all_pass,
-        library_path,
-    }))
+        let items: Vec<AcervoItemResp> = ids
+            .into_iter()
+            .zip(report.items)
+            .map(|(item_id, r)| {
+                let (filename, presence) = match &r.presence {
+                    source::PresenceCheck::Found { filename } => (Some(filename.clone()), "found"),
+                    source::PresenceCheck::Missing => (None, "missing"),
+                };
+                let (identity, identity_reason) = match &r.identity {
+                    source::IdentityCheck::Match => ("match", None),
+                    source::IdentityCheck::Mismatch { reason } => ("mismatch", Some(reason.clone())),
+                    source::IdentityCheck::Skipped => ("skipped", None),
+                };
+                let text_layer = match &r.text_layer {
+                    source::TextLayerCheck::Extractable { .. } => "extractable",
+                    source::TextLayerCheck::NoText => "no_text",
+                    source::TextLayerCheck::Skipped => "skipped",
+                };
+                let needs_toc_confirmation = r.toc.needs_user_confirmation();
+                let toc = match &r.toc {
+                    source::TocCheck::Embedded { .. } => "embedded",
+                    source::TocCheck::Heuristic { .. } => "heuristic",
+                    source::TocCheck::Unavailable => "unavailable",
+                    source::TocCheck::Skipped => "skipped",
+                };
+                let page_map = match &r.page_map {
+                    source::PageMapCheck::Labeled { .. } => "labeled",
+                    source::PageMapCheck::PhysicalOnly { .. } => "physical_only",
+                    source::PageMapCheck::Skipped => "skipped",
+                };
+                let index = match &r.index {
+                    source::IndexCheck::Cached { .. } => "cached",
+                    source::IndexCheck::Missing => "missing",
+                    source::IndexCheck::Skipped => "skipped",
+                };
+                AcervoItemResp {
+                    item_id,
+                    title: r.expected.title.clone(),
+                    authors: r.expected.authors.clone(),
+                    kind: r.expected.kind,
+                    filename,
+                    presence,
+                    identity,
+                    identity_reason,
+                    text_layer,
+                    toc,
+                    needs_toc_confirmation,
+                    page_map,
+                    index,
+                    passes: r.passes(),
+                }
+            })
+            .collect();
+
+        let all_pass = items.iter().all(|i| i.passes);
+        let resp = AcervoReportResp { items, all_pass, library_path };
+        yield Ok(sse_frame("report", &serde_json::to_string(&resp).unwrap_or_default()));
+        yield Ok(sse_frame("done", ""));
+    };
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("valid stream response"))
 }
 
 // -- GET/POST /api/documents/{doc}/acervo/matches -- PDF<->item matching --
@@ -583,6 +686,32 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// Pulls the `data:` payload of the last `event: {event}` frame out of an
+    /// SSE body (`get_acervo_report`'s wire format — see its own doc comment)
+    /// and parses it as JSON. "Last" rather than "first/only" because a
+    /// terminal event like `report` is expected to appear exactly once, but
+    /// this stays robust if that ever changes.
+    fn last_sse_event_json(body: &str, event: &str) -> serde_json::Value {
+        let mut found = None;
+        for frame in body.split("\n\n") {
+            let mut lines = frame.lines();
+            let Some(event_line) = lines.next() else {
+                continue;
+            };
+            if event_line != format!("event: {event}") {
+                continue;
+            }
+            let Some(data_line) = lines.next() else {
+                continue;
+            };
+            let data = data_line.strip_prefix("data: ").unwrap_or(data_line);
+            found = Some(data.to_string());
+        }
+        let raw = found.unwrap_or_else(|| panic!("no `event: {event}` frame in SSE body:\n{body}"));
+        let inner: String = serde_json::from_str(&raw).unwrap_or(raw);
+        serde_json::from_str(&inner).unwrap()
+    }
+
     fn book_item(id: &str, title: &str, authors: &[&str]) -> OutlineItem {
         OutlineItem {
             id: id.to_string(),
@@ -638,7 +767,8 @@ mod tests {
 
         let (status, body) = send(&state, authed("GET", "/api/documents/doc1/acervo", "")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(body.contains("event: items"), "no items event: {body}");
+        let report = last_sse_event_json(&body, "report");
         assert_eq!(report["items"].as_array().unwrap().len(), 1);
         assert_eq!(report["items"][0]["presence"], "missing");
         assert_eq!(
@@ -675,7 +805,7 @@ mod tests {
 
         let (status, body) = send(&state, authed("GET", "/api/documents/doc1/acervo", "")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let report = last_sse_event_json(&body, "report");
         assert!(report["items"].as_array().unwrap().is_empty());
         assert_eq!(report["all_pass"], true);
         // The path must be present even on the early-return (empty-outline)
@@ -686,6 +816,41 @@ mod tests {
                 .unwrap()
                 .ends_with("library")
         );
+    }
+
+    #[tokio::test]
+    async fn acervo_report_streams_a_phase_event_per_check_for_a_present_item() {
+        // Live UX request, 2026-08-29: "a tela de checando acervo deveria
+        // reportar progresso" — the report must not be a single silent
+        // wait; each of the six checks on a present, matched item should
+        // surface its own `phase` event before the terminal `report`.
+        let (_dir, state) = test_state();
+        seed_document(
+            &state,
+            "doc1",
+            vec![book_item("b1", "My Article", &["Ada Author"])],
+        );
+        let lib = LocalPdfSource::open(state.data_dir.as_ref()).unwrap();
+        write_pdf_with_metadata(&lib.root().join("article.pdf"), "My Article", "Ada Author");
+
+        let (status, body) = send(&state, authed("GET", "/api/documents/doc1/acervo", "")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("event: items"), "no items event: {body}");
+        for phase in [
+            "presence",
+            "identity",
+            "text_layer",
+            "toc",
+            "page_map",
+            "index",
+        ] {
+            assert!(
+                body.contains(&format!("\\\"phase\\\":\\\"{phase}\\\"")),
+                "missing phase {phase} in body: {body}"
+            );
+        }
+        let report = last_sse_event_json(&body, "report");
+        assert_eq!(report["items"][0]["presence"], "found");
     }
 
     #[tokio::test]
