@@ -5,8 +5,13 @@
 //! search scrapes the results **HTML table**:
 //!
 //! ```text
-//! GET {mirror}/index.php?req=<q>&res=25&view=detailed&phrase=1&lg_topic=libgen
+//! GET {mirror}/index.php?req=<q>&res=25&view=detailed&phrase=1&column=title&lg_topic=libgen
 //! ```
+//!
+//! `q` is expected to be a real book/article TITLE, not a topic phrase
+//! (`column=title` — changed 2026-08-29 from the all-fields `def` column,
+//! which is what let a topic phrase like "discrete math" match and download
+//! an unrelated Android/automata paper; see `engine::propose_source_title`).
 //!
 //! Each result row links to `/ads.php?md5=<md5>`; `md5` plus the row's title
 //! and author are scraped out. A few generations (notably libgen.is) instead
@@ -105,6 +110,7 @@ impl LibGenSource {
                 ("res", "25"),
                 ("view", "detailed"),
                 ("phrase", "1"),
+                ("column", "title"),
                 ("lg_topic", "libgen"),
             ])
             .send()
@@ -126,7 +132,7 @@ impl LibGenSource {
                 ("view", "detailed"),
                 ("phrase", "1"),
                 ("out", "json"),
-                ("column", "def"),
+                ("column", "title"),
                 ("lg_topic", "libgen"),
             ])
             .send()

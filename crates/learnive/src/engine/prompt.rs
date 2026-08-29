@@ -302,14 +302,16 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
 pub fn search_subject(topic: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
-            "Name the general SUBJECT or textbook this request belongs to, the \
-             way it would appear in a library catalog or a textbook's own \
-             title — 2 to 4 words, no punctuation, no question, no specific \
-             detail from the request itself. Examples: a question about \
-             appending to a list in Python -> \"python programming\"; a \
-             question about derivatives -> \"calculus\"; a question about \
-             supply and demand -> \"economics\". Respond with ONLY the \
-             subject phrase, nothing else.",
+            "Name a specific, real book or article that covers this request — \
+             respond with its exact TITLE, the way it would appear on the \
+             book's own cover or a paper's own header, not a general subject \
+             area. It must be a real, existing work you have genuine \
+             knowledge of, never an invented or approximate title. Examples: \
+             a question about appending to a list in Python -> \"Learning \
+             Python\"; a question about derivatives -> \"Calculus\"; a \
+             question about supply and demand -> \"Principles of \
+             Economics\". Respond with ONLY the title, nothing else (no \
+             author, no quotes, no year, no extra commentary).",
         ),
         ChatMessage::user(format!("Request: {topic}")),
     ]

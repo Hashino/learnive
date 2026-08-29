@@ -1369,17 +1369,28 @@ pub(super) struct AcquisitionOutcome {
 }
 
 /// Runs source acquisition + reindex for `query_hint` (§11.1/§10): derives a
-/// short catalog-search subject phrase (`engine::propose_search_subject` —
-/// title-matching backends reliably miss on a full sentence even when the
-/// catalog covers the subject, confirmed live against OpenStax before that
-/// backend was deleted, 2026-08-23), then tries each configured `Source` in
-/// order (`state.source` then `state.fallback_source`) with that phrase and,
-/// failing that, the raw hint verbatim. Returns as soon as one attempt
-/// lands. The primary (LibGen) and fallback (Sci-Hub) backends are both tried;
-/// when neither mirror answers (offline / blocked / no result) this degrades to
-/// not-grounded — same as the no-retriever case below. Acquisition is a
-/// best-effort enhancement, so every failure mode here is recoverable and never
-/// surfaced as an error to the caller.
+/// real book/article title (`engine::propose_source_title` — renamed
+/// 2026-08-29 from `propose_search_subject`; searching by *subject* against
+/// an all-fields index is what let a discrete-math node acquire an unrelated
+/// Android/automata paper, the wrong-book bug S27m closed at the grounding
+/// gate but not at the source), then tries each configured `Source` in order
+/// (`state.source` then `state.fallback_source`) with that title, searched
+/// against LibGen's title column specifically (`source::libgen`). Falls back
+/// to the raw hint verbatim if the title search yields nothing — deliberately:
+/// a hallucinated or unmatched title should mean *no book*, not a resurrected
+/// subject-phrase guess, so this fallback is expected to usually also miss.
+/// An acquisition that lands nothing here is not silently absorbed later: it
+/// leaves `research_attempted` set and grounding empty, which is what makes
+/// S27m's document-level gate refuse the node rather than generate ungrounded
+/// prose. Returns as soon as one attempt lands. The primary (LibGen) and
+/// fallback (Sci-Hub) backends are both tried; Sci-Hub still only accepts a
+/// DOI query and is unaffected by this title change (open question, not yet
+/// decided: resolving title→DOI via `source::bibliography`'s Crossref lookup
+/// so Sci-Hub can be reached from a title too — see PLAN.md's S27m note).
+/// When neither mirror answers (offline / blocked / no result) this degrades
+/// to not-grounded — same as the no-retriever case below. Acquisition is a
+/// best-effort enhancement, so every failure mode here is recoverable and
+/// never surfaced as an error to the caller.
 ///
 /// No-op (returns not-grounded) when grounding is disabled (no retriever).
 /// Awaited directly by the `research` move (generation must not proceed
@@ -1394,15 +1405,15 @@ pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOu
         };
     };
     let ai = state.ai.load_full();
-    let subject = engine::propose_search_subject(&ai, query_hint)
+    let title = engine::propose_source_title(&ai, query_hint)
         .await
         .unwrap_or_default();
 
     let mut queries = Vec::with_capacity(2);
-    if !subject.trim().is_empty() {
-        queries.push(subject.as_str());
+    if !title.trim().is_empty() {
+        queries.push(title.as_str());
     }
-    if !query_hint.trim().is_empty() && query_hint != subject {
+    if !query_hint.trim().is_empty() && query_hint != title {
         queries.push(query_hint);
     }
 

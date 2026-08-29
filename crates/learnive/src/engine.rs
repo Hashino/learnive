@@ -400,10 +400,15 @@ pub async fn propose_objective(ai: &Ai, topic: &str) -> Result<ObjectiveProposal
     parse::objective_proposal(&text)
 }
 
-/// Derives a short catalog-search phrase for source acquisition (§11) from
-/// the raw topic — see `prompt::search_subject` for why this can't just reuse
-/// the objective text. Fast tier: a background, non-blocking, low-stakes call.
-pub async fn propose_search_subject(ai: &Ai, topic: &str) -> Result<String, EngineError> {
+/// Derives a real, specific book/article TITLE for source acquisition (§11)
+/// from the raw topic — see `prompt::search_subject` for the exact
+/// instruction. Renamed from the old `propose_search_subject` 2026-08-29: it
+/// used to ask the model for a 2-4-word subject phrase ("calculus"), which is
+/// what an all-fields catalog search against LibGen was matching on and how
+/// a discrete-math node could acquire an unrelated Android/automata paper —
+/// title-column search (`source::libgen`) needs an actual title, not a
+/// subject. Fast tier: a background, non-blocking, low-stakes call.
+pub async fn propose_source_title(ai: &Ai, topic: &str) -> Result<String, EngineError> {
     let text = collect(ai, Tier::Fast, prompt::search_subject(topic)).await?;
     Ok(text.trim().trim_matches('"').to_string())
 }
