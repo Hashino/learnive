@@ -168,8 +168,23 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
     let page_count = doc.get_pages().len();
     let outline = read_outline(&doc);
     let labels = read_page_labels(&doc);
-    let text = pdf_extract::extract_text(path).unwrap_or_default();
-    let page_texts = pdf_extract::extract_text_by_pages(path).unwrap_or_default();
+    // `pdf_extract::extract_text{,_by_pages}` doesn't just return `Err` on a
+    // malformed content stream — a real library PDF (reported live,
+    // 2026-08-29) hit a content operator (`w`, set line width) with zero
+    // operands and PANICKED inside the crate (`operands[0]` indexed
+    // unconditionally, pdf-extract 0.12.0), which unwound straight through
+    // `.unwrap_or_default()` and crashed the `spawn_blocking` task calling
+    // this (`source::acervo::validate_acervo`) — the module doc's own
+    // "best-effort, never an error for extraction" promise didn't hold
+    // because a panic isn't a `Result`. `catch_unwind` closes that gap: a
+    // panicking extraction degrades to the same empty-text fallback an
+    // `Err` already would, instead of taking down the caller.
+    let text = std::panic::catch_unwind(|| pdf_extract::extract_text(path))
+        .unwrap_or_else(|_| Ok(String::new()))
+        .unwrap_or_default();
+    let page_texts = std::panic::catch_unwind(|| pdf_extract::extract_text_by_pages(path))
+        .unwrap_or_else(|_| Ok(Vec::new()))
+        .unwrap_or_default();
 
     Ok(PdfDocument {
         text,
@@ -442,6 +457,53 @@ mod tests {
         let path = dir.path().join(name);
         doc.save(&path).expect("save fixture pdf");
         (dir, path)
+    }
+
+    /// Reported live, 2026-08-29: a real library PDF's content stream had a
+    /// `w` (set line width) operator with zero operands, and `pdf-extract`
+    /// 0.12.0 indexes `operands[0]` unconditionally for that operator —
+    /// PANICS instead of returning `Err`, which used to unwind straight
+    /// through `read_pdf`'s `.unwrap_or_default()` and crash whatever
+    /// `spawn_blocking` task called it (`source::acervo::validate_acervo`,
+    /// live in production via the acervo gate). `read_pdf` must degrade to
+    /// empty text/page_texts here, the same as it already does for any
+    /// other extraction failure — never propagate the panic.
+    #[test]
+    fn a_malformed_content_stream_panic_degrades_to_empty_text_not_a_crash() {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let content = Content {
+            operations: vec![Operation::new("w", vec![])],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let (_dir, path) = save_to_temp(&mut doc, "malformed-w-operator.pdf");
+
+        let read = read_pdf(&path).expect("must not error, let alone panic");
+        assert_eq!(read.pages.page_count, 1, "the page tree itself is fine");
+        assert!(
+            read.text.is_empty(),
+            "extraction panicked internally, so text degrades to empty: {:?}",
+            read.text
+        );
     }
 
     #[test]

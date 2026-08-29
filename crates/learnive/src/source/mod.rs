@@ -411,7 +411,14 @@ fn extract_pdf_text(pdf: &[u8]) -> String {
     if std::fs::write(&path, pdf).is_err() {
         return String::new();
     }
-    let text = pdf_extract::extract_text(&path).unwrap_or_default();
+    // `catch_unwind`, not just `.unwrap_or_default()`: a malformed content
+    // stream can make `pdf_extract::extract_text` PANIC rather than return
+    // `Err` (confirmed live, 2026-08-29 — see `source::pdf::read_pdf`'s own
+    // matching fix), which would otherwise skip the cleanup below too and
+    // leak the temp file on top of crashing the caller.
+    let text = std::panic::catch_unwind(|| pdf_extract::extract_text(&path))
+        .unwrap_or_else(|_| Ok(String::new()))
+        .unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     text
 }
