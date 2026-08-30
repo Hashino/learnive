@@ -385,6 +385,8 @@ function acervoTocSourceLabel(source) {
   switch (source) {
     case "embedded":
       return t("acervo.toc.sourceEmbedded");
+    case "deduced":
+      return t("acervo.toc.sourceDeduced");
     case "heuristic":
       return t("acervo.toc.sourceHeuristic");
     case "confirmed":

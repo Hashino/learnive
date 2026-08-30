@@ -1443,6 +1443,102 @@ mod tests {
         assert!(matches!(report.items[0].index, IndexCheck::Cached { .. }));
     }
 
+    /// S27k: once a deduction pass has stored a fully-resolved TOC for this
+    /// hash, `check_toc` must report it as `Deduced` (not fall through to
+    /// the heading heuristic) and `needs_user_confirmation()` must flip to
+    /// false — there is nothing left to ask about.
+    #[test]
+    fn toc_check_reports_deduced_and_needs_no_confirmation_when_fully_resolved() {
+        let (mut doc, _pages) = build_document(&["Some body text."], Some("Deduced Book"), None);
+        let (tmp, lib) = place_in_library(&mut doc, "deduced.pdf");
+        let cache_dir = index_dir(&tmp);
+        let toc_confirm_dir = toc_dir(&tmp);
+        fs::create_dir_all(&toc_confirm_dir).unwrap();
+
+        let bytes = fs::read(lib.root().join("deduced.pdf")).unwrap();
+        let hash = content_hash(&bytes);
+        let toc_confirm = TocConfirmStore::open_at(&toc_confirm_dir).unwrap();
+        toc_confirm
+            .put_deduced(
+                &hash,
+                &crate::source::toc::TocResolution {
+                    resolved: vec![crate::source::toc::ResolvedTocEntry {
+                        title: "Chapter One".into(),
+                        page: 1,
+                    }],
+                    unresolved: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let expected = vec![ExpectedItem {
+            title: "Deduced Book".into(),
+            authors: vec![],
+            kind: SourceKind::Article,
+        }];
+        let report =
+            validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir).expect("validate");
+        match &report.items[0].toc {
+            TocCheck::Deduced {
+                resolved,
+                unresolved,
+            } => {
+                assert_eq!(*resolved, 1);
+                assert_eq!(*unresolved, 0);
+            }
+            other => panic!("expected Deduced, got {other:?}"),
+        }
+        assert!(!report.items[0].toc.needs_user_confirmation());
+    }
+
+    /// Same as above but with a leftover unresolved title — `Deduced` still
+    /// applies (the deduction pass DID run and DID place entries), but
+    /// `needs_user_confirmation()` must stay true: there's still something
+    /// for the S27f screen to ask about.
+    #[test]
+    fn toc_check_deduced_with_unresolved_entries_still_needs_confirmation() {
+        let (mut doc, _pages) = build_document(&["Some body text."], Some("Partial Book"), None);
+        let (tmp, lib) = place_in_library(&mut doc, "partial.pdf");
+        let cache_dir = index_dir(&tmp);
+        let toc_confirm_dir = toc_dir(&tmp);
+        fs::create_dir_all(&toc_confirm_dir).unwrap();
+
+        let bytes = fs::read(lib.root().join("partial.pdf")).unwrap();
+        let hash = content_hash(&bytes);
+        let toc_confirm = TocConfirmStore::open_at(&toc_confirm_dir).unwrap();
+        toc_confirm
+            .put_deduced(
+                &hash,
+                &crate::source::toc::TocResolution {
+                    resolved: vec![crate::source::toc::ResolvedTocEntry {
+                        title: "Chapter One".into(),
+                        page: 1,
+                    }],
+                    unresolved: vec!["Appendix".into()],
+                },
+            )
+            .unwrap();
+
+        let expected = vec![ExpectedItem {
+            title: "Partial Book".into(),
+            authors: vec![],
+            kind: SourceKind::Article,
+        }];
+        let report =
+            validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir).expect("validate");
+        match &report.items[0].toc {
+            TocCheck::Deduced {
+                resolved,
+                unresolved,
+            } => {
+                assert_eq!(*resolved, 1);
+                assert_eq!(*unresolved, 1);
+            }
+            other => panic!("expected Deduced, got {other:?}"),
+        }
+        assert!(report.items[0].toc.needs_user_confirmation());
+    }
+
     /// Exercises the real builder end-to-end with a live embedder — proves
     /// the "documented follow-up" isn't just prose. Ignored by default (downloads
     /// the embedding model); run with

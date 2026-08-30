@@ -1384,53 +1384,22 @@ pub(super) async fn ensure_document_grounded(
         ));
     }
 
-    let missing_index: Vec<&source::ExpectedItem> = report
-        .items
-        .iter()
-        .filter(|r| matches!(r.index, source::IndexCheck::Missing))
-        .map(|r| &r.expected)
-        .collect();
-    if missing_index.is_empty() {
-        return Ok(());
-    }
-
-    let Some(embedder) = (match &state.retriever {
-        Some(r) => Some(r.read().await.embedder().clone()),
-        None => None,
-    }) else {
-        return Err("no embedding model is loaded — cannot index the library".to_string());
-    };
-
-    for item in missing_index {
-        // An ambiguous match (more than one plausible candidate file) is
-        // already surfaced by the S27f matching screen; `report.all_pass()`
-        // above only proves a candidate was FOUND for presence purposes,
-        // not that it's uniquely resolved — this can legitimately skip
-        // here, and `ground_node` below will then correctly report the gap
-        // as an internal inconsistency instead of silently indexing the
-        // wrong file.
-        let Some(filename) = source::resolve_matched_filename(&library, &manual, item)
-            .map_err(|e| format!("could not scan the local library: {e}"))?
-        else {
-            continue;
-        };
-        let path = library.root().join(&filename);
-        let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
-        let hash = source::acervo::content_hash(&bytes);
-        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
-        source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
-            .map_err(|e| format!("could not index {filename}: {e}"))?;
-    }
-
-    // S27k: the printed-contents-page deduction pass. Runs here, not inside
-    // `source::acervo::check_toc` (that module stays free of `Ai`/tokio) —
-    // this is the one call site in the whole gate that already has both an
-    // `Ai` provider and blocking file I/O available. Never gates anything
-    // (`TocCheck` is never in `blocking_failures`, per SPEC's "nenhum PDF é
-    // rejeitado por não ter bookmarks") and never hard-fails the document:
-    // a missing/unconfigured provider, an unreadable contents page, or a
-    // resolution below `is_resolution_acceptable`'s floor all degrade
-    // silently to the existing heading-heuristic/user-confirmation net.
+    // S27k: the printed-contents-page deduction pass. Runs here — right
+    // after the gate's pass/fail check and BEFORE the index-cache-build
+    // early-returns below — because it has no dependency on embeddings or
+    // on any cache being missing. Putting it after those returns (as an
+    // earlier revision of this function did) made it dead code on every
+    // run after the first: once every item's retrieval-index cache exists,
+    // `missing_index.is_empty()` returns `Ok(())` before this ever ran.
+    // Lives here, not inside `source::acervo::check_toc` (that module
+    // stays free of `Ai`/tokio) — this is the one call site in the whole
+    // gate that already has both an `Ai` provider and blocking file I/O
+    // available. Never gates anything (`TocCheck` is never in
+    // `blocking_failures`, per SPEC's "nenhum PDF é rejeitado por não ter
+    // bookmarks") and never hard-fails the document: a missing/unconfigured
+    // provider, an unreadable contents page, or a resolution below
+    // `is_resolution_acceptable`'s floor all degrade silently to the
+    // existing heading-heuristic/user-confirmation net.
     let needs_toc_deduction: Vec<source::ExpectedItem> = report
         .items
         .iter()
@@ -1471,6 +1440,44 @@ pub(super) async fn ensure_document_grounded(
                 let _ = toc_confirm.put_deduced(&hash, &resolution);
             }
         }
+    }
+
+    let missing_index: Vec<&source::ExpectedItem> = report
+        .items
+        .iter()
+        .filter(|r| matches!(r.index, source::IndexCheck::Missing))
+        .map(|r| &r.expected)
+        .collect();
+    if missing_index.is_empty() {
+        return Ok(());
+    }
+
+    let Some(embedder) = (match &state.retriever {
+        Some(r) => Some(r.read().await.embedder().clone()),
+        None => None,
+    }) else {
+        return Err("no embedding model is loaded — cannot index the library".to_string());
+    };
+
+    for item in missing_index {
+        // An ambiguous match (more than one plausible candidate file) is
+        // already surfaced by the S27f matching screen; `report.all_pass()`
+        // above only proves a candidate was FOUND for presence purposes,
+        // not that it's uniquely resolved — this can legitimately skip
+        // here, and `ground_node` below will then correctly report the gap
+        // as an internal inconsistency instead of silently indexing the
+        // wrong file.
+        let Some(filename) = source::resolve_matched_filename(&library, &manual, item)
+            .map_err(|e| format!("could not scan the local library: {e}"))?
+        else {
+            continue;
+        };
+        let path = library.root().join(&filename);
+        let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        let hash = source::acervo::content_hash(&bytes);
+        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
+            .map_err(|e| format!("could not index {filename}: {e}"))?;
     }
 
     Ok(())
