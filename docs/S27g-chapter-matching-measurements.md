@@ -407,7 +407,9 @@ devolve 121 subseções numeradas, exatamente a granularidade que **nenhum
 bookmark do acervo tem** (§1.1a). A dedução é mesmo o único caminho capaz de
 entregar subseção.
 
-### 3.5 A falha se mudou: agora é `resolve_toc`, e a causa é estrutural
+### 3.5 A falha se mudou para o `resolve_toc` — controle corrigido, dois em aberto
+
+Primeira medição depois que a cascata passou a responder:
 
 ```
 K&R           4/40   (10%)  acceptable=false
@@ -415,19 +417,65 @@ Think Python 12/251   (5%)  acceptable=false
 Stewart      97/234  (41%)  acceptable=false
 ```
 
-Nenhum passa. Mas o modo de falha é diferente de tudo acima: **não é bug, é
-premissa vencida.** A regra 1 do `resolve_toc` procura o título **no topo de
-uma página física** — desenhada quando as entradas eram capítulos, e capítulo
-começa em página nova. Agora a maioria das entradas é **subseção**, e
-subseção começa no meio da página. Elas não podem casar por construção.
+Causa: a regra 1 do `resolve_toc` procura o título **no topo de uma página
+física** — desenhada quando as entradas eram capítulos, e capítulo começa em
+página nova. Agora a maioria das entradas é **subseção**, que começa no meio
+da página e portanto não podia casar por construção.
 
-O controle mostra isso limpo: Stewart coloca 97 de 234 (41%) — grosso modo os
-capítulos e as subseções que por acaso caíram no topo. Não é o modelo errando
-(§4 já mostrou que os três modelos que terminam ficam na mesma faixa); é o
-casador procurando no lugar errado.
+**Correção.** A regra 3 (previsão por deslocamento) passou a confirmar lendo a
+**página inteira** prevista, não só o topo (`page_contains`). É seguro
+justamente ali e em nenhum outro lugar: a página já está fixada pela
+aritmética, então não há varredura livre que possa parar numa referência
+cruzada ou num cabeçalho corrente — a pergunta vira só "a entrada está nesta
+página?".
 
-Fica registrado aqui como **o próximo item medido**, não corrigido nesta
-rodada.
+```
+Stewart      97/234 (41%)  ->  134/195 (69%)   acceptable=FALSE -> TRUE
+Think Python  12/251 (5%)  ->   15/215  (7%)
+K&R            4/40 (10%)  ->    3/39   (8%)
+```
+
+**O controle passa pela primeira vez.** É o único livro do trio com verdade
+conhecida, e é o que tem mais subseção (103 `N.M`) — exatamente a população
+que a correção destrava.
+
+### 3.5.1 Os outros dois não são falha do resolvedor
+
+Tentador concluir daí que o `resolve_toc` ainda está quebrado para os outros
+dois. Medido, offline e de graça
+(`resolver_offline::think_python_entries_resolve_against_real_text`): 11
+entradas transcritas **à mão** da página de sumário impressa do Think Python,
+rodadas contra o texto real extraído do livro:
+
+```
+placed 11/11
+  [  1] "The Way of the Program"   -> p23
+  [  -] "What Is a Program?"       -> p23
+  [  -] "Running Python"           -> p24
+  ...
+  [ 10] "Lists"                    -> p129
+```
+
+**11 de 11**, incluindo as oito que são seção de meio de página. Com a lista
+certa o resolvedor acerta tudo. Então a taxa de 7% não vem da regra: vem da
+**lista de 215 entradas** que o modelo devolveu.
+
+Isso virou teste de regressão (não só diagnóstico), e é a fronteira do que
+está medido: falta separar, dentro dessas 215, quanto é título/página errados
+e quanto é a monotonicidade da regra 2 sendo envenenada por um casamento
+errado no começo — um casamento numa página tardia bloqueia todas as
+entradas seguintes. **Não medido, não corrigido.**
+
+O K&R é caso à parte e provavelmente não tem conserto por essa via: é scan de
+1978 com OCR que corrompe os próprios títulos (`self-coniained`,
+`:ROGRAMMING LANGUAGE`), então o casamento por texto não tem em que se
+apoiar. É o livro que deve cair na confirmação pelo usuário — o último degrau
+da cascata, que existe exatamente para isto.
+
+Diagnósticos livres deixados no harness para essa continuação, todos sem custo
+de API: `page_tops` (o que o topo de cada página realmente contém),
+`contents_dump` (o que o `find_contents_pages` capturou), `resolver_offline`
+(o resolvedor contra verdade transcrita à mão).
 
 ### 3.6 Custo de extração, medido
 

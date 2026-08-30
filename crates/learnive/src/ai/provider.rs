@@ -432,9 +432,7 @@ impl OpenAiCompat {
                 // a bare 500 "Internal server error" from the free-tier
                 // provider on an otherwise-valid grading request) — worth the
                 // same retry as a transport failure.
-                Err(e @ ProviderError::Api { status, .. })
-                    if !is_retryable_status(status, &e) =>
-                {
+                Err(e @ ProviderError::Api { status, .. }) if !is_retryable_status(status, &e) => {
                     return Err(e);
                 }
                 // Same request, same budget, same wall — retrying spends the

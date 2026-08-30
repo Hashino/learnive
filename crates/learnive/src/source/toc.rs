@@ -280,7 +280,10 @@ pub fn contents_page_chunks(pdf: &PdfDocument, range: (usize, usize)) -> Vec<Str
 ///    `delta = physical − printed`; if a delta value dominates the set,
 ///    apply it to unresolved entries that have a printed number and accept
 ///    the prediction only if that exact predicted page's title match
-///    confirms it (never blind arithmetic alone).
+///    confirms it (never blind arithmetic alone). Confirmation reads the
+///    **whole** predicted page, not just its top ([`page_contains`]) — a
+///    subsection starts mid-page, and the pinned page makes the wider read
+///    safe.
 /// 4. Whatever is left is `unresolved` — the only thing worth asking the
 ///    user about now.
 pub fn resolve_toc(
@@ -324,7 +327,7 @@ pub fn resolve_toc(
                 continue;
             }
             let needle = normalize(&entry.title);
-            if !needle.is_empty() && page_top_matches(pdf, predicted, &needle) {
+            if !needle.is_empty() && page_contains(pdf, predicted, &needle) {
                 *placement = Some(predicted);
             }
         }
@@ -350,6 +353,26 @@ fn page_top_matches(pdf: &PdfDocument, physical_page: usize, needle: &str) -> bo
     };
     let head: String = page_text.chars().take(TOP_OF_PAGE_CHARS).collect();
     normalize(&head).contains(needle)
+}
+
+/// Whole-page variant of [`page_top_matches`].
+///
+/// Only ever used to confirm an *arithmetic* prediction, never to search.
+/// The top-of-page rule exists because a free forward scan over full page
+/// text would happily stop on a cross-reference or a running header; that
+/// risk is gone when the page is already pinned by the dominant offset —
+/// there is exactly one page to check, and the question is just "is this
+/// entry anywhere on it".
+///
+/// Measured 2026-08-30 (docs §3.5): the top-of-page rule was written when
+/// entries were chapters, and a chapter starts on a fresh page. The
+/// deduction cascade now returns mostly **subsections**, which start
+/// mid-page and therefore could not match by construction — Stewart placed
+/// 97 of 234.
+fn page_contains(pdf: &PdfDocument, physical_page: usize, needle: &str) -> bool {
+    pdf.page_texts
+        .get(physical_page - 1)
+        .is_some_and(|text| normalize(text).contains(needle))
 }
 
 /// The dominant `physical − printed` delta across entries resolved by title
@@ -525,6 +548,37 @@ mod tests {
                 page: 4
             }
         );
+    }
+
+    /// A chapter starts on a fresh page; a subsection starts mid-page. The
+    /// forward scan (top-of-page only) can never see the subsection, so it
+    /// has to come in through the offset prediction, whose confirmation
+    /// reads the whole page. Measured 2026-08-30, docs §3.5: without this,
+    /// Stewart placed 97 of 234 entries because most of them were `N.M`.
+    #[test]
+    fn resolve_toc_places_a_subsection_that_starts_mid_page() {
+        let padding = "x".repeat(TOP_OF_PAGE_CHARS);
+        // Physical 3 = printed 1, so delta = 2 for every entry below.
+        let mid_page = format!("{padding}\n1.1 Four Ways to Represent a Function\nBody.");
+        let pdf = doc(&[
+            "Contents",
+            "front matter",
+            "Functions and Models\nChapter opener body.",
+            mid_page.as_str(),
+        ]);
+        let entries = vec![
+            entry("Functions and Models", Some(1)),
+            entry("Four Ways to Represent a Function", Some(2)),
+        ];
+
+        let resolution = resolve_toc(&pdf, &entries, 0);
+
+        assert_eq!(resolution.unresolved, Vec::<String>::new());
+        // The chapter anchors the offset by landing at the top of physical 3.
+        assert_eq!(resolution.resolved[0].page, 3);
+        // The subsection is only reachable through that offset + a
+        // whole-page read of the page it predicts.
+        assert_eq!(resolution.resolved[1].page, 4);
     }
 
     #[test]

@@ -759,3 +759,176 @@ mod kr_contents {
         );
     }
 }
+
+/// Free diagnostic (no API call) for the `resolve_toc` placement rates
+/// measured 2026-08-30 (docs §3.5): Stewart lifted to 69% once the offset
+/// confirmation read the whole page, but Think Python stayed at 7% and K&R
+/// at 8%. The offset prediction can only fire if the *title scan* first
+/// anchors enough entries to derive a dominant delta, so the question is
+/// what `page_top_matches` actually sees at the top of a body page.
+///
+/// Prints, it does not assert — the point is to look at the real text
+/// rather than keep guessing at it.
+#[cfg(test)]
+mod page_tops {
+    #[test]
+    #[ignore = "reads a large library PDF and prints; run manually"]
+    fn print_top_of_each_body_page() {
+        let fragment =
+            std::env::var("LEARNIVE_BENCH_BOOK").unwrap_or_else(|_| "2nd Edition".to_string());
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let Some(path) = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(&fragment))
+            })
+        else {
+            eprintln!("no library file matching {fragment:?}; skipping");
+            return;
+        };
+        println!("BOOK: {}", path.file_name().unwrap().to_string_lossy());
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let start = crate::source::toc::find_contents_pages(&pdf)
+            .map(|(_, end)| end + 1)
+            .unwrap_or(0);
+        for (i, text) in pdf.page_texts.iter().enumerate().skip(start).take(40) {
+            let head: String = text.chars().take(120).collect();
+            println!("  p{:<4} {:?}", i + 1, head.replace('\n', " ⏎ "));
+        }
+    }
+}
+
+/// Free diagnostic: what `find_contents_pages` actually captured, per page.
+/// 33 KB over 7 pages (Think Python, 2026-08-30) is far more than a printed
+/// TOC should be — this shows whether the run over-extended into prose,
+/// which would explain the model returning 215 "entries".
+#[cfg(test)]
+mod contents_dump {
+    #[test]
+    #[ignore = "reads a large library PDF and prints; run manually"]
+    fn print_captured_contents_pages() {
+        let fragment =
+            std::env::var("LEARNIVE_BENCH_BOOK").unwrap_or_else(|_| "2nd Edition".to_string());
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let Some(path) = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains(&fragment))
+            })
+        else {
+            eprintln!("no library file matching {fragment:?}; skipping");
+            return;
+        };
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let Some(range) = crate::source::toc::find_contents_pages(&pdf) else {
+            println!("no contents range found");
+            return;
+        };
+        println!("range (0-based) = {range:?}");
+        for (i, page) in crate::source::toc::contents_page_chunks(&pdf, range)
+            .iter()
+            .enumerate()
+        {
+            println!("\n---- captured page {} ({} chars) ----", i + 1, page.len());
+            println!("{}", page.chars().take(900).collect::<String>());
+        }
+    }
+}
+
+/// Free, deterministic, no API call: runs `resolve_toc` against Think
+/// Python's REAL extracted text with a hand-transcribed entry list taken
+/// from its printed contents page (see `contents_dump`). Isolates the
+/// resolver from the model entirely — if these fail to place, the bug is in
+/// `resolve_toc`, not in what the model returned.
+#[cfg(test)]
+mod resolver_offline {
+    use crate::source::toc::{TocLlmEntry, resolve_toc};
+
+    fn e(number: Option<&str>, title: &str, page: i64) -> TocLlmEntry {
+        TocLlmEntry {
+            number: number.map(str::to_string),
+            title: title.to_string(),
+            page: Some(page),
+        }
+    }
+
+    #[test]
+    #[ignore = "reads a large library PDF; run manually"]
+    fn think_python_entries_resolve_against_real_text() {
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let Some(path) = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains("2nd Edition"))
+            })
+        else {
+            eprintln!("Think Python 2e not in the library; skipping");
+            return;
+        };
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let range = crate::source::toc::find_contents_pages(&pdf).expect("contents");
+
+        // Transcribed by hand from the printed contents page.
+        let entries = vec![
+            e(Some("1"), "The Way of the Program", 1),
+            e(None, "What Is a Program?", 1),
+            e(None, "Running Python", 2),
+            e(None, "The First Program", 3),
+            e(None, "Arithmetic Operators", 3),
+            e(Some("6"), "Fruitful Functions", 61),
+            e(None, "Return Values", 61),
+            e(None, "Incremental Development", 62),
+            e(None, "Boolean Functions", 65),
+            e(Some("10"), "Lists", 107),
+            e(None, "A List Is a Sequence", 107),
+        ];
+
+        let resolution = resolve_toc(&pdf, &entries, range.1);
+        println!("placed {}/{}", resolution.resolved.len(), entries.len());
+        for r in &resolution.resolved {
+            println!(
+                "   OK   [{:>3}] {:?} -> p{}",
+                r.number.as_deref().unwrap_or("-"),
+                r.title,
+                r.page
+            );
+        }
+        for u in &resolution.unresolved {
+            println!("   MISS {u:?}");
+        }
+        // Measured 2026-08-30: all 11 place, including the eight SECTIONS
+        // that start mid-page and are only reachable through the offset
+        // prediction's whole-page confirmation. This is the line that says
+        // the resolver itself is sound — so a low live placement rate is
+        // about the entry list it was handed, not about this rule.
+        assert_eq!(
+            resolution.unresolved,
+            Vec::<String>::new(),
+            "every hand-transcribed entry must place"
+        );
+    }
+}
