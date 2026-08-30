@@ -716,3 +716,45 @@ mod kr_text_layer {
         );
     }
 }
+
+/// Regression: K&R's contents pages must be found despite (a) the OCR
+/// heading reading "CONIENTS" and (b) the section numbers extracting onto
+/// their own lines, away from the titles. Both defeated the pre-2026-08-30
+/// heuristic, and missing the range abandons the whole book.
+#[cfg(test)]
+mod kr_contents {
+    #[test]
+    #[ignore = "reads a large library PDF; run manually"]
+    fn kr_contents_pages_are_found_despite_ocr_damage() {
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let Some(path) = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains("Kernighan"))
+            })
+        else {
+            eprintln!("K&R not in the library; skipping");
+            return;
+        };
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let range = crate::source::toc::find_contents_pages(&pdf)
+            .expect("K&R's contents pages must be found");
+        println!("K&R contents range (0-based): {range:?}");
+        // The printed contents occupy physical pages 3..=6 (1-based).
+        assert!(range.0 <= 2, "run must start at or before physical page 3");
+        assert!(range.1 >= 3, "run must reach physical page 4");
+        let text = crate::source::toc::contents_pages_text(&pdf, range);
+        assert!(
+            text.contains("3.1") && text.to_lowercase().contains("control"),
+            "the captured text must actually be the contents"
+        );
+    }
+}

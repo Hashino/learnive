@@ -439,6 +439,46 @@ impl OpenAiCompat {
         #[derive(Deserialize)]
         struct Msg {
             content: Option<String>,
+            /// Reasoning models return their thinking in a channel of its
+            /// own, and some of them — measured, not assumed — put the
+            /// ANSWER there too, leaving `content` empty. See
+            /// [`Msg::best_text`].
+            #[serde(default)]
+            reasoning: Option<String>,
+            /// Same thing under the other spelling the field ships as
+            /// (Z.ai/GLM, DeepSeek and others use `reasoning_content`).
+            #[serde(default)]
+            reasoning_content: Option<String>,
+        }
+
+        impl Msg {
+            /// `content` when there is any, else whatever came back on the
+            /// reasoning channel.
+            ///
+            /// **This is not a nicety — it is the difference between working
+            /// and not on the models this app targets.** SPEC §15 makes free
+            /// models the product target, and free tiers are dominated by
+            /// reasoning models. Measured 2026-08-30: `engine::propose_toc`
+            /// failed `Parse("no JSON")` on every book, and a raw probe
+            /// showed the provider returning **zero characters** on both
+            /// tiers — not malformed output, an empty `content` while the
+            /// real answer went to the hidden channel. `.env` had already
+            /// recorded the same behaviour for Groq's gpt-oss ("às vezes
+            /// despeja a resposta real no canal `reasoning` oculto") and for
+            /// three of the Zen models; nothing acted on it, so the whole
+            /// S27k deduction cascade looked broken when the response was
+            /// being thrown away one layer below it.
+            ///
+            /// Preferring `content` keeps well-behaved models byte-identical
+            /// to before; the fallback only ever fires where the alternative
+            /// is an empty string.
+            fn best_text(self) -> Option<String> {
+                let content = self.content.filter(|c| !c.trim().is_empty());
+                content
+                    .or(self.reasoning_content)
+                    .or(self.reasoning)
+                    .filter(|c| !c.trim().is_empty())
+            }
         }
 
         let mut builder = self
@@ -498,7 +538,7 @@ impl OpenAiCompat {
             .choices
             .into_iter()
             .next()
-            .and_then(|c| c.message.content)
+            .and_then(|c| c.message.best_text())
             .unwrap_or_default())
     }
 }

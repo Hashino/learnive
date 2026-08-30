@@ -115,12 +115,7 @@ pub fn find_contents_pages(pdf: &PdfDocument) -> Option<(usize, usize)> {
         .take(CONTENTS_SEARCH_WINDOW)
         .enumerate()
     {
-        let head: String = page.chars().take(60).collect::<String>().to_lowercase();
-        let titled = head.contains("contents")
-            || head.contains("sumário")
-            || head.contains("sumario")
-            || head.contains("índice")
-            || head.contains("indice");
+        let titled = has_contents_heading(page);
         let looks_like_contents =
             titled || numbered_line_ratio(page) >= NUMBERED_LINE_RATIO_THRESHOLD;
         if looks_like_contents {
@@ -133,6 +128,62 @@ pub fn find_contents_pages(pdf: &PdfDocument) -> Option<(usize, usize)> {
     start.zip(end)
 }
 
+/// Does one of this page's opening lines read as a table-of-contents
+/// heading?
+///
+/// **Fuzzy, not an exact substring** (fixed 2026-08-30): the heading on a
+/// scanned book is OCR output, and OCR confuses letter shapes. K&R's contents
+/// page comes out as `"CONIENTS"` (T read as I), which an exact
+/// `contains("contents")` misses — and missing the heading was enough to
+/// abandon the whole book, since nothing downstream can run without a
+/// contents range.
+///
+/// **Matched against a whole LINE, not against any word on the page**, which
+/// is the guard that makes fuzziness safe here: `"content"` and `"context"`
+/// are ordinary English words scoring 0.98 and 0.94 against `"contents"`, so
+/// a word-level check fires on any prose page that happens to use one (caught
+/// by `find_contents_pages_ignores_ordinary_prose` while writing this). A
+/// real heading stands alone on its line; a prose sentence never does.
+fn has_contents_heading(page: &str) -> bool {
+    const KEYWORDS: [&str; 5] = ["contents", "sumário", "sumario", "índice", "indice"];
+    page.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(4)
+        .any(|line| {
+            let l: String = line
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase();
+            l.len() >= 5
+                && l.len() <= 12
+                && KEYWORDS
+                    .iter()
+                    .any(|k| strsim::jaro_winkler(&l, k) >= CONTENTS_HEADING_SIMILARITY)
+        })
+}
+
+/// How close an OCR'd word must be to "contents" (or a locale equivalent) to
+/// count as the heading. `"conients"` — K&R's actual OCR output — scores
+/// 0.94 against `"contents"`, so this leaves real room while staying well
+/// clear of ordinary prose words.
+const CONTENTS_HEADING_SIMILARITY: f64 = 0.88;
+
+/// Fraction of a page's non-empty lines that look like table-of-contents
+/// rows. Three signals, because real contents pages extract in more than one
+/// shape (all three measured against the library on 2026-08-30):
+///
+/// 1. the line ENDS in a bare page number — the classic `Title .... 42` row;
+/// 2. the line IS a bare section number — K&R's scan puts `1.1`, `1.2`, …
+///    on their own lines, separated from the titles they belong to, so
+///    signal 1 finds nothing at all on a page that is obviously a contents
+///    page to a human;
+/// 3. the line STARTS with a section number — `3.1 Statements and Blocks`,
+///    the shape the same book uses two pages later.
+///
+/// Before signals 2 and 3 existed, K&R scored ~0 here and, with its OCR-
+/// damaged heading also missed, the cascade could not start on it at all.
 fn numbered_line_ratio(page: &str) -> f64 {
     let lines: Vec<&str> = page
         .lines()
@@ -145,12 +196,30 @@ fn numbered_line_ratio(page: &str) -> f64 {
     let numbered = lines
         .iter()
         .filter(|l| {
-            l.split_whitespace().next_back().is_some_and(|tok| {
+            let ends_in_page_number = l.split_whitespace().next_back().is_some_and(|tok| {
                 !tok.is_empty() && tok.len() <= 4 && tok.chars().all(|c| c.is_ascii_digit())
-            })
+            });
+            let first = l.split_whitespace().next().unwrap_or("");
+            let is_section_number = is_section_number(first);
+            // A line that is ONLY a section number, or one that opens with
+            // one and then names something.
+            // `first` is the line's first whitespace token, so equal lengths
+            // mean the line is nothing but that section number.
+            ends_in_page_number || (is_section_number && l.len() >= first.len())
         })
         .count();
     numbered as f64 / lines.len() as f64
+}
+
+/// `"1"`, `"1.1"`, `"2.10"`, `"4.10."` — a hierarchical section number and
+/// nothing else. Bounded in length so a stray decimal in body prose (a
+/// measurement, a version) can't masquerade as one.
+fn is_section_number(tok: &str) -> bool {
+    let t = tok.trim_end_matches('.');
+    !t.is_empty()
+        && t.len() <= 8
+        && t.starts_with(|c: char| c.is_ascii_digit())
+        && t.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 /// Joins the text of a contents-page run ([`find_contents_pages`]'s output)
@@ -320,6 +389,57 @@ mod tests {
             number: None,
             page,
         }
+    }
+
+    #[test]
+    /// K&R's scan renders the heading as "CONIENTS" (T misread as I). An
+    /// exact substring check missed it, and with the section numbers also
+    /// extracting onto their own lines the page scored ~0 — enough to
+    /// abandon the entire book. Both signals are exercised here.
+    #[test]
+    fn find_contents_pages_survives_an_ocr_damaged_heading() {
+        let pdf = doc(&[
+            "Cover",
+            "CONIENTS\nPreface\nChapter 0\n1.1\n1.2\n1.3",
+            "Introduction\nSome real body text starts here and runs on.",
+        ]);
+        assert_eq!(find_contents_pages(&pdf), Some((1, 1)));
+    }
+
+    /// Signal 2: the page is a column of bare section numbers, with the
+    /// titles extracted somewhere else entirely — no line ends in a page
+    /// number, so the classic `Title .... 42` signal finds nothing.
+    #[test]
+    fn find_contents_pages_detects_a_column_of_bare_section_numbers() {
+        let pdf = doc(&[
+            "Cover",
+            "1.1\n1.2\n1.3\n2.1\n2.2\nChapter 2",
+            "Body text with no numbers at all in it whatsoever.",
+        ]);
+        assert_eq!(find_contents_pages(&pdf), Some((1, 1)));
+    }
+
+    /// Signal 3: lines that OPEN with a section number and then name it.
+    #[test]
+    fn find_contents_pages_detects_leading_section_numbers() {
+        let pdf = doc(&[
+            "Cover",
+            "3.1 Statements and Blocks\n3.2 If-Else\n3.3 Else-If\n3.4 Switch",
+            "Body prose that carries none of that shape.",
+        ]);
+        assert_eq!(find_contents_pages(&pdf), Some((1, 1)));
+    }
+
+    /// The fuzzy heading must not fire on ordinary prose — "contents" is
+    /// close to nothing common, but the guard is worth pinning.
+    #[test]
+    fn find_contents_pages_ignores_ordinary_prose() {
+        let pdf = doc(&[
+            "Cover",
+            "The context of this content is consistent with earlier claims.",
+            "More prose.",
+        ]);
+        assert_eq!(find_contents_pages(&pdf), None);
     }
 
     #[test]
