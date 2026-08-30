@@ -151,11 +151,7 @@ mod tests {
                 .count();
             let deep_numbered = flat
                 .iter()
-                .filter(|(_, t, _)| {
-                    split_printed_number(t)
-                        .0
-                        .is_some_and(|n| n.contains('.'))
-                })
+                .filter(|(_, t, _)| split_printed_number(t).0.is_some_and(|n| n.contains('.')))
                 .count();
 
             println!("\n================================================================");
@@ -169,7 +165,9 @@ mod tests {
                 deep_numbered
             );
             if flat.is_empty() {
-                println!("  !! NO EMBEDDED BOOKMARKS — this book exercises the S27k deduction path");
+                println!(
+                    "  !! NO EMBEDDED BOOKMARKS — this book exercises the S27k deduction path"
+                );
                 continue;
             }
             println!("  --- first 30 entries (depth | raw title | split) ---");
@@ -380,7 +378,10 @@ mod deduction {
     const TARGETS: [(&str, &str); 3] = [
         ("Kernighan", "K&R (1978 scan, OCR noise, no bookmarks)"),
         ("2nd Edition", "Think Python 2e (no bookmarks)"),
-        ("Stewart", "Stewart (CONTROL — 26 real bookmarks to score against)"),
+        (
+            "Stewart",
+            "Stewart (CONTROL — 26 real bookmarks to score against)",
+        ),
     ];
 
     /// Spends real API budget: one `propose_toc` (fast tier) per book. Run:
@@ -421,7 +422,11 @@ mod deduction {
                     continue;
                 }
             };
-            let empty = pdf.page_texts.iter().filter(|t| t.trim().is_empty()).count();
+            let empty = pdf
+                .page_texts
+                .iter()
+                .filter(|t| t.trim().is_empty())
+                .count();
             println!(
                 "  extracted {} pages in {:?}  ({} empty / no text layer)",
                 pdf.page_texts.len(),
@@ -470,7 +475,12 @@ mod deduction {
                 is_resolution_acceptable(&resolution)
             );
             for r in resolution.resolved.iter().take(25) {
-                println!("    [{:>7}] {:?} -> p{}", r.number.as_deref().unwrap_or("-"), r.title, r.page);
+                println!(
+                    "    [{:>7}] {:?} -> p{}",
+                    r.number.as_deref().unwrap_or("-"),
+                    r.title,
+                    r.page
+                );
             }
             if !resolution.unresolved.is_empty() {
                 println!("    UNRESOLVED ({}):", resolution.unresolved.len());
@@ -507,6 +517,56 @@ mod deduction {
                      out of {} resolved",
                     resolution.resolved.len()
                 );
+            }
+        }
+    }
+}
+
+/// Diagnostic for the `propose_toc` failures found 2026-08-30: prints the
+/// model's RAW response for one contents-page prompt, to separate "the model
+/// cannot do the task" from "we cannot read its answer" (the `.env` notes a
+/// known gpt-oss failure where the real answer goes to the hidden `reasoning`
+/// channel instead of `content`).
+#[cfg(test)]
+mod raw_probe {
+    #[tokio::test]
+    #[ignore = "extracts a PDF and hits the real provider; run manually"]
+    async fn raw_propose_toc_response() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-raw-probe-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let path = std::fs::read_dir(&dir)
+            .expect("library")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().contains("Stewart"))
+            .expect("stewart");
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let range = crate::source::toc::find_contents_pages(&pdf).expect("contents pages");
+        let text = crate::source::toc::contents_pages_text(&pdf, range);
+        println!("--- prompt input: {} chars ---", text.len());
+        println!("{}", &text[..text.len().min(1200)]);
+
+        for (label, tier) in [
+            ("FAST tier", crate::ai::Tier::Fast),
+            ("ROBUST tier", crate::ai::Tier::Robust),
+        ] {
+            let messages = crate::engine::prompt::propose_toc(&text);
+            match crate::engine::collect(&ai, tier, messages).await {
+                Ok(raw) => {
+                    println!("\n--- {label}: RAW RESPONSE ({} chars) ---", raw.len());
+                    println!("{}", &raw[..raw.len().min(2500)]);
+                }
+                Err(e) => println!("\n--- {label}: PROVIDER ERROR: {e:?} ---"),
             }
         }
     }

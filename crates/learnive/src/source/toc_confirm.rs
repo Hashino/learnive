@@ -444,16 +444,20 @@ mod tests {
             confirmed_entry(None, "Functions", Some(10)),
             confirmed_entry(None, "Functions and Program Structure", Some(60)),
         ];
-        let hit = match_chapter(&entries_short_first, None, "Functions and Program Structure")
-            .unwrap();
+        let hit = match_chapter(
+            &entries_short_first,
+            None,
+            "Functions and Program Structure",
+        )
+        .unwrap();
         assert_eq!(hit.page, Some(60));
 
         let entries_long_first = vec![
             confirmed_entry(None, "Functions and Program Structure", Some(60)),
             confirmed_entry(None, "Functions", Some(10)),
         ];
-        let hit = match_chapter(&entries_long_first, None, "Functions and Program Structure")
-            .unwrap();
+        let hit =
+            match_chapter(&entries_long_first, None, "Functions and Program Structure").unwrap();
         assert_eq!(hit.page, Some(60));
     }
 
