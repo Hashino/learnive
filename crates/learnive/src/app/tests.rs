@@ -3294,3 +3294,94 @@ async fn next_topic_appends_a_new_epoch_without_touching_the_first() {
         crate::objective::ObjectiveSource::NextTopic
     );
 }
+
+// S27n: `/api/library/{hash}` and `/api/library/{hash}/pdf` resolve a
+// `<cite data-source-id>` content hash straight against `<data>/library/`,
+// closing the defect where every citation on a real generated document
+// 404'd against `state.corpus` (which a library-grounded document never
+// writes into). "Done" per PLAN.md's own S27n criterion: router coverage of
+// both the 404 (unknown hash) and the success (hash present in the index)
+// paths — not just that the panel opens.
+
+#[tokio::test]
+async fn library_pdf_route_404s_for_a_hash_not_in_the_index() {
+    let req = Request::builder()
+        .uri("/api/library/does-not-exist/pdf")
+        .header("host", HOST)
+        .header("x-learnive-token", TOKEN)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = send(req).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn library_meta_route_404s_for_a_hash_not_in_the_index() {
+    let req = Request::builder()
+        .uri("/api/library/does-not-exist")
+        .header("host", HOST)
+        .header("x-learnive-token", TOKEN)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = send(req).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn library_routes_resolve_a_hash_present_in_the_index() {
+    let state = test_state();
+    let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
+    let library = crate::source::LocalPdfSource::open(&data_dir).unwrap();
+    // `test_state()` already wrote this fixture into the library (see
+    // `write_book_pdf`'s call sites above) — reuse it rather than writing a
+    // third PDF, so this test proves the real content-hash path, not a
+    // hand-rolled one.
+    let pdf_path = library.root().join("demo-foundations.pdf");
+    let pdf_bytes = std::fs::read(&pdf_path).unwrap();
+    let hash = crate::source::acervo::content_hash(&pdf_bytes);
+
+    // Populate the index the way `validate_acervo_with_progress` does —
+    // directly, rather than running a full acervo pass, since this test is
+    // only exercising the two read routes, not the validation engine
+    // (that's `source::acervo`'s own test module's job).
+    let index_root = data_dir.join("index");
+    let file_index = crate::source::acervo::LibraryFileIndex::open(&index_root).unwrap();
+    file_index
+        .set(
+            &hash,
+            "demo-foundations.pdf",
+            Some("Demo Foundations"),
+            Some("Demo Author"),
+        )
+        .unwrap();
+
+    let app = build_router(state);
+
+    let meta_req = Request::builder()
+        .uri(format!("/api/library/{hash}"))
+        .header("host", HOST)
+        .header("x-learnive-token", TOKEN)
+        .body(Body::empty())
+        .unwrap();
+    let meta_resp = app.clone().oneshot(meta_req).await.unwrap();
+    assert_eq!(meta_resp.status(), StatusCode::OK);
+    let meta_bytes = to_bytes(meta_resp.into_body(), usize::MAX).await.unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
+    assert_eq!(meta["title"], "Demo Foundations");
+    assert_eq!(meta["filename"], "demo-foundations.pdf");
+
+    let pdf_req = Request::builder()
+        .uri(format!("/api/library/{hash}/pdf"))
+        .header("host", HOST)
+        .header("x-learnive-token", TOKEN)
+        .body(Body::empty())
+        .unwrap();
+    let pdf_resp = app.oneshot(pdf_req).await.unwrap();
+    assert_eq!(pdf_resp.status(), StatusCode::OK);
+    assert_eq!(
+        pdf_resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/pdf"
+    );
+    let served_bytes = to_bytes(pdf_resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(served_bytes.as_ref(), pdf_bytes.as_slice());
+}

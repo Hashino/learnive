@@ -993,6 +993,39 @@ document.addEventListener("click", (e) => {
   openSourcePanel(cite.dataset.sourceId, cite.dataset.locator);
 });
 
+// S27n: `data-source-id` on a real generated document is a local-library
+// content hash (`ground_node`'s fundamentação block), not a `state.corpus`
+// id — `GET /api/sources/{id}` 404s for it. Resolve the library first, and
+// fall back to the corpus only for documents grounded before the pivot
+// (LibGen/Sci-Hub acquisitions, which still write into `Corpus`). Returns a
+// normalized `{ kind, title, authors, assetUrl }` shape so the caller
+// doesn't need to know which backend answered.
+async function fetchSourceIndex(sourceId) {
+  const libResp = await api(`/api/library/${encodeURIComponent(sourceId)}`);
+  if (libResp.ok) {
+    const meta = await libResp.json();
+    return {
+      kind: "library",
+      title: meta.title || t("source.untitled"),
+      authors: meta.authors ? [meta.authors] : [],
+      license: null,
+      assetUrl: `/api/library/${encodeURIComponent(sourceId)}/pdf`,
+    };
+  }
+  const corpusResp = await api(`/api/sources/${encodeURIComponent(sourceId)}`);
+  if (!corpusResp.ok) throw new Error(await corpusResp.text());
+  const index = await corpusResp.json();
+  return {
+    kind: "corpus",
+    title: index.meta.title,
+    authors: index.meta.authors || [],
+    license: index.meta.license || null,
+    assetUrl: index.meta.pdf_asset
+      ? `/api/sources/${encodeURIComponent(sourceId)}/assets/${encodeURIComponent(index.meta.pdf_asset)}`
+      : null,
+  };
+}
+
 async function openSourcePanel(sourceId, locator) {
   el("sourcePanel").classList.add("open");
   el("sourcePanel").dataset.sourceId = sourceId;
@@ -1005,31 +1038,24 @@ async function openSourcePanel(sourceId, locator) {
   try {
     let index = sourceIndexCache.get(sourceId);
     if (!index) {
-      const resp = await api(
-        `/api/sources/${encodeURIComponent(sourceId)}`,
-      );
-      if (!resp.ok) throw new Error(await resp.text());
-      index = await resp.json();
+      index = await fetchSourceIndex(sourceId);
       sourceIndexCache.set(sourceId, index);
     }
-    el("sourceTitle").textContent = index.meta.title;
+    el("sourceTitle").textContent = index.title;
     const bits = [];
-    if (index.meta.authors && index.meta.authors.length) {
-      bits.push(index.meta.authors.join(", "));
+    if (index.authors && index.authors.length) {
+      bits.push(index.authors.join(", "));
     }
-    if (index.meta.license) bits.push(index.meta.license);
+    if (index.license) bits.push(index.license);
     el("sourceMeta").textContent = bits.join(" · ");
-    if (index.meta.pdf_asset) {
+    if (index.assetUrl) {
       // A fresh element every open, never a reused one: mutating only the
       // `#page=` fragment on an existing iframe's `src` does not renavigate
       // in Chrome, so a second citation into a different page would
       // silently keep showing the first page.
       const iframe = document.createElement("iframe");
       iframe.title = t("source.title");
-      const url = new URL(
-        `/api/sources/${encodeURIComponent(sourceId)}/assets/${encodeURIComponent(index.meta.pdf_asset)}`,
-        location.origin,
-      );
+      const url = new URL(index.assetUrl, location.origin);
       url.searchParams.set("token", TOKEN);
       const page = parsePageLocator(locator);
       iframe.src = page ? `${url.toString()}#page=${page}` : url.toString();

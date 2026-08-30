@@ -82,6 +82,85 @@ pub async fn get_source_asset(
         .into_response())
 }
 
+/// Meta companion to [`get_library_pdf`] (S27n): title/authors for the
+/// source panel's header, read straight from the persisted
+/// `LibraryFileIndex` record — no PDF re-parse at request time, since
+/// `load_candidates` already extracted this during acervo validation. `404`
+/// with the identical "no library PDF matches this citation" message
+/// `get_library_pdf` uses, for the same reason (unknown hash).
+pub async fn get_library_meta(
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Json<source::acervo::LibraryFileRecord>, ApiError> {
+    let data_dir = state.data_dir.to_string();
+    spawn_blocking(
+        move || -> Result<source::acervo::LibraryFileRecord, ApiError> {
+            let index_root = std::path::PathBuf::from(&data_dir).join("index");
+            let file_index = source::acervo::LibraryFileIndex::open(&index_root).map_err(|e| {
+                ApiError::Internal(format!("could not open library file index: {e}"))
+            })?;
+            file_index.get(&hash).ok_or_else(|| {
+                ApiError::NotFound("no library PDF matches this citation".to_string())
+            })
+        },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("library lookup task failed: {e}")))?
+    .map(Json)
+}
+
+/// Serves the canonical PDF for a source matched from the local library
+/// (§11.1), keyed by content hash — the same key `ground_node` already
+/// embeds in `<cite data-source-id>` fundamentação blocks (S27n, PLAN.md).
+/// Distinct from `get_source_asset`: that route reads `state.corpus`, which
+/// after S28 5b only ever holds LibGen/SciHub-acquired material — a document
+/// grounded against the local library was never written there, so citations
+/// on real generated documents 404 against it. This route resolves the hash
+/// via `source::acervo::LibraryFileIndex` (written during acervo validation,
+/// which `ensure_document_grounded` always runs before a document is allowed
+/// to generate — so the index is guaranteed populated by the time a citation
+/// naming that hash can exist) and reads the matched file straight from
+/// `<data>/library/`. GET, read-only, same rationale as the other source
+/// endpoints.
+pub async fn get_library_pdf(
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Response, ApiError> {
+    let data_dir = state.data_dir.to_string();
+    let bytes = spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+        let index_root = std::path::PathBuf::from(&data_dir).join("index");
+        let file_index = source::acervo::LibraryFileIndex::open(&index_root)
+            .map_err(|e| ApiError::Internal(format!("could not open library file index: {e}")))?;
+        let record = file_index.get(&hash).ok_or_else(|| {
+            ApiError::NotFound("no library PDF matches this citation".to_string())
+        })?;
+        let library = source::LocalPdfSource::open(&data_dir)
+            .map_err(|e| ApiError::Internal(format!("could not open local library: {e}")))?;
+        fs::read(library.root().join(&record.filename))
+            .map_err(|e| ApiError::NotFound(format!("matched library file is missing: {e}")))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("library lookup task failed: {e}")))??;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/pdf"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// Resolves a client-supplied anchor against the node (§4.3) — rejecting one
 /// that doesn't resolve keeps the interaction layer's "always references real
 /// IDs" invariant true by construction, rather than trusting whatever block id

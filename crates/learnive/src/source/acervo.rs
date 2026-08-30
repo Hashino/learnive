@@ -379,6 +379,24 @@ pub fn validate_acervo_with_progress(
 ) -> std::io::Result<AcervoReport> {
     let candidates = load_candidates(library)?;
     let index_cache_dir = index_cache_dir.as_ref();
+    // S27n: every candidate's hash is already computed above (`load_candidates`)
+    // — record hash → filename here, the one place that's true for every
+    // validation pass, so `GET /api/library/{hash}/pdf` never has to rescan
+    // and rehash the whole library on a citation click. A sibling of
+    // `index_cache_dir` (`<data_dir>/index/library` by this function's own
+    // convention, see the doc comment above), not a new parameter — every
+    // caller already passes that path, so this stays free.
+    if let Some(index_root) = index_cache_dir.parent() {
+        let file_index = LibraryFileIndex::open(index_root)?;
+        for cand in &candidates {
+            file_index.set(
+                &cand.hash,
+                &cand.entry.filename,
+                cand.meta_title.as_deref(),
+                cand.meta_author.as_deref(),
+            )?;
+        }
+    }
     let toc_confirm = TocConfirmStore::open_at(toc_confirm_dir)?;
     let items = expected
         .iter()
@@ -835,6 +853,81 @@ fn looks_like_numbered_heading(line: &str) -> bool {
         && number.chars().any(|c| c.is_ascii_digit());
     let rest = rest.trim();
     is_number && rest.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
+/// Persisted hash → filename lookup (S27n, PLAN.md) — lets `GET
+/// /api/library/{hash}/pdf` resolve a `<cite data-source-id>` (a content
+/// hash, emitted by `api::reading::ground_node`) straight back to the
+/// library file it names, without rescanning and rehashing every PDF in the
+/// library on every citation click. Written during
+/// [`validate_acervo_with_progress`], the one place every candidate's hash
+/// is already computed; a stale entry (file renamed/replaced since) simply
+/// gets overwritten the next time validation runs — the store is a derived
+/// cache, rebuildable from the library directory like every other index in
+/// this module family, never the source of truth.
+#[derive(Debug, Clone)]
+pub struct LibraryFileIndex {
+    dir: PathBuf,
+}
+
+/// One indexed library file — filename plus whatever embedded-metadata title
+/// and author `load_candidates` already extracted while computing the hash
+/// (`read_info_metadata`, S27c). Carrying title/authors here (instead of a
+/// second lookup at request time) is what lets `GET /api/library/{hash}`
+/// answer the source panel's meta request with zero extra PDF parsing — the
+/// panel's title comes from the source's own embedded metadata, the same
+/// signal the acervo gate's identity check already trusts, rather than any
+/// one outline item's node title (chapters from the same book share a hash,
+/// so no single outline item's title would be the right answer for all of
+/// them).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileRecord {
+    pub filename: String,
+    pub title: Option<String>,
+    pub authors: Option<String>,
+}
+
+impl LibraryFileIndex {
+    /// Opens (creating if needed) `<index_root>/library_files/` — `index_root`
+    /// is the `<data_dir>/index` directory, the parent every caller's
+    /// `index_cache_dir` (`<data_dir>/index/library`) already shares.
+    pub fn open(index_root: impl AsRef<Path>) -> std::io::Result<Self> {
+        let dir = index_root.as_ref().join("library_files");
+        fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    pub fn get(&self, hash: &str) -> Option<LibraryFileRecord> {
+        let bytes = fs::read(self.path_for(hash)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Atomic write (tmp file + rename), same idiom as
+    /// [`build_index_cache`]/`ManualMatchStore::set`.
+    pub fn set(
+        &self,
+        hash: &str,
+        filename: &str,
+        title: Option<&str>,
+        authors: Option<&str>,
+    ) -> std::io::Result<()> {
+        let path = self.path_for(hash);
+        let record = LibraryFileRecord {
+            filename: filename.to_string(),
+            title: title.map(str::to_string),
+            authors: authors.map(str::to_string),
+        };
+        let json = serde_json::to_vec(&record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, &json)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    fn path_for(&self, hash: &str) -> PathBuf {
+        self.dir.join(format!("{hash}.json"))
+    }
 }
 
 /// SHA-256 hex digest of a PDF's bytes — the content-addressed key both the

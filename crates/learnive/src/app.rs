@@ -280,6 +280,16 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sources/{id}/assets/{filename}",
             get(api::get_source_asset),
         )
+        // S27n: citations on real generated documents cite a local-library
+        // content hash (`ground_node`'s `<cite data-source-id>`), which never
+        // matches a `state.corpus` id — this route resolves that hash
+        // straight against `<data>/library/` instead. Kept a separate path
+        // rather than overloading `/api/sources/{id}` so the corpus route
+        // stays simple and this one owns its own not-found semantics (hash
+        // not in the library vs. corpus source id not found mean different
+        // things to the client).
+        .route("/api/library/{hash}", get(api::get_library_meta))
+        .route("/api/library/{hash}/pdf", get(api::get_library_pdf))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security::guard,

@@ -87,6 +87,7 @@ const I18N = {
     "practice.error": "could not start practice: ",
     "source.loading": "Loading…",
     "source.unavailable": "Source unavailable",
+    "source.untitled": "Untitled source",
     // Acervo gate / PDF matching / TOC confirmation (§11.1, S27f) — an
     // on-demand check, never a blocking gate in this slice.
     "acervo.openBtn": "Library check",
@@ -270,6 +271,7 @@ const I18N = {
     "practice.error": "não foi possível iniciar a prática: ",
     "source.loading": "Carregando…",
     "source.unavailable": "Fonte indisponível",
+    "source.untitled": "Fonte sem título",
     // Portão do acervo / casamento de PDFs / confirmação de sumário
     // (§11.1, S27f) — verificação sob demanda, nunca um portão bloqueante
     // nesta fatia.
