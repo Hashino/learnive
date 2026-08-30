@@ -67,11 +67,19 @@
     loadRemediateToc();
   };
 
+  // App-deduced candidates (S27k) → a dropdown of chapters to pick from;
+  // nothing extracted → the manual page-number row is the only way in.
+  // Never both visible at once.
   async function loadRemediateToc() {
-    const ol = el("remediateTocEntries");
-    ol.innerHTML = "";
+    const picker = el("remediateTocPicker");
+    const manualRow = el("remediateManualRow");
+    const select = el("remediateTocSelect");
+    select.innerHTML = "";
+    picker.hidden = true;
+    manualRow.hidden = true;
     if (!bookId) {
       el("remediateTocStatus").textContent = "";
+      manualRow.hidden = false;
       return;
     }
     el("remediateTocStatus").textContent = t("remediate.pickPage.loading");
@@ -80,28 +88,32 @@
       if (!resp.ok) throw new Error(await resp.text());
       const data = await resp.json();
       const entries = (data.entries || []).filter((e) => e.page != null);
-      el("remediateTocStatus").textContent = entries.length
-        ? ""
-        : t("remediate.pickPage.empty");
-      ol.replaceChildren(
-        ...entries.map((entry) => {
-          const li = document.createElement("li");
-          li.className = "remediate-toc-entry";
-          const label = document.createElement("span");
-          label.textContent = entry.title + " — " + t("remediate.pickPage.page", entry.page);
-          const use = document.createElement("button");
-          use.type = "button";
-          use.textContent = t("remediate.pickPage.useThis");
-          use.addEventListener("click", () => submitResolvedPage(entry.page));
-          li.append(label, use);
-          return li;
-        }),
-      );
+      if (entries.length) {
+        el("remediateTocStatus").textContent = "";
+        select.replaceChildren(
+          ...entries.map((entry) => {
+            const opt = document.createElement("option");
+            opt.value = String(entry.page);
+            opt.textContent = entry.title + " — " + t("remediate.pickPage.page", entry.page);
+            return opt;
+          }),
+        );
+        picker.hidden = false;
+      } else {
+        el("remediateTocStatus").textContent = t("remediate.pickPage.empty");
+        manualRow.hidden = false;
+      }
     } catch (err) {
       el("remediateTocStatus").innerHTML =
         '<span class="error">' + t("error.prefix") + escapeHtml(String(err)) + "</span>";
+      manualRow.hidden = false;
     }
   }
+
+  el("remediateTocConfirmBtn").addEventListener("click", () => {
+    const page = parseInt(el("remediateTocSelect").value, 10);
+    submitResolvedPage(page);
+  });
 
   async function submitResolvedPage(page) {
     if (!chapterId || !Number.isFinite(page) || page < 1) return;

@@ -434,16 +434,20 @@
       <p id="remediateIntro" class="muted"></p>
 
       <section class="remediate-option">
-        <h2>
-          <span data-i18n="remediate.pickPage.heading">Pick the page yourself</span>
-          <span class="muted" data-i18n="remediate.recommended">(recommended)</span>
-        </h2>
+        <h2 data-i18n="remediate.pickPage.heading">Confirm the chapter/section page in the book</h2>
         <p id="remediateTocStatus" class="muted"></p>
-        <ol id="remediateTocEntries" class="remediate-toc-entries"></ol>
-        <div class="remediate-manual-row">
-          <label for="remediateManualPage" data-i18n="remediate.pickPage.manualLabel">
-            Know the page number? Enter it directly
-          </label>
+        <!-- Extracted candidates (app-deduced TOC, S27k) → a dropdown; no
+             candidates → the manual page-number fallback. Never both at
+             once (toggled in remediate.js's loadRemediateToc). -->
+        <div id="remediateTocPicker" class="remediate-manual-row" hidden>
+          <div class="remediate-manual-controls">
+            <select id="remediateTocSelect"></select>
+            <button type="button" id="remediateTocConfirmBtn" data-i18n="remediate.pickPage.manualButton">
+              Confirm
+            </button>
+          </div>
+        </div>
+        <div id="remediateManualRow" class="remediate-manual-row" hidden>
           <div class="remediate-manual-controls">
             <input type="number" id="remediateManualPage" min="1" data-i18n-placeholder="remediate.pickPage.manualPlaceholder" placeholder="Page" />
             <button type="button" id="remediateManualBtn" data-i18n="remediate.pickPage.manualButton">
