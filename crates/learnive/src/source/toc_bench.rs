@@ -215,8 +215,15 @@ mod tests {
                  for a language can be written in that same language.",
             ),
             (
-                "Think Python",
-                "Think Python",
+                "Think Python (1st ed, 2012)",
+                "Think Python (2012",
+                "Python programming for beginners",
+                "Learn Python well enough to write functions, use dictionaries and lists, and \
+                 read and write files.",
+            ),
+            (
+                "Think Python (2nd ed, 2015)",
+                "2nd Edition",
                 "Python programming for beginners",
                 "Learn Python well enough to write functions, use dictionaries and lists, and \
                  read and write files.",
@@ -354,5 +361,153 @@ mod tests {
         println!("  resolved, matcher AS SHIPPED:             {hit_shipped}");
         println!("  resolved, WITH number-split fix:          {hit_split}");
         println!("  proposed works not in the library:        {unmatched_works}");
+    }
+}
+
+/// S27k deduction-path benchmark — the ~33%-of-the-corpus path that had no
+/// measurement at all until 2026-08-30 (see
+/// `docs/S27g-chapter-matching-measurements.md` §3).
+#[cfg(test)]
+mod deduction {
+    use crate::source::toc::{
+        contents_pages_text, find_contents_pages, is_resolution_acceptable, resolve_toc,
+    };
+
+    /// Books to run the deduction cascade against. The two bookmark-less
+    /// ones are the real target; Stewart is a **control** — its 26 embedded
+    /// bookmarks are known-good ground truth, so deduction output can be
+    /// scored against them rather than merely described.
+    const TARGETS: [(&str, &str); 3] = [
+        ("Kernighan", "K&R (1978 scan, OCR noise, no bookmarks)"),
+        ("2nd Edition", "Think Python 2e (no bookmarks)"),
+        ("Stewart", "Stewart (CONTROL — 26 real bookmarks to score against)"),
+    ];
+
+    /// Spends real API budget: one `propose_toc` (fast tier) per book. Run:
+    /// `cargo test -p learnive --bin learnive source::toc_bench::deduction::live_deduction_cascade -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "full-text-extracts several large PDFs and hits the real provider; run manually"]
+    async fn live_deduction_cascade() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-dedup-bench-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        for (fragment, label) in TARGETS {
+            println!("\n================================================================");
+            println!("DEDUCTION: {label}");
+            let Some(path) = std::fs::read_dir(&dir)
+                .expect("library")
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| p.file_name().unwrap().to_string_lossy().contains(fragment))
+            else {
+                println!("  !! no library file matching {fragment:?}");
+                continue;
+            };
+
+            let t0 = std::time::Instant::now();
+            let pdf = match crate::source::read_pdf(&path) {
+                Ok(p) => p,
+                Err(e) => {
+                    println!("  !! read_pdf failed: {e}");
+                    continue;
+                }
+            };
+            let empty = pdf.page_texts.iter().filter(|t| t.trim().is_empty()).count();
+            println!(
+                "  extracted {} pages in {:?}  ({} empty / no text layer)",
+                pdf.page_texts.len(),
+                t0.elapsed(),
+                empty
+            );
+
+            let Some(range) = find_contents_pages(&pdf) else {
+                println!("  !! find_contents_pages found NOTHING — cascade cannot start here");
+                continue;
+            };
+            let text = contents_pages_text(&pdf, range);
+            println!(
+                "  contents pages: physical {}..={} ({} chars of text)",
+                range.0 + 1,
+                range.1 + 1,
+                text.len()
+            );
+
+            let entries = match crate::engine::propose_toc(&ai, &text).await {
+                Ok(e) => e,
+                Err(e) => {
+                    println!("  !! propose_toc FAILED: {e:?}");
+                    continue;
+                }
+            };
+            let numbered = entries.iter().filter(|e| e.number.is_some()).count();
+            let sub_numbered = entries
+                .iter()
+                .filter(|e| e.number.as_deref().is_some_and(|n| n.contains('.')))
+                .count();
+            println!(
+                "  propose_toc returned {} entries: {} numbered, {} SUB-numbered (N.M)",
+                entries.len(),
+                numbered,
+                sub_numbered
+            );
+
+            let resolution = resolve_toc(&pdf, &entries, range.1);
+            let total = resolution.resolved.len() + resolution.unresolved.len();
+            println!(
+                "  resolve_toc placed {}/{}  ({:.0}%)   acceptable={}",
+                resolution.resolved.len(),
+                total,
+                100.0 * resolution.resolved.len() as f64 / total.max(1) as f64,
+                is_resolution_acceptable(&resolution)
+            );
+            for r in resolution.resolved.iter().take(25) {
+                println!("    [{:>7}] {:?} -> p{}", r.number.as_deref().unwrap_or("-"), r.title, r.page);
+            }
+            if !resolution.unresolved.is_empty() {
+                println!("    UNRESOLVED ({}):", resolution.unresolved.len());
+                for u in resolution.unresolved.iter().take(15) {
+                    println!("      {u:?}");
+                }
+            }
+
+            // Control scoring: compare against the book's real bookmarks.
+            let truth = crate::source::pdf::read_outline_for_test(&path);
+            if !truth.is_empty() {
+                let mut exact = 0usize;
+                let mut near = 0usize;
+                for r in &resolution.resolved {
+                    let n = crate::source::matching::normalize(&r.title);
+                    if let Some(hit) = truth.iter().find(|t| {
+                        let tn = crate::source::matching::normalize(&t.title);
+                        !n.is_empty() && (tn.contains(&n) || n.contains(&tn))
+                    }) {
+                        if hit.page == r.page {
+                            exact += 1;
+                        } else if hit.page.abs_diff(r.page) <= 2 {
+                            near += 1;
+                        } else {
+                            println!(
+                                "    PAGE MISMATCH: {:?} deduced p{} but bookmark says p{}",
+                                r.title, r.page, hit.page
+                            );
+                        }
+                    }
+                }
+                println!(
+                    "  CONTROL vs real bookmarks: {exact} exact page, {near} within 2 pages, \
+                     out of {} resolved",
+                    resolution.resolved.len()
+                );
+            }
+        }
     }
 }
