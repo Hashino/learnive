@@ -75,6 +75,9 @@ pub mod mock;
 pub mod pdf;
 pub mod scihub;
 pub mod toc;
+/// S27g measurement harness — test-only, never compiled into the binary.
+#[cfg(test)]
+mod toc_bench;
 pub mod toc_confirm;
 
 pub use acervo::{

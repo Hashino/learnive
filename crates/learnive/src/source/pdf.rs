@@ -158,6 +158,21 @@ impl std::fmt::Display for PdfReadError {
 
 impl std::error::Error for PdfReadError {}
 
+/// Reads ONLY the embedded outline, skipping text extraction entirely —
+/// test-only (`source::toc_bench`'s S27g measurement harness), never
+/// compiled into the binary. [`read_pdf`] spends nearly all its time in
+/// [`extract_pages_resilient`] (222s for a 1,300-page textbook); a harness
+/// that just wants each library book's table of contents doesn't need a
+/// single page of text. Degrades to an empty outline on any failure, same
+/// best-effort rule as [`read_outline`] itself.
+#[cfg(test)]
+pub(crate) fn read_outline_for_test(path: impl AsRef<Path>) -> Vec<OutlineEntry> {
+    match lopdf::Document::load(path.as_ref()) {
+        Ok(doc) => read_outline(&doc),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Reads a PDF from disk: extracted text (best-effort, empty string on
 /// failure — mirrors `extract_pdf_text`'s convention), the embedded outline
 /// (empty when absent), and the page map (plain physical numbers when no
