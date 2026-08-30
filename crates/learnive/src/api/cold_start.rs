@@ -577,6 +577,23 @@ fn materialize_outline_node(
             });
         }
         PrereqAction::Learn => {
+            // S27g (2026-08-29): a `Book`/`Article` item whose `children`
+            // already carry `propose_outline`'s topic-scoped `Chapter`
+            // proposals is `ChaptersProposed`, not `NotExpanded` — those
+            // proposals exist and are about to be materialized right below,
+            // they just haven't been matched against this book's real,
+            // resolved table of contents yet (that matching pass is the
+            // next slice of S27g). Every other case (no children, or a
+            // plain `Node`/`Chapter` item) is unaffected.
+            let expansion = if matches!(
+                node.item_type,
+                OutlineItemType::Book | OutlineItemType::Article
+            ) && !node.children.is_empty()
+            {
+                ExpansionState::ChaptersProposed
+            } else {
+                ExpansionState::NotExpanded
+            };
             let child_exit = materialize_outline_tree(
                 &node.children,
                 Some(node.id.as_str()),
@@ -592,7 +609,7 @@ fn materialize_outline_node(
                 mode: NodeMode::Learn,
                 source_doc_id: None,
                 item_type: node.item_type,
-                expansion: ExpansionState::NotExpanded,
+                expansion,
                 source: source_pointer_from(node),
             });
         }
@@ -1809,6 +1826,79 @@ mod tests {
                 Some(crate::source::VerificationOutcome::Verified { .. })
             ));
         }
+    }
+
+    /// S27g (2026-08-29): a `Book` item whose `children` carry topic-scoped
+    /// `Chapter` proposals materializes as `ChaptersProposed` (matching
+    /// against the real book hasn't run yet), and the chapters themselves
+    /// materialize as real `OutlineItem`s — chained sequentially to each
+    /// other (the "prerequisite path within the work", PLAN.md), parented
+    /// to the book via `parent_id`, and with no `source` of their own (they
+    /// inherit the book's via `resolve_grounding_source`). The book's own
+    /// gate becomes its LAST chapter's id, same "learn recurses, parent
+    /// gates on last child" rule any other decomposed node already follows.
+    #[test]
+    fn book_with_chapter_children_materializes_as_chapters_proposed() {
+        fn chapter(id: &str, title: &str) -> ConfirmedNode {
+            ConfirmedNode {
+                id: id.to_string(),
+                title: title.to_string(),
+                action: PrereqAction::Learn,
+                known: None,
+                children: Vec::new(),
+                item_type: OutlineItemType::Chapter,
+                bibliography: None,
+                verification: None,
+            }
+        }
+        let book = ConfirmedNode {
+            id: "b1".to_string(),
+            title: "The C Programming Language".to_string(),
+            action: PrereqAction::Learn,
+            known: None,
+            children: vec![
+                chapter("c1", "functions in C"),
+                chapter("c2", "recursion in C"),
+            ],
+            item_type: OutlineItemType::Book,
+            bibliography: Some(crate::source::ProposedItem {
+                title: "The C Programming Language".to_string(),
+                authors: vec!["Kernighan, Brian W.".to_string()],
+                year: Some(1988),
+                edition: Some("2nd".to_string()),
+                identifier: None,
+                kind: crate::source::SourceKind::Book,
+            }),
+            verification: Some(crate::source::VerificationOutcome::Verified {
+                catalog: crate::source::Catalog::OpenLibrary,
+                matched_title: "The C Programming Language".to_string(),
+            }),
+        };
+        let mut items = Vec::new();
+        let mut to_skip = Vec::new();
+        materialize_outline_tree(&[book], None, None, &mut items, &mut to_skip);
+
+        assert_eq!(items.len(), 3, "the book plus its two chapters");
+        let book_item = items.iter().find(|i| i.id == "b1").unwrap();
+        assert_eq!(book_item.expansion, ExpansionState::ChaptersProposed);
+        assert_eq!(book_item.prerequisites, vec!["c2".to_string()]);
+        assert!(book_item.source.is_some());
+
+        let c1 = items.iter().find(|i| i.id == "c1").unwrap();
+        let c2 = items.iter().find(|i| i.id == "c2").unwrap();
+        assert_eq!(c1.item_type, OutlineItemType::Chapter);
+        assert_eq!(c1.parent_id, Some("b1".to_string()));
+        assert!(c1.prerequisites.is_empty());
+        assert!(
+            c1.source.is_none(),
+            "a chapter inherits the book's source, it doesn't carry its own"
+        );
+        assert_eq!(c2.parent_id, Some("b1".to_string()));
+        assert_eq!(
+            c2.prerequisites,
+            vec!["c1".to_string()],
+            "chapters chain sequentially, same as any other decomposition"
+        );
     }
 
     /// Isolates the exact distinction S27e's bounded retry depends on: a

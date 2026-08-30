@@ -195,15 +195,34 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
 /// books and articles, foundational-first, ordered so that array position
 /// alone carries the prerequisite relationship (PLAN.md §27 decision 3 —
 /// there is no separate "prerequisite of concept" category anymore, and no
-/// invented concept titles at all). The schema asked for is exactly
-/// `source::ProposedItem`'s own shape (see `parse::outline_tree`'s doc
-/// comment for why one schema, not a wrapping one) — `{"title":..., \
-/// "authors":[...], "year":..., "edition":..., "identifier":..., \
-/// "kind":"book"|"article"}` per item, nothing else. No `children`, no
-/// chapters: this call must never guess a book's internal structure — that
-/// can only be checked against the real PDF table of contents, which is
-/// S27g's job, later, after the library actually has the file (same
-/// anti-speculation reasoning §14 already applies to prefetch).
+/// invented concept titles at all). The schema is `source::ProposedItem`'s
+/// own shape (see `parse::outline_tree`'s doc comment for why one schema,
+/// not a wrapping one) plus one extra field this call alone reads —
+/// `{"title":..., "authors":[...], "year":..., "edition":..., \
+/// "identifier":..., "kind":"book"|"article", "topics":[...]}`.
+///
+/// `topics` (S27g, PLAN.md, revised 2026-08-29 — see PLAN.md's own account
+/// of the revision, including the argument the assistant made and the user
+/// rejected, kept there because the wrong argument is plausible and will
+/// reappear): an optional list of within-work topics the curriculum
+/// actually needs from this item, empty when the whole work is in scope.
+/// The prohibition this replaces used to be "no children, no chapters —
+/// never guess a book's internal structure", which conflated two different
+/// things: asserting STRUCTURE the model cannot verify (a chapter number, an
+/// invented section title) — still forbidden, since only a real PDF table
+/// of contents can confirm that, later, once the library actually has the
+/// file — versus stating SCOPE, which the model can and must judge now, at
+/// the point where it has the whole curriculum plan in view (the user's own
+/// reasoning for why scope selection cannot wait for expansion: deciding it
+/// one item at a time, in calls made days or weeks apart with no memory of
+/// each other, fragments the curriculum's coherence). A `topics` entry is
+/// therefore a plain-language subject description ("recursion in C",
+/// "limits of a function"), never a chapter number or an asserted title —
+/// resolving it against the real book's contents is S27g's later matching
+/// pass, against the actual page text, not against the chapter title (a
+/// topic can live inside a chapter whose own title never names it — e.g.
+/// recursion is K&R 2nd ed. §4.10, inside a chapter titled "Functions and
+/// Program Structure").
 ///
 /// `rejected` names titles a prior round of this same cold start proposed
 /// that then failed S27d's existence verification (bounded one-round retry,
@@ -216,23 +235,37 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
     let mut system = String::from(
         "You propose the initial READING LIST for one learner's curriculum \
          objective: real, findable books and articles, never invented \
-         concept titles — the list itself IS the curriculum plan, and \
-         chapters/sections inside each work are discovered later, once the \
-         actual book is in hand, not guessed now. Respond with ONE JSON \
-         array, ordered foundational-first, most basic prerequisite work \
-         first and the work(s) most directly covering the objective itself \
-         last (a later step locks the LAST item as unskippable — the \
-         'this is what was actually asked for' item — so order matters, not \
-         just content).\n\n\
-         Each array element is shaped EXACTLY like this, no other fields, \
-         no children: {\"title\":\"...\",\"authors\":[\"Last, First\", ...], \
+         concept titles — the list itself IS the curriculum plan. Respond \
+         with ONE JSON array, ordered foundational-first, most basic \
+         prerequisite work first and the work(s) most directly covering the \
+         objective itself last (a later step locks the LAST item as \
+         unskippable — the 'this is what was actually asked for' item — so \
+         order matters, not just content).\n\n\
+         Each array element is shaped EXACTLY like this, no other fields: \
+         {\"title\":\"...\",\"authors\":[\"Last, First\", ...], \
          \"year\":1234,\"edition\":\"...\" or null,\"identifier\":null,\
-         \"kind\":\"book\"|\"article\"}. `authors` in \"Last, First\" order \
-         when known; empty array if genuinely unknown (never invent a \
-         name). `year`/`edition` null when unknown. `identifier` stays null \
-         unless you have real, specific certainty of an ISBN/DOI/arXiv id — \
-         guessing one is worse than omitting it, since a wrong identifier \
-         is checked as if it were confirmed fact by the next step.\n\n\
+         \"kind\":\"book\"|\"article\",\"topics\":[...]}. `authors` in \
+         \"Last, First\" order when known; empty array if genuinely unknown \
+         (never invent a name). `year`/`edition` null when unknown. \
+         `identifier` stays null unless you have real, specific certainty \
+         of an ISBN/DOI/arXiv id — guessing one is worse than omitting it, \
+         since a wrong identifier is checked as if it were confirmed fact \
+         by the next step.\n\n\
+         `topics`: when the learner needs the WHOLE work, leave this an \
+         empty array. When only PART of a work is actually in scope for \
+         this objective, list the specific subjects needed, in the order \
+         they should be learned (a prerequisite path within the work — \
+         basics before the thing that depends on them). Each entry is a \
+         plain-language subject description (\"recursion in C\", \"limits \
+         of a function\"), NEVER a chapter number, a section title, or any \
+         other claim about the book's actual internal structure — you \
+         cannot verify that without the real table of contents, which \
+         happens later, against the real file. Naming the SUBJECT you need \
+         is judgment you can and should make now, with the whole curriculum \
+         in view; asserting the book's STRUCTURE is a guess you cannot \
+         verify and must not make. Do not pad this with a full chapter-by- \
+         chapter syllabus either — only the subjects this specific \
+         objective actually needs from this work, nothing broader.\n\n\
          Err toward INCLUDING a foundational work whenever you are unsure \
          the learner already has it: this list is a proposal, not a \
          commitment — the learner reviews it themselves and marks each \
@@ -247,12 +280,13 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
          title will simply fail that check.\n\n\
          Judge SCOPE from the objective, not a fixed count: a narrow, \
          self-contained question may need only the one work most directly \
-         covering it; a broad subject needs real foundational works ahead \
-         of it, most basic first. Write every title/author exactly as the \
-         real work is titled (do not translate a real title into the \
-         request's language) but keep this instruction's own language \
-         irrelevant to your choice of works. Respond ONLY with the JSON \
-         array — no comments, no markdown, no prose outside it.",
+         covering it, often only part of it (use `topics`); a broad subject \
+         needs real foundational works ahead of it, most basic first. Write \
+         every title/author exactly as the real work is titled (do not \
+         translate a real title into the request's language) but keep this \
+         instruction's own language irrelevant to your choice of works. \
+         Respond ONLY with the JSON array — no comments, no markdown, no \
+         prose outside it.",
     );
     if !rejected.is_empty() {
         system.push_str(&format!(
@@ -271,22 +305,22 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
             "Understand how binary search finds a target in a sorted array and implement it correctly",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"Introduction to Algorithms","authors":["Cormen, Thomas H.","Leiserson, Charles E.","Rivest, Ronald L.","Stein, Clifford"],"year":2009,"edition":"3rd","identifier":null,"kind":"book"}]"#,
+            r#"[{"title":"Introduction to Algorithms","authors":["Cormen, Thomas H.","Leiserson, Charles E.","Rivest, Ronald L.","Stein, Clifford"],"year":2009,"edition":"3rd","identifier":null,"kind":"book","topics":[]}]"#,
         ),
         ChatMessage::user(request(
-            "cálculo integral",
-            "Aprender os fundamentos de cálculo integral: integrais indefinidas, definidas e o teorema fundamental do cálculo",
+            "limites de uma função",
+            "Aprender o conceito de limite de uma função e calcular limites usando suas propriedades",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book"},
-                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book"}]"#,
+            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book","topics":[]},
+                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":["limits of a function","properties of limits"]}]"#,
         ),
         ChatMessage::user(request(
             "recursion in C",
             "Understand how recursive functions work in C and be able to write them correctly",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book"}]"#,
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","topics":["basic C syntax and control flow","variables and data types in C","functions in C","recursion in C"]}]"#,
         ),
         ChatMessage::user(request(topic, objective)),
     ]

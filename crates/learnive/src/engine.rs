@@ -134,17 +134,24 @@ pub struct OutlineItem {
 /// directly generable — `Book`/`Chapter`/`Article` are reading-list
 /// containers materialized from the confirmed bibliography, whose children
 /// (chapters, then concept nodes) are discovered by S27g's contextual
-/// expansion, not by this slice.
+/// expansion.
 ///
-/// `Chapter` is minted only by that later expansion step — nothing in this
-/// slice's prompt/parse ever proposes one. PLAN.md is explicit about why: a
-/// chapter can only be verified against a real PDF table of contents, not a
-/// bibliographic catalog (unlike a book/article, which S27d's catalog checks
-/// can confirm), so having the model guess chapter structure at cold start
-/// would be exactly the kind of speculative structure §14 already argues
-/// against for prefetch — don't restore chapter proposal to the prompt.
-/// `Chapter` stays in this enum now so `OutlineItem` doesn't need a second
-/// migration when S27g starts minting it.
+/// `Chapter` **is** minted at cold start now (S27g, revised 2026-08-29 —
+/// PLAN.md has the full account, including an argument the assistant made
+/// and the user rejected, kept there because the wrong argument is
+/// plausible and will reappear): `engine::prompt::propose_outline`'s
+/// `topics` field lets the model name within-work subjects the objective
+/// actually needs, and `parse::outline_tree` turns each into a `Chapter`
+/// child. What's still true from the reasoning this comment used to make —
+/// a chapter can only be VERIFIED against a real PDF table of contents, not
+/// a bibliographic catalog — is why `Chapter` still cannot be confirmed
+/// structure at this point: a proposed `Chapter` names a SUBJECT (plain
+/// language, e.g. "recursion in C"), never an asserted chapter number or
+/// section title, and matching it onto the real book's actual contents is
+/// S27g's later, still-unbuilt content-matching pass, not this one. Don't
+/// read this doc comment as still forbidding chapter proposal — that
+/// prohibition was rewritten specifically because it conflated unverifiable
+/// STRUCTURE (still forbidden) with buildable SCOPE judgment (now allowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OutlineItemType {
@@ -161,13 +168,23 @@ pub enum OutlineItemType {
 }
 
 /// Whether a `Book`/`Chapter` [`OutlineItem`]'s children have been
-/// discovered yet (S27e data shape only — the discovery itself, "contextual
-/// expansion", is S27g and not built here).
+/// discovered yet (S27e data shape; the discovery itself, "contextual
+/// expansion", is S27g).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpansionState {
     #[default]
     NotExpanded,
+    /// S27g (added 2026-08-29): a `Book`/`Article` item whose `children`
+    /// already carry topic-scoped `Chapter` proposals straight out of
+    /// `propose_outline`, but nothing has matched them against this book's
+    /// real, resolved table of contents yet — that matching pass (against
+    /// page text, per `SourcePointer`/S27k's machinery, not against chapter
+    /// titles) is the next slice of S27g, still unbuilt. An item stays here
+    /// until that pass runs; nothing currently reads this variant to change
+    /// behavior (same honest gap `NotExpanded`/`Expanded` already had, per
+    /// S27m's note that nothing read `expansion` at all before this).
+    ChaptersProposed,
     Expanded,
 }
 
@@ -441,22 +458,26 @@ pub async fn propose_toc(
 /// directly covering the objective last. Order alone carries the
 /// prerequisite relationship now (PLAN.md §27 decision 3, "pré-requisito de
 /// conceito não sobrevive como categoria própria"): there is no longer a
-/// separate "prerequisite of concept" category, so `children` is always
-/// empty coming out of `propose_outline` — nothing below a book/article is
-/// discovered at cold start; that's S27g's contextual expansion, later,
-/// against the real PDF. The field stays on this type only because
-/// `api::cold_start`'s materialization still reuses it structurally
-/// (the sidebar tree shape S27g will populate).
+/// separate "prerequisite of concept" category. `children` used to always
+/// come back empty from `propose_outline` — as of S27g (2026-08-29) it
+/// carries `Chapter`-typed, topic-scoped proposals whenever the model judges
+/// only part of a work is in scope (`parse::outline_tree`'s doc comment) —
+/// nothing below THOSE chapters is discovered at cold start yet; matching a
+/// chapter's topic onto the real book and, later, breaking it into concept
+/// nodes stay S27g's still-unbuilt contextual-expansion work, against the
+/// real PDF. The field was already reused structurally by
+/// `api::cold_start`'s materialization before this (the sidebar tree shape),
+/// so no change was needed there for `Chapter` children to just work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedOutlineNode {
     pub title: String,
     #[serde(default)]
     pub children: Vec<ProposedOutlineNode>,
-    /// S27e: `Book` or `Article` for every item the new reading-list prompt
-    /// proposes — see [`OutlineItemType`]'s doc comment for why `Chapter`
-    /// never appears here and `Node` only shows up on the old,
-    /// still-compiled-but-unused-by-`propose_outline` concept-tree shape
-    /// this type also used to serve alone.
+    /// S27e: `Book` or `Article` for every top-level item the reading-list
+    /// prompt proposes; as of S27g, a `topics`-derived child of one of those
+    /// is `Chapter` (see [`OutlineItemType`]'s doc comment). `Node` only
+    /// shows up on the old, still-compiled-but-unused-by-`propose_outline`
+    /// concept-tree shape this type also used to serve alone.
     #[serde(default)]
     pub item_type: OutlineItemType,
     /// The proposed bibliographic identity for a `Book`/`Article` item —
@@ -1059,6 +1080,31 @@ mod tests {
         // parse failure too, not a silently-defaulted item — this schema is
         // strict, unlike the old free-form `{title, children}` shape.
         assert!(parse::outline_tree(r#"[{"title":"Missing fields"}]"#).is_none());
+    }
+
+    /// S27g (2026-08-29): a non-empty `topics` array becomes `Chapter`-typed
+    /// `children`, each with no bibliography of its own (it inherits the
+    /// parent's, `resolve_grounding_source`) — and a blank topic string is
+    /// dropped rather than materialized as an empty-titled chapter.
+    #[test]
+    fn parse_outline_tree_topics_become_chapter_children() {
+        let nodes = parse::outline_tree(
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","topics":["functions in C","recursion in C","  "]},
+                {"title":"Calculus, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":[]}]"#,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        assert_eq!(nodes[0].item_type, OutlineItemType::Book);
+        assert_eq!(nodes[0].children.len(), 2);
+        assert_eq!(nodes[0].children[0].title, "functions in C");
+        assert_eq!(nodes[0].children[0].item_type, OutlineItemType::Chapter);
+        assert!(nodes[0].children[0].bibliography.is_none());
+        assert_eq!(nodes[0].children[1].title, "recursion in C");
+
+        // An empty `topics` array materializes no children at all — the
+        // "whole work is in scope" case stays exactly like before S27g.
+        assert!(nodes[1].children.is_empty());
     }
 
     #[test]
