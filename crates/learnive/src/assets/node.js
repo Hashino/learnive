@@ -962,23 +962,38 @@ function renderNextTopicPrompt(container) {
 // the new problem and either advances or remediates again.
 // --- Source viewer (§11) -----------------------------------------------
 // A citation (`<cite data-source-id data-locator>`, §4.3/§10) opens the
-// corpus's meta on the right (`#sourcePanel`). Read-only: nothing here is
-// ever written back. **Post-pivot (S28):** the app's own HTML section
-// reader (TOC navigation, section-body fetch/render, passage highlighting)
-// was removed — PDF is now the sole canonical, displayed format and the
-// display surface is meant to be the browser's native PDF viewer, but that
-// retrofit (S27j) hasn't landed yet, so this panel shows meta only for now.
+// corpus's canonical PDF on the right (`#sourcePanel`), in the browser's own
+// native PDF viewer (S27j) — not the app's own reader (removed in the S28
+// pivot cleanup: no TOC navigation, no section-body fetch/render, no
+// passage-level highlighting; the viewer is opaque, so a citation can only
+// deep-link to a page, never a passage). Read-only: nothing here is ever
+// written back — any note the learner makes lands in the living document.
+// No `sandbox` on the iframe: unlike the exercise/island frames (§4.4),
+// this isn't attacker-controlled script — it's our own same-origin asset
+// route serving a PDF, and `sandbox` risks breaking the native viewer's own
+// internal UI (SPEC §16's flagged, unmeasured risk), so the safer default
+// is to leave it off.
 const sourceIndexCache = new Map();
+
+// Extracts the page number from a `;`-delimited locator (`p:57`, or the
+// pre-pivot `chap:3;sec:2;p:57`) — tolerant of both old and new locator
+// shapes on purpose (S28 item 7's format migration is out of scope here;
+// see PLAN.md). No `p:` segment → no page-level deep link.
+function parsePageLocator(locator) {
+  if (!locator) return null;
+  const m = /(?:^|;)p:(\d+)/.exec(locator);
+  return m ? parseInt(m[1], 10) : null;
+}
 
 // Delegated, not bound per-citation: citations arrive incrementally as
 // prose streams in (§14), so binding at insert time would miss most of them.
 document.addEventListener("click", (e) => {
   const cite = e.target.closest("cite[data-source-id]");
   if (!cite) return;
-  openSourcePanel(cite.dataset.sourceId);
+  openSourcePanel(cite.dataset.sourceId, cite.dataset.locator);
 });
 
-async function openSourcePanel(sourceId) {
+async function openSourcePanel(sourceId, locator) {
   el("sourcePanel").classList.add("open");
   el("sourcePanel").dataset.sourceId = sourceId;
   // Split-view (§11.1): re-centers `.main-container` in the half of the
@@ -1004,6 +1019,26 @@ async function openSourcePanel(sourceId) {
     }
     if (index.meta.license) bits.push(index.meta.license);
     el("sourceMeta").textContent = bits.join(" · ");
+    if (index.meta.pdf_asset) {
+      // A fresh element every open, never a reused one: mutating only the
+      // `#page=` fragment on an existing iframe's `src` does not renavigate
+      // in Chrome, so a second citation into a different page would
+      // silently keep showing the first page.
+      const iframe = document.createElement("iframe");
+      iframe.title = t("source.title");
+      const url = new URL(
+        `/api/sources/${encodeURIComponent(sourceId)}/assets/${encodeURIComponent(index.meta.pdf_asset)}`,
+        location.origin,
+      );
+      url.searchParams.set("token", TOKEN);
+      const page = parsePageLocator(locator);
+      iframe.src = page ? `${url.toString()}#page=${page}` : url.toString();
+      el("sourceBody").replaceChildren(iframe);
+    } else {
+      // Legacy/mock corpus entry with no PDF asset on disk (S27i): fall
+      // back to meta-only, same as before S27j.
+      el("sourceBody").innerHTML = "";
+    }
   } catch (err) {
     el("sourceTitle").textContent = t("source.unavailable");
     el("sourceMeta").textContent = String(err);
