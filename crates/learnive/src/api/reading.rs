@@ -1453,17 +1453,25 @@ pub(super) async fn ensure_document_grounded(
     let items_for_validate = items.clone();
     let idx_dir_for_validate = index_cache_dir.clone();
     let toc_dir_for_validate = toc_confirm_dir.clone();
-    let report = spawn_blocking(move || {
+    let file_index_root = std::path::PathBuf::from(state.data_dir.as_ref()).join("index");
+    let report = spawn_blocking(move || -> Result<source::acervo::AcervoReport, String> {
+        // This is the mutating POST path (unlike `api::acervo`'s read-only
+        // gate-report GET, which passes `None`) — S27n's `LibraryFileIndex`
+        // write is safe here, and by the time any citation can reference a
+        // hash, this call has already run and populated it.
+        let file_index = source::acervo::LibraryFileIndex::open(&file_index_root)
+            .map_err(|e| format!("could not open library file index: {e}"))?;
         source::validate_acervo(
             &lib_for_validate,
             &items_for_validate,
             &idx_dir_for_validate,
             &toc_dir_for_validate,
+            Some(&file_index),
         )
+        .map_err(|e| format!("could not validate the acervo gate: {e}"))
     })
     .await
-    .map_err(|e| format!("acervo validation task panicked: {e}"))?
-    .map_err(|e| format!("could not validate the acervo gate: {e}"))?;
+    .map_err(|e| format!("acervo validation task panicked: {e}"))??;
 
     if !report.all_pass() {
         let failing: Vec<String> = report

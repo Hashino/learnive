@@ -251,9 +251,19 @@ pub async fn get_acervo_report(
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<source::acervo::AcervoProgress>();
         let mut task = spawn_blocking(move || {
-            source::acervo::validate_acervo_with_progress(&lib, &items_only, &idx_dir, &toc_dir, move |p| {
-                let _ = tx.send(p);
-            })
+            // S27n follow-up: this is the read-only gate-report GET — never
+            // write the library file index from here (§3.1). Only the
+            // mutating POST path (`ensure_document_grounded`) passes `Some`.
+            source::acervo::validate_acervo_with_progress(
+                &lib,
+                &items_only,
+                &idx_dir,
+                &toc_dir,
+                None,
+                move |p| {
+                    let _ = tx.send(p);
+                },
+            )
         });
 
         let report = loop {
