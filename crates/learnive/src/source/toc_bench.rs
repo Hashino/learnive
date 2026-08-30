@@ -243,6 +243,48 @@ mod tests {
         ]
     }
 
+    /// Calls `propose_outline`, retrying through the rate limiting that every
+    /// free tier applies. Backoff is deliberately long (60s, 120s, 240s):
+    /// Zen's `FreeUsageLimitError` is a shared per-model pool that comes back
+    /// in minutes, not seconds, and a fast retry just burns the next slot.
+    /// `LEARNIVE_BENCH_PAUSE` (seconds, default 20) additionally paces the
+    /// gap between probes.
+    async fn propose_with_retry(
+        ai: &crate::ai::Ai,
+        topic: &str,
+        objective: &str,
+    ) -> Result<Vec<crate::engine::ProposedOutlineNode>, crate::engine::EngineError> {
+        let pause: u64 = std::env::var("LEARNIVE_BENCH_PAUSE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let mut last = None;
+        for (attempt, backoff) in [60u64, 120, 240].into_iter().enumerate() {
+            match crate::engine::propose_outline(ai, topic, objective, &[]).await {
+                Ok(n) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(pause)).await;
+                    return Ok(n);
+                }
+                Err(e) => {
+                    let rate_limited = format!("{e:?}").contains("429");
+                    println!(
+                        "    (attempt {} failed{}: {})",
+                        attempt + 1,
+                        if rate_limited { ", rate limited" } else { "" },
+                        format!("{e:?}").chars().take(90).collect::<String>()
+                    );
+                    last = Some(e);
+                    if !rate_limited {
+                        break;
+                    }
+                    println!("    ...backing off {backoff}s");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                }
+            }
+        }
+        Err(last.expect("at least one attempt"))
+    }
+
     /// Spends real API budget: one `propose_outline` per probe against the
     /// configured provider. Run with:
     /// `cargo test -p learnive --bin learnive source::toc_bench::tests::live_match_rate_across_the_library -- --ignored --nocapture`
@@ -283,7 +325,10 @@ mod tests {
                 }
                 None => println!("  !! no library file matches {file_fragment:?}"),
             }
-            let nodes = match crate::engine::propose_outline(&ai, topic, objective, &[]).await {
+            // Free tiers 429 constantly (SPEC §15, measured 2026-08-30: 3 of 6
+            // probes died mid-run on the first big-pickle bake-off). Pace and
+            // retry, or the bake-off measures rate limits instead of models.
+            let nodes = match propose_with_retry(&ai, topic, objective).await {
                 Ok(n) => n,
                 Err(e) => {
                     println!("  !! propose_outline FAILED: {e:?}");
@@ -353,12 +398,20 @@ mod tests {
         }
 
         println!("\n================================================================");
-        println!("TOTALS across all probes");
+        println!(
+            "TOTALS — model={} ",
+            std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "?".into())
+        );
         println!("  chapters proposed against a library book: {total}");
         println!("  ...carrying a model-proposed number:      {numbered_props}");
         println!("  resolved, matcher AS SHIPPED:             {hit_shipped}");
         println!("  resolved, WITH number-split fix:          {hit_split}");
         println!("  proposed works not in the library:        {unmatched_works}");
+        // One grep-able line per model, so the bake-off collapses to a table.
+        println!(
+            "BAKEOFF\t{}\t{total}\t{numbered_props}\t{hit_shipped}\t{hit_split}\t{unmatched_works}",
+            std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "?".into())
+        );
     }
 }
 

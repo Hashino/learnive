@@ -360,7 +360,78 @@ deveria ser preguiçosa/cacheada e não pré-requisito do portão.
 
 ---
 
-## 4. O que ainda não foi medido
+## 4. Bake-off de modelos gratuitos (2026-08-30) — **o modelo não é a alavanca**
+
+Motivação: a §15 do SPEC passou a tratar modelo gratuito como **alvo do
+produto**, não piso tolerado. Se a escolha de modelo movesse a qualidade do
+casamento, seria a alavanca mais barata que existe. Hipótese do usuário na
+abertura: *"maybe the model is the problem. maybe a 120b model is too small."*
+
+Mesmas 6 probes, mesmo matcher (com o `split_printed_number`), 25s de espera
+entre probes e backoff de 60/120/240s no `429`.
+
+| modelo | provider | propostas | casadas | **corretas** | erradas | cobertura | precisão |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `openai/gpt-oss-120b` | Groq | 11 | 10 | 8 | 2 | **91%** | 80% |
+| `laguna-s-2.1-free` | Zen | 16 | 12 | 10 | 2 | 75% | 83% |
+| `ling-3.0-flash-fin-free` | Zen | 15 | 10 | 9 | 1 | 67% | **90%** |
+| `big-pickle` | Zen | — | — | — | — | **429 em todas as 6 probes** | — |
+| `nemotron-3.5-lightning-free` | Zen | — | — | — | — | **timeout >200s em todas** | — |
+
+Corretas/erradas são pontuadas à mão: "casada" só diz que o matcher devolveu
+alguma coisa; um capítulo confiantemente errado fundamenta o nó no lugar errado
+e é pior que não casar.
+
+### 4.1 Conclusão: os três que terminaram estão na mesma faixa
+
+67–91% de cobertura, 80–90% de precisão. **Não há separação significativa
+entre eles** — nem entre providers, nem entre tamanhos. A hipótese "120b é
+pequeno demais" não se sustenta: o `gpt-oss-120b` teve a **maior** cobertura
+das três.
+
+**Correção de uma leitura anterior desta mesma investigação:** a rodada
+anterior de `big-pickle` (7/7 com numeração `N.M` completa) contra um
+`gpt-oss-120b` que propôs **zero** números foi lida como evidência de que a
+escolha de modelo movia muito a qualidade. **Estava errado, e era ruído de
+`n=7` num livro só** — nesta rodada o `gpt-oss-120b` numerou 11 de 11
+propostas. Variância entre rodadas do mesmo modelo é da mesma ordem que a
+diferença entre modelos.
+
+### 4.2 O que de fato separa os modelos é disponibilidade, não qualidade
+
+**2 de 5 não completaram uma única probe.** `big-pickle` ficou em `429`
+permanente (o pool gratuito compartilhado não recuperou nem com 240s de
+backoff, depois de ter sido exaurido por uma bateria anterior no mesmo dia);
+`nemotron-3.5-lightning-free` estourou o `COMPLETE_BUDGET` de 200s em toda
+chamada. Isso é consistente com a §15: no tier gratuito, **a falha dominante
+não é resposta ruim, é ausência de resposta**.
+
+### 4.3 Os erros que sobram são estruturais e aparecem em TODOS os modelos
+
+**a) Número errado afirmado com convicção, nome discordando** — os três
+modelos que terminaram propuseram "Git Internals" do Pro Git com número
+errado (`9`, `9`, `6`; o real é `10`), e o matcher casou nos três casos no
+capítulo errado, porque a camada de número vence a de nome. Já era a hipótese
+da §2.2; agora aparece em **3 de 3 modelos**, o que a promove de suspeita a
+padrão. Conserto indicado: **veto por similaridade sobre o casamento por
+número** — se o nome do candidato encontrado pelo número for suficientemente
+distante do nome proposto, o número não vale.
+
+**b) Proposta de sub-seção contra um sumário só de capítulo** — o `ling`
+propôs `3.9`, `4.7`, `5.3`, `5.4` para o Stewart; todas devolveram `None`,
+porque os 26 bookmarks do Stewart são de capítulo, sem sub-nível. Nenhuma
+troca de modelo conserta isso: depende da cascata de dedução do S27k, que
+hoje entrega **0 de 3** (§3).
+
+### 4.4 Consequência prática
+
+**Parar de comprar modelo.** Os dois consertos que sobram — o veto por
+similaridade (a) e a cascata de dedução (b) — valem mais do que qualquer
+escolha de provider, e nenhum dos dois custa token. Para seleção de tier,
+o critério que separa os candidatos é **taxa de resposta**, não qualidade
+de casamento.
+
+## 5. O que ainda não foi medido
 
 1. ~~A cascata de dedução do S27k~~ — **medida (§3): quebrada em 3 de 3.**
 2. **`propose_toc` contra um provider que responda** — a falha da §3.2 é do
@@ -385,7 +456,7 @@ deveria ser preguiçosa/cacheada e não pré-requisito do portão.
 
 ---
 
-## 5. Como reproduzir
+## 6. Como reproduzir
 
 ```
 # grátis, local, sem chamada de API — forma do sumário de todo livro do acervo
