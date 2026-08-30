@@ -1258,12 +1258,33 @@ pub async fn list_documents(
                 .iter()
                 .filter(|i| i.parent_id.is_none() && i.state == "demonstrated")
                 .count(),
+            // Bugfix (2026-08-30, advisor-flagged after S27g's container
+            // gate landed): a non-generable `Book`/`Article` container
+            // (`engine::is_generable`) never gets a node file of its own —
+            // nothing ever generates it, its `Chapter` children do — so a
+            // plain main-line `generated.contains(id)` lookup was silently
+            // `None` for every topic-scoped document forever, and "resume
+            // where you left off" never fired. Walk main-line items newest
+            // first; for a container that itself was never generated, fall
+            // back to the last generated CHAPTER underneath it (still
+            // scoped to that one item's own children, not the whole tree,
+            // so this can't land on an unrelated sub-node the way removing
+            // the `parent_id.is_none()` filter entirely would).
             resume_node_id: items
                 .iter()
                 .filter(|i| i.parent_id.is_none())
                 .rev()
-                .map(|i| i.id.clone())
-                .find(|id| generated.contains(id)),
+                .find_map(|i| {
+                    if generated.contains(&i.id) {
+                        return Some(i.id.clone());
+                    }
+                    items
+                        .iter()
+                        .filter(|c| c.parent_id.as_deref() == Some(i.id.as_str()))
+                        .rev()
+                        .map(|c| c.id.clone())
+                        .find(|id| generated.contains(id))
+                }),
         });
     }
     // Most recently touched first — the resume order.

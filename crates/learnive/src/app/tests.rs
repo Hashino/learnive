@@ -2981,6 +2981,22 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("event: error"));
     assert!(body.contains("container"));
+
+    // Bugfix regression (2026-08-30, advisor-flagged): `resume_node_id`
+    // must find `c1`'s node file, not silently stay `None` forever. `book1`
+    // itself has no node file — nothing ever generates a container — so a
+    // plain main-line-only `generated.contains(id)` lookup finds nothing,
+    // which is exactly the bug this pins: it must fall back to the last
+    // generated CHAPTER under the container.
+    let (_, body) = call(authed("GET", "/api/documents", "")).await;
+    let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["doc_id"] == serde_json::json!(doc_id))
+        .unwrap();
+    assert_eq!(doc["resume_node_id"], serde_json::json!("c1"));
 }
 
 #[tokio::test]
