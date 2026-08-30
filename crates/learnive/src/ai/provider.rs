@@ -87,9 +87,10 @@ pub enum ProviderError {
     /// HTTP transport failure.
     Http(String),
     /// The API responded with an error status. `retry_after` carries a
-    /// parsed `Retry-After` header (seconds) when the response had one —
-    /// only ever populated on a 429, since that's the only status a caller
-    /// acts on it for.
+    /// parsed `Retry-After` header (seconds) when the response had one.
+    /// Its presence — not the status — is what marks an error as a waitable
+    /// rate limit; see [`is_retryable_status`] for the 413 case that made
+    /// the distinction load-bearing.
     Api {
         status: u16,
         body: String,
@@ -101,6 +102,14 @@ pub enum ProviderError {
     /// up yet" and point the user at Settings instead of showing a raw
     /// network error.
     Unconfigured,
+    /// The provider stopped because it hit the token budget (`finish_reason:
+    /// "length"`) rather than because the model was done. Measured 2026-08-30:
+    /// a reasoning model asked to transcribe a 33 KB contents page narrates
+    /// every entry in its reasoning channel and runs out of budget before
+    /// emitting a single character of the JSON it was asked for — which
+    /// surfaced as an unhelpful `Parse("no JSON")` several layers up. Its own
+    /// variant so a caller can retry smaller instead of blaming the parser.
+    Truncated { chars: usize },
 }
 
 impl std::fmt::Display for ProviderError {
@@ -113,8 +122,34 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Unconfigured => {
                 write!(f, "no AI provider is configured — open Settings to add one")
             }
+            ProviderError::Truncated { chars } => write!(
+                f,
+                "the model hit its token budget after {chars} characters without finishing"
+            ),
         }
     }
+}
+
+/// Whether repeating the identical request could plausibly succeed.
+///
+/// 429 and 5xx are the provider reporting its own transient trouble. **413
+/// is the interesting one**: measured 2026-08-30, Groq answers a
+/// tokens-per-minute overrun with `413 rate_limit_exceeded` and a
+/// `Retry-After`, not a 429 — so the status alone reads as "your payload is
+/// permanently too big" when it actually means "wait 7 seconds". The header
+/// is what separates the two: a genuine hard size limit has no window to
+/// wait out and sends no `Retry-After`. Free tiers are the product target
+/// (SPEC §15) and their TPM windows are small, so getting this wrong turns
+/// an ordinary pause into a failed book.
+fn is_retryable_status(status: u16, err: &ProviderError) -> bool {
+    let has_retry_after = matches!(
+        err,
+        ProviderError::Api {
+            retry_after: Some(_),
+            ..
+        }
+    );
+    status == 429 || (500..600).contains(&status) || (status == 413 && has_retry_after)
 }
 
 /// Parses a `Retry-After` header value as whole seconds (the only form the
@@ -173,6 +208,11 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f32>,
+    /// Upper bound on the response, when the caller knows one. Left `None`
+    /// for prose (the provider's own default is the right ceiling there);
+    /// set by callers whose output is a bounded structured payload but whose
+    /// *reasoning* isn't — see [`ProviderError::Truncated`].
+    pub max_tokens: Option<u32>,
 }
 
 /// Provider enum (enum dispatch avoids the non-object-safety of `async fn` in a
@@ -262,6 +302,8 @@ impl OpenAiCompat {
             stream: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_tokens: Option<u32>,
         }
 
         let mut last_err: Option<ProviderError> = None;
@@ -275,6 +317,7 @@ impl OpenAiCompat {
                     messages: &req.messages,
                     stream: true,
                     temperature: req.temperature,
+                    max_tokens: req.max_tokens,
                 });
             if let Some(key) = &self.api_key {
                 builder = builder.bearer_auth(key);
@@ -297,12 +340,12 @@ impl OpenAiCompat {
                         .ok()
                         .and_then(|r| r.ok())
                         .unwrap_or_default();
-                    let retryable = status == 429 || (500..600).contains(&status);
                     let err = ProviderError::Api {
                         status,
                         body,
                         retry_after,
                     };
+                    let retryable = is_retryable_status(status, &err);
                     if retryable && attempt < TRANSIENT_RETRIES {
                         let backoff = retry_after
                             .map(|d| d.min(MAX_RETRY_AFTER))
@@ -390,10 +433,14 @@ impl OpenAiCompat {
                 // provider on an otherwise-valid grading request) — worth the
                 // same retry as a transport failure.
                 Err(e @ ProviderError::Api { status, .. })
-                    if status != 429 && !(500..600).contains(&status) =>
+                    if !is_retryable_status(status, &e) =>
                 {
                     return Err(e);
                 }
+                // Same request, same budget, same wall — retrying spends the
+                // user's tokens three times to fail identically. The caller
+                // has to change the request (smaller input) to get anywhere.
+                Err(e @ ProviderError::Truncated { .. }) => return Err(e),
                 Err(e) => {
                     // A 429's `Retry-After` is the provider telling us
                     // exactly how long its own limiter window is — use it
@@ -427,6 +474,8 @@ impl OpenAiCompat {
             stream: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_tokens: Option<u32>,
         }
         #[derive(Deserialize)]
         struct Resp {
@@ -435,6 +484,12 @@ impl OpenAiCompat {
         #[derive(Deserialize)]
         struct Choice {
             message: Msg,
+            /// `"length"` means the provider cut the model off at the token
+            /// budget — the difference between "the model answered badly"
+            /// and "the model never got to answer". See
+            /// [`ProviderError::Truncated`].
+            #[serde(default)]
+            finish_reason: Option<String>,
         }
         #[derive(Deserialize)]
         struct Msg {
@@ -489,6 +544,7 @@ impl OpenAiCompat {
                 messages: &req.messages,
                 stream: false,
                 temperature: req.temperature,
+                max_tokens: req.max_tokens,
             });
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
@@ -534,12 +590,20 @@ impl OpenAiCompat {
                 "decoding response body: {e} — body was: {snippet:?}"
             ))
         })?;
-        Ok(body
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.best_text())
-            .unwrap_or_default())
+        let Some(choice) = body.choices.into_iter().next() else {
+            return Ok(String::new());
+        };
+        let truncated = choice.finish_reason.as_deref() == Some("length");
+        let text = choice.message.best_text().unwrap_or_default();
+        // Reported as truncation, not as whatever the parser makes of a
+        // half-written answer: a reasoning model that narrates its way
+        // through the task can burn the entire budget before writing the
+        // first character of the payload, and the caller's only useful move
+        // is to retry with less input — not to blame the response.
+        if truncated {
+            return Err(ProviderError::Truncated { chars: text.len() });
+        }
+        Ok(text)
     }
 }
 
@@ -674,6 +738,30 @@ mod tests {
         assert_eq!(retry_after_from_headers(&malformed), None);
     }
 
+    /// Groq answers a tokens-per-minute overrun with 413 + `Retry-After`,
+    /// not 429 (measured 2026-08-30). Retrying that is the difference
+    /// between a 7-second pause and a book the acervo gate gives up on; a
+    /// 413 with no header is a real size limit and must still fail fast.
+    #[test]
+    fn a_413_is_retryable_only_when_it_carries_a_retry_after() {
+        let api = |status, retry_after| ProviderError::Api {
+            status,
+            body: String::new(),
+            retry_after,
+        };
+        let waitable = api(413, Some(Duration::from_secs(7)));
+        assert!(is_retryable_status(413, &waitable));
+
+        let too_big = api(413, None);
+        assert!(!is_retryable_status(413, &too_big));
+
+        // Unchanged for every other status the rule already covered.
+        assert!(is_retryable_status(429, &api(429, None)));
+        assert!(is_retryable_status(503, &api(503, None)));
+        assert!(!is_retryable_status(401, &api(401, None)));
+        assert!(!is_retryable_status(400, &api(400, None)));
+    }
+
     #[tokio::test]
     async fn mock_streams_tokens_that_reassemble() {
         let provider = Provider::Mock(MockProvider::new("one two three"));
@@ -682,6 +770,7 @@ mod tests {
                 model: "mock".to_string(),
                 messages: vec![ChatMessage::user("hi")],
                 temperature: None,
+                max_tokens: None,
             })
             .await
             .unwrap();
@@ -697,6 +786,7 @@ mod tests {
             model: "unconfigured".to_string(),
             messages: vec![ChatMessage::user("hi")],
             temperature: None,
+            max_tokens: None,
         };
         assert!(matches!(
             Provider::Unconfigured.stream(req()).await,

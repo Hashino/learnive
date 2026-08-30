@@ -52,8 +52,9 @@ e K&R. Isso reclassifica a cascata de dedução do S27k de "reserva pro PDF
 ruim ocasional" para **carga principal de ~33% de um acervo real**. Pior: os
 dois livros sem bookmark são exatamente os que têm numeração `N.M` na página
 impressa, ou seja, o único caminho capaz de entregar sub-seção é o mesmo que
-carrega um terço do acervo. Foi o que motivou medir esse caminho — **§3, e o
-resultado é que ele não funciona hoje: 0 de 3.**
+carrega um terço do acervo. Foi o que motivou medir esse caminho — **§3: ele
+não funcionava em 3 de 3, e hoje chega ao modelo em 3 de 3, com a falha
+deslocada para o `resolve_toc` (§3.5).**
 
 **(d) Subseção É alcançável, só nunca por número.** SICP tem profundidade 3 e
 Pro Git 4 — a hierarquia capítulo→seção→subseção está lá, em prosa. "Tree
@@ -265,17 +266,20 @@ apontando para um livro que o acervo não tem.
 
 ---
 
-## 3. Medição da cascata de dedução do S27k — **ela não funciona hoje**
+## 3. Medição da cascata de dedução do S27k
 
 Medido 2026-08-30, depois que a §1.1(c) mostrou que esse caminho carrega ~33%
 do acervo. Alvos: os dois livros sem bookmark (K&R, Think Python 2e) mais o
 Stewart como **controle** (tem 26 bookmarks reais, então dá pra pontuar a
 dedução contra verdade conhecida em vez de só descrever).
 
-Resultado: **0 de 3 chegaram ao fim.** Três falhas distintas, em três pontos
-diferentes da cascata.
+**Primeira rodada: 0 de 3 chegaram ao fim.** Depois de quatro correções, **3
+de 3 chegam ao modelo e voltam com sumário** — e a falha se mudou para um
+ponto mais adiante da cascata (§3.5). O histórico abaixo fica porque o
+diagnóstico inicial estava **errado** e o modo como estava errado é o achado
+mais útil desta seção.
 
-### 3.1 K&R — a extração de texto devolve o livro inteiro vazio
+### 3.1 K&R — a extração de texto devolvia o livro inteiro vazio ✅ corrigido
 
 ```
 extracted 236 pages in 1.70s  (236 empty / no text layer)
@@ -287,76 +291,164 @@ extracted 236 pages in 1.70s  (236 empty / no text layer)
 legível (com ruído de OCR, mas legível: `:ROGRAMMING LANGUAGE`, `UXIX`,
 `self-coniained`).
 
-Ou seja, **o gargalo é o nosso `pdf-extract`, não o PDF.** Consequência de
+Ou seja, **o gargalo era o nosso `pdf-extract`, não o PDF.** Consequência de
 produção, não de bancada: `source::acervo` reprovaria o K&R por "sem camada de
 texto" — uma **rejeição falsa de um livro perfeitamente bom**, no portão do
-acervo, antes de qualquer geração. É bug de produção, achado por acaso ao
-medir outra coisa.
+acervo, antes de qualquer geração.
 
-Vale notar que o `read_pdf` já carrega uma cicatriz desse mesmo crate (o
-`catch_unwind` por página, documentado no seu próprio doc comment, para um
-livro real que fazia `pdf-extract` entrar em pânico). Este é o segundo livro
-real derrotando a mesma dependência, de um jeito diferente.
+Causa raiz rastreada até o fim: os content streams do K&R começam com um
+comentário PDF (`% CANON_PFINF_TYPE2_TEXTON`), e o `Content::decode` do
+`lopdf` devolve `Ok` com **zero operações** em vez de `Err` — falha
+silenciosa. Corrigido em `vendor/pdf-extract` (Patch 2, ver
+`vendor/pdf-extract/PATCH.md`): tira os comentários antes de decodificar,
+respeitando parênteses de string literal. **0 → 505 operações; 0 → 430.525
+chars em 236 páginas.**
 
-### 3.2 Think Python 2e e Stewart — `propose_toc` devolve resposta VAZIA
+Sobrou disso uma melhoria de produto: `PdfDocument::text_layer_unreadable`
+distingue "o PDF não tem texto" de "o PDF tem texto e o nosso extrator não
+consegue ler" (`BT` cru presente, texto vazio — varredura lexical de bytes,
+deliberadamente sem compartilhar modo de falha com o extrator que ela
+audita). O portão do acervo mostra as duas coisas com mensagens diferentes:
+rebaixar o livro é a resposta certa para a primeira, e uma mentira para a
+segunda ("baixar de novo não vai ajudar").
 
-Nos dois livros onde a extração funcionou, a cascata avançou corretamente até
-o modelo e morreu lá:
+### 3.2 Think Python 2e e Stewart — `propose_toc` falhava ✅ corrigido
 
-| Livro | Extração | `find_contents_pages` | `propose_toc` |
-|---|---|---|---|
-| Think Python 2e | 291 págs, 0 vazias, 42s | ✅ físicas 5..=11 (32.986 chars) | ❌ `Parse("no JSON")` |
-| Stewart (controle) | 1308 págs, 0 vazias, **292s** | ✅ físicas 3..=10 (8.099 chars) | ❌ `Parse("no JSON")` |
-
-Sondagem da resposta crua (`raw_probe::raw_propose_toc_response`) para
-separar "o modelo não sabe fazer" de "a gente não sabe ler a resposta":
+Nos dois livros onde a extração funcionava, a cascata avançava corretamente
+até o modelo e morria lá, com `Parse("no JSON")`. A sondagem da resposta crua
+(`raw_probe::raw_propose_toc_response`) mostrou:
 
 ```
 --- FAST tier:   RAW RESPONSE (0 chars) ---
 --- ROBUST tier: RAW RESPONSE (0 chars) ---
 ```
 
-**Zero caracteres, nos dois tiers.** Não é JSON malformado, não é raciocínio
-vazando pro `content`: é resposta literalmente vazia. Reproduzível, dois
-livros, dois modelos (`gpt-oss-20b` e `gpt-oss-120b`). Bate com o padrão já
-registrado no `.env` para a família gpt-oss ("devolvem content vazio"),
-antes observado em outros modelos e agora atingindo os dois em uso.
+Daí a conclusão registrada na primeira versão desta seção: *"resposta
+literalmente vazia … a cascata está morta na água por falha do modelo."*
 
-**Conclusão dura: a cascata de dedução do S27k nunca funcionou de ponta a
-ponta no provider-piso.** Ela estava documentada como construída; está
-construída, e está morta na água por falha do modelo, sem nenhum teste
-cobrindo isso porque todo teste existente usa TOC sintético ou mock.
+**Essa conclusão estava errada, e errada de um jeito específico: culpou o
+provider por três bugs nossos.** Cada camada escondia a de baixo.
 
-### 3.3 E é justamente esse o caminho que teria a sub-numeração
+| # | Causa real | Onde | Sintoma que produzia |
+|---|---|---|---|
+| 1 | Comentário no content stream (§3.1) | `vendor/pdf-extract` | K&R "sem camada de texto" |
+| 2 | Detecção de página de sumário exigia heading exato | `source::toc` | K&R abandonado antes do modelo |
+| 3 | Resposta lida só no campo `content` | `ai::provider` | "0 chars" — a resposta ia pro canal `reasoning` |
+| 4 | Página de sumário inteira num prompt só | `engine::propose_toc` | modelo estourava o orçamento raciocinando |
 
-O input que o `propose_toc` recebeu do Stewart é exatamente o que falta em
-todo bookmark do acervo (§1.1a):
+O (3) é o que fabricou o "0 chars": modelos de raciocínio devolvem a resposta
+em `message.reasoning`/`reasoning_content` e deixam `content` vazio. O
+`.env` já registrava exatamente esse comportamento para a família gpt-oss;
+nada agia sobre ele. Corrigido com `Msg::best_text` (prefere `content`,
+cai para o canal de raciocínio só quando a alternativa é string vazia — os
+modelos bem-comportados ficam byte-idênticos).
+
+Com (3) corrigido a resposta apareceu — **e ainda falhava**, agora por (4):
 
 ```
-1.1 Four Ways to Represent a Function 11
-1.2 Mathematical Models: A Catalog of Essential Functions 24
-...
-2.4 The Precise Deﬁnition of a Limit 109
-3.5 Implicit ...
+--- FAST tier: RAW RESPONSE (7470 chars) ---
+We must parse the TOC. Provide JSON array entries in order with fields …
+=> number "1.1", title "Four Ways to Represent a Function", page 11
+=> number "1.2", title "Mathematical Models: A Catalog …", page 24
+…
+=> null, title "LIMITS AND DERIVATIVES", pa      ← cortado no meio da palavra
 ```
 
-A página de sumário impressa **carrega `N.M` completo**. Então a hierarquia
-do desenho está certa — dedução é mesmo o único caminho capaz de entregar
-granularidade de subseção, e é o contra-exemplo K&R §4.10 sendo servível em
-princípio. Só que é precisamente o caminho que está quebrado, nas duas pontas
-(extração no K&R, modelo nos outros dois).
+O modelo narra **cada entrada** no canal de raciocínio antes de escrever
+JSON, e o run de sumário do Think Python tem 33 KB. Ele gastava o orçamento
+inteiro pensando e era cortado (`finish_reason: "length"`) antes do primeiro
+caractere do JSON — que chegava quatro camadas acima como `Parse("no JSON")`,
+uma mensagem que aponta para o parser justamente onde o parser é inocente.
 
-### 3.4 Custo de extração, medido
+Duas correções, ambas necessárias:
+
+- `ProviderError::Truncated` — `finish_reason: "length"` vira erro próprio, e
+  não é reexecutado (mesma requisição, mesmo teto, mesma parede: repetir
+  gastaria o token do usuário três vezes para falhar igual).
+- **Uma chamada por página impressa** (`toc::contents_page_chunks`). Página
+  de sumário é lista auto-contida, então dividir não custa compreensão;
+  limita cada resposta a algo que caiba num orçamento gratuito, e faz uma
+  falha perder uma página em vez do livro.
+
+### 3.3 O teto de tokens do free tier é contado ANTES de gerar
+
+Primeira tentativa de (4) usou `max_tokens: 8000`. Resultado, em 2 dos 3
+livros:
+
+```
+!! propose_toc FAILED: 413 rate_limit_exceeded
+   "Limit 8000, Requested 8813" (TPM), retry_after: Some(7s)
+```
+
+`max_tokens` conta como tokens **requisitados** contra a janela de
+tokens-por-minuto, então pedir 8000 contra um limite de 8000 torna a
+requisição ilegal antes de gerar qualquer coisa. Baixado para 4000 (a página
+mais densa do acervo cabe em ~1800 de saída; o resto é folga para o
+raciocínio, que é o que de fato estoura).
+
+Achado colateral, específico de free tier e mais importante que o número: a
+Groq responde estouro de TPM com **413, não 429**, e com `Retry-After`. A
+regra de retry olhava só o status, então tratava uma pausa de 7 segundos como
+"payload permanentemente grande demais" e desistia do livro. Agora quem
+separa os dois casos é o **cabeçalho**, não o status — um limite de tamanho
+real não manda `Retry-After` porque não existe janela para esperar.
+
+### 3.4 Estado depois das correções — a cascata anda
+
+```
+K&R          236 págs,  8 vazias,  9.6s │ sumário 3..=5   │  40 entradas (35 N.M)
+Think Python 291 págs,  0 vazias, 26.4s │ sumário 5..=11  │ 251 entradas ( 7 N.M)
+Stewart      1308 págs, 0 vazias,  183s │ sumário 3..=10  │ 234 entradas (121 N.M)
+```
+
+**3 de 3 devolvem sumário**, contra 0 de 3 antes. E a §3.3 anterior se
+confirma na prática: a página impressa carrega `N.M` completo — Stewart
+devolve 121 subseções numeradas, exatamente a granularidade que **nenhum
+bookmark do acervo tem** (§1.1a). A dedução é mesmo o único caminho capaz de
+entregar subseção.
+
+### 3.5 A falha se mudou: agora é `resolve_toc`, e a causa é estrutural
+
+```
+K&R           4/40   (10%)  acceptable=false
+Think Python 12/251   (5%)  acceptable=false
+Stewart      97/234  (41%)  acceptable=false
+```
+
+Nenhum passa. Mas o modo de falha é diferente de tudo acima: **não é bug, é
+premissa vencida.** A regra 1 do `resolve_toc` procura o título **no topo de
+uma página física** — desenhada quando as entradas eram capítulos, e capítulo
+começa em página nova. Agora a maioria das entradas é **subseção**, e
+subseção começa no meio da página. Elas não podem casar por construção.
+
+O controle mostra isso limpo: Stewart coloca 97 de 234 (41%) — grosso modo os
+capítulos e as subseções que por acaso caíram no topo. Não é o modelo errando
+(§4 já mostrou que os três modelos que terminam ficam na mesma faixa); é o
+casador procurando no lugar errado.
+
+Fica registrado aqui como **o próximo item medido**, não corrigido nesta
+rodada.
+
+### 3.6 Custo de extração, medido
 
 Relevante porque a cascata roda no portão do acervo, síncrona:
 
-- Stewart (1308 págs): **292s**
-- Think Python 2e (291 págs): 43s
-- K&R (236 págs): 1,7s — mas porque não extraiu nada
+- Stewart (1308 págs): **183s**
+- Think Python 2e (291 págs): 26s
+- K&R (236 págs): 9,6s
 
-Quase 5 minutos para um livro-texto. `read_outline_for_test` mostra que ler só
+Três minutos para um livro-texto. `read_outline_for_test` mostra que ler só
 os bookmarks é instantâneo em comparação, o que sugere que a extração completa
 deveria ser preguiçosa/cacheada e não pré-requisito do portão.
+
+### 3.7 Lição de método
+
+Quatro camadas de bug empilhadas, e a de cima imitava perfeitamente "o modelo
+gratuito não dá conta" — a hipótese mais confortável, porque não pede
+trabalho nenhum. A sondagem crua foi o que quebrou a pilha, e ainda assim
+mentiu uma vez (o "0 chars" era nosso). Vale a regra: **antes de concluir que
+o provider falhou, olhar o corpo da resposta inteiro, em todos os canais, e o
+`finish_reason`.** Três das quatro causas eram nossas.
 
 ---
 
@@ -433,18 +525,22 @@ de casamento.
 
 ## 5. O que ainda não foi medido
 
-1. ~~A cascata de dedução do S27k~~ — **medida (§3): quebrada em 3 de 3.**
-2. **`propose_toc` contra um provider que responda** — a falha da §3.2 é do
-   modelo, então o desenho da cascata segue não-validado. Precisa de um
-   provider alternativo (ver blocos comentados no `.env`) só pra saber se a
-   lógica presta.
-3. **Extração de texto que leia o K&R** — trocar/complementar `pdf-extract`
-   (poppler lê; nós não). Bloqueia o portão do acervo, não só o S27g.
-4. **O veto difuso da §2.2** — desenhado a partir dos dados, ainda não
-   implementado nem medido.
-5. **"Seleção, não recordação" (§2.3)** — a mudança de maior alavancagem,
+1. ~~A cascata de dedução do S27k~~ — **medida (§3): quebrada em 3 de 3, e
+   destravada até o modelo em 3 de 3 depois de quatro correções (§3.1-§3.3).**
+2. ~~`propose_toc` contra um provider que responda~~ — **a premissa estava
+   errada (§3.2): três das quatro causas eram nossas, não do provider.
+   Responde nos três livros agora.**
+3. ~~Extração de texto que leia o K&R~~ — **corrigido no
+   `vendor/pdf-extract` (§3.1): 0 → 430.525 chars.**
+4. **`resolve_toc` para entradas de subseção (§3.5)** — o item aberto que
+   sucede os três acima: colocação de 5-41%, causa estrutural conhecida
+   (procura título no topo da página; subseção não começa no topo).
+5. ~~O veto difuso da §2.2~~ — **implementado** em
+   `source::toc_confirm::match_chapter` (Jaro-Winkler, piso 0.72, com
+   queda para o casamento por nome quando o número é vetado).
+6. **"Seleção, não recordação" (§2.3)** — a mudança de maior alavancagem,
    ainda não construída.
-6. **Política de falha total (caso 5)** — segue em aberto por decisão
+7. **Política de falha total (caso 5)** — segue em aberto por decisão
    explícita: o usuário rejeitou tanto substituir subseção pelo livro inteiro
    quanto regerar a lista, e apontou que um capítulo alucinado tem um *papel*
    na lista que a remediação local não conserta. A proposta atual (dividir em

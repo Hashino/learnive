@@ -1451,8 +1451,8 @@ pub(super) async fn ensure_document_grounded(
             let Some(range) = source::toc::find_contents_pages(&pdf) else {
                 continue;
             };
-            let contents_text = source::toc::contents_pages_text(&pdf, range);
-            let Ok(llm_entries) = engine::propose_toc(&ai, &contents_text).await else {
+            let contents_pages = source::toc::contents_page_chunks(&pdf, range);
+            let Ok(llm_entries) = engine::propose_toc(&ai, &contents_pages).await else {
                 continue;
             };
             let resolution = source::toc::resolve_toc(&pdf, &llm_entries, range.1);

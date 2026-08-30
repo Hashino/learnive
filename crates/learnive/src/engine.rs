@@ -531,20 +531,62 @@ pub async fn propose_source_title(ai: &Ai, topic: &str) -> Result<String, Engine
 
 /// Reads a PDF's printed contents/sumário page (S27k, PLAN.md, 2026-08-29) —
 /// the deduction step between embedded bookmarks and the heading heuristic
-/// in §11.1's TOC cascade. `contents_page_text` is
-/// `source::toc::contents_pages_text`'s output, never the book's body. Fast
-/// tier (see `prompt::propose_toc`'s doc for why). A parse failure degrades
-/// to an empty list rather than an error — the caller (the acervo gate) is
-/// expected to fall through to the heading heuristic on either an empty
-/// list or an `Err` here, exactly as it already does when there's no
-/// contents page to try in the first place.
+/// in §11.1's TOC cascade. `pages` is `source::toc::contents_page_chunks`'s
+/// output, never the book's body. Fast tier (see `prompt::propose_toc`'s
+/// doc for why). The caller (the acervo gate) falls through to the heading
+/// heuristic on either an empty list or an `Err`, exactly as it already
+/// does when there's no contents page to try in the first place.
+///
+/// **One call per printed page, results concatenated in reading order.**
+/// The pages of a contents run are independent lists, and sending them
+/// together is what made this fail on every book (see
+/// `source::toc::contents_page_chunks`). A page that fails is skipped, not
+/// fatal: a partial TOC still resolves the chapters it did read, and losing
+/// page 3 of 7 is a far better outcome than losing the book — which is the
+/// whole reason the acervo gate has a cascade instead of one attempt.
 pub async fn propose_toc(
     ai: &Ai,
-    contents_page_text: &str,
+    pages: &[String],
 ) -> Result<Vec<crate::source::toc::TocLlmEntry>, EngineError> {
-    let text = collect(ai, Tier::Fast, prompt::propose_toc(contents_page_text)).await?;
-    parse::toc_entries(&text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))
+    let mut all = Vec::new();
+    let mut last_err = None;
+    for page in pages {
+        if page.trim().is_empty() {
+            continue;
+        }
+        let messages = prompt::propose_toc(page);
+        match ai
+            .complete_within(Tier::Fast, messages, Some(TOC_PAGE_MAX_TOKENS))
+            .await
+        {
+            Ok(text) => match parse::toc_entries(&text) {
+                Some(entries) => all.extend(entries),
+                None => last_err = Some(EngineError::Parse("no JSON".to_string())),
+            },
+            Err(e) => last_err = Some(e.into()),
+        }
+    }
+    match last_err {
+        // Every page failed — report the last real cause rather than an
+        // empty success the caller would mistake for "this book has no TOC".
+        Some(e) if all.is_empty() => Err(e),
+        _ => Ok(all),
+    }
 }
+
+/// Ceiling for one contents page's transcription.
+///
+/// Sized against the **free tier's tokens-per-minute window**, not against
+/// the model's context. Measured 2026-08-30: `max_tokens` counts toward
+/// that window as *requested* tokens, so an 8000-token budget against
+/// Groq's 8000 TPM free limit made the request itself illegal — `413
+/// rate_limit_exceeded, Requested 8813` before a single token was
+/// generated. SPEC §15 makes free tiers the target, so the budget has to
+/// leave room for the prompt inside the same window. 4000 covers the
+/// densest page in the test library (~60 entries ≈ 1800 output tokens) with
+/// the remainder as headroom for a reasoning model's thinking, which is what
+/// actually overruns here.
+const TOC_PAGE_MAX_TOKENS: u32 = 4000;
 
 /// One item of the reading list an objective needs (S27e, PLAN.md §27,
 /// replacing the pre-pivot concept-decomposition tree this type used to

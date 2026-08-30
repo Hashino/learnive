@@ -79,6 +79,7 @@ impl Ai {
                 model: self.models.for_tier(tier).to_string(),
                 messages,
                 temperature: None,
+                max_tokens: None,
             })
             .await
     }
@@ -90,11 +91,25 @@ impl Ai {
         tier: Tier,
         messages: Vec<ChatMessage>,
     ) -> Result<String, ProviderError> {
+        self.complete_within(tier, messages, None).await
+    }
+
+    /// [`Ai::complete`] with an explicit ceiling on the response. Only worth
+    /// setting where the answer's size is known in advance and the model's
+    /// *reasoning* is what threatens to overrun it — see
+    /// [`ProviderError::Truncated`].
+    pub async fn complete_within(
+        &self,
+        tier: Tier,
+        messages: Vec<ChatMessage>,
+        max_tokens: Option<u32>,
+    ) -> Result<String, ProviderError> {
         self.provider
             .complete(ChatRequest {
                 model: self.models.for_tier(tier).to_string(),
                 messages,
                 temperature: None,
+                max_tokens,
             })
             .await
     }

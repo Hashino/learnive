@@ -227,10 +227,32 @@ fn is_section_number(tok: &str) -> bool {
 /// of pre-textual, never the book's body (PLAN.md's cost argument for why
 /// this call is affordable at all).
 pub fn contents_pages_text(pdf: &PdfDocument, range: (usize, usize)) -> String {
+    contents_page_chunks(pdf, range).join("\n")
+}
+
+/// The same run, kept **one string per physical page** — the unit
+/// `engine::propose_toc` actually sends.
+///
+/// Joining the run into a single prompt is what broke the whole S27k
+/// cascade (measured 2026-08-30): Think Python's contents run is 33 KB, and
+/// a reasoning model asked to transcribe it narrates every entry in its
+/// reasoning channel and hits the provider's token ceiling before writing
+/// the first character of JSON — `finish_reason: "length"`, which surfaced
+/// four layers up as `Parse("no JSON")`. A printed contents page is a
+/// self-contained list, so the split costs nothing in comprehension, bounds
+/// each response to something a free-tier budget can hold, and makes a
+/// failure lose one page instead of the book.
+pub fn contents_page_chunks(pdf: &PdfDocument, range: (usize, usize)) -> Vec<String> {
     let (start, end) = range;
     pdf.page_texts
         .get(start..=end.min(pdf.page_texts.len().saturating_sub(1)))
-        .map(|pages| pages.join("\n"))
+        .map(|pages| {
+            pages
+                .iter()
+                .filter(|p| !p.trim().is_empty())
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -391,7 +413,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// K&R's scan renders the heading as "CONIENTS" (T misread as I). An
     /// exact substring check missed it, and with the section numbers also
     /// extracting onto their own lines the page scored ~0 — enough to

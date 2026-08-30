@@ -491,15 +491,16 @@ mod deduction {
                 println!("  !! find_contents_pages found NOTHING — cascade cannot start here");
                 continue;
             };
-            let text = contents_pages_text(&pdf, range);
+            let pages = crate::source::toc::contents_page_chunks(&pdf, range);
             println!(
-                "  contents pages: physical {}..={} ({} chars of text)",
+                "  contents pages: physical {}..={} ({} chars over {} non-empty pages)",
                 range.0 + 1,
                 range.1 + 1,
-                text.len()
+                pages.iter().map(|p| p.len()).sum::<usize>(),
+                pages.len()
             );
 
-            let entries = match crate::engine::propose_toc(&ai, &text).await {
+            let entries = match crate::engine::propose_toc(&ai, &pages).await {
                 Ok(e) => e,
                 Err(e) => {
                     println!("  !! propose_toc FAILED: {e:?}");
