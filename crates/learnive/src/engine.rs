@@ -268,6 +268,80 @@ pub fn expected_items(outline: &Outline) -> Vec<(String, crate::source::Expected
         .collect()
 }
 
+/// Whether an outline item can be directly generated as content (S27g,
+/// 2026-08-29, added in review before the topic-proposal slice shipped). A
+/// `Node`/`Chapter` always is — `Chapter` is today's leaf content unit
+/// (chapter→node fan-out is a later, unbuilt slice; see
+/// [`OutlineItemType::Chapter`]'s doc comment). A `Book`/`Article` is
+/// generable UNLESS `propose_outline` gave it topic-scoped `Chapter`
+/// children: those children carry the actual content now, and letting the
+/// whole-work item stay generable on top of them would just relocate the
+/// reported bug ("o livro todo tratado como um nodo só") to the END of the
+/// reading list instead of fixing it — the learner would get the N focused
+/// chapters, then a final node that tries to teach the entire book. A
+/// `Book`/`Article` with no children (the plain `topics: []` case) stays
+/// exactly as generable as it always was: no regression for a document that
+/// never needed chapter scoping. Checked by real children in `outline.items`
+/// (`parent_id`), not `item.expansion`, so this can't desync from what
+/// actually got materialized.
+pub fn is_generable(outline: &Outline, item: &OutlineItem) -> bool {
+    if !matches!(
+        item.item_type,
+        OutlineItemType::Book | OutlineItemType::Article
+    ) {
+        return true;
+    }
+    !outline
+        .items
+        .iter()
+        .any(|i| i.parent_id.as_deref() == Some(item.id.as_str()))
+}
+
+/// A node/container's gate-relevant state, synthesizing a container's from
+/// its children when it has none of its own (S27g, 2026-08-29). A
+/// non-generable `Book`/`Article` (see [`is_generable`]) never receives a
+/// `Demonstrated` event directly — nothing ever generates it — so without
+/// this, whatever comes after it in the reading list would stay locked
+/// forever the moment its chapters finish (the same "container never
+/// satisfies its own gate" trap a fully-skipped book would also fall into).
+/// A container counts as `Demonstrated` once every one of its direct
+/// children (by `parent_id`) is itself `Demonstrated` or `Skipped`,
+/// recursively — a container with no children at all (shouldn't happen once
+/// [`is_generable`] agrees it isn't one, but checked defensively) reports no
+/// state rather than vacuously "done".
+pub fn effective_state(
+    outline: &Outline,
+    states: &std::collections::HashMap<String, crate::events::aggregate::NodeState>,
+    item_id: &str,
+) -> Option<crate::events::aggregate::NodeState> {
+    use crate::events::aggregate::NodeState;
+    if let Some(s) = states.get(item_id) {
+        return Some(*s);
+    }
+    let item = outline.items.iter().find(|i| i.id == item_id)?;
+    if matches!(
+        item.item_type,
+        OutlineItemType::Node | OutlineItemType::Chapter
+    ) {
+        return None;
+    }
+    let children: Vec<&OutlineItem> = outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(item_id))
+        .collect();
+    if children.is_empty() {
+        return None;
+    }
+    let all_satisfied = children.iter().all(|c| {
+        matches!(
+            effective_state(outline, states, &c.id),
+            Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
+        )
+    });
+    all_satisfied.then_some(NodeState::Demonstrated)
+}
+
 /// Resolves which document actually owns a node's file/event-log (§S15b) —
 /// the item's own document unless it's a reference (`source_doc_id: Some`),
 /// in which case the pointed-to document. Every call site that turns
@@ -1005,6 +1079,125 @@ mod tests {
             items: vec![node.clone()],
         };
         assert_eq!(resolve_grounding_source(&outline, &node), None);
+    }
+
+    fn chapters_under(book_id: &str, ids: &[&str]) -> Vec<OutlineItem> {
+        ids.iter()
+            .map(|id| {
+                let mut chapter = outline_item(id, None);
+                chapter.item_type = OutlineItemType::Chapter;
+                chapter.parent_id = Some(book_id.to_string());
+                chapter
+            })
+            .collect()
+    }
+
+    #[test]
+    fn is_generable_is_true_for_a_book_with_no_chapter_children() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book.clone()],
+        };
+        assert!(is_generable(&outline, &book));
+    }
+
+    #[test]
+    fn is_generable_is_false_for_a_book_with_chapter_children() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book.clone()];
+        items.extend(chapters_under("book1", &["c1", "c2"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        assert!(!is_generable(&outline, &book));
+    }
+
+    #[test]
+    fn is_generable_is_always_true_for_a_node_or_chapter() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book];
+        items.extend(chapters_under("book1", &["c1"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        assert!(is_generable(&outline, &outline.items[1]));
+    }
+
+    fn node_states(
+        pairs: &[(&str, crate::events::aggregate::NodeState)],
+    ) -> std::collections::HashMap<String, crate::events::aggregate::NodeState> {
+        pairs.iter().map(|(id, s)| (id.to_string(), *s)).collect()
+    }
+
+    #[test]
+    fn effective_state_is_none_for_a_container_with_no_children_touched_yet() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book];
+        items.extend(chapters_under("book1", &["c1", "c2"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        let states = node_states(&[]);
+        assert_eq!(effective_state(&outline, &states, "book1"), None);
+    }
+
+    #[test]
+    fn effective_state_is_none_while_only_some_chapters_are_done() {
+        use crate::events::aggregate::NodeState;
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book];
+        items.extend(chapters_under("book1", &["c1", "c2"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        let states = node_states(&[("c1", NodeState::Demonstrated)]);
+        assert_eq!(effective_state(&outline, &states, "book1"), None);
+    }
+
+    #[test]
+    fn effective_state_synthesizes_demonstrated_once_every_chapter_is_settled() {
+        use crate::events::aggregate::NodeState;
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book];
+        items.extend(chapters_under("book1", &["c1", "c2"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        // A skipped chapter satisfies the container exactly like a
+        // demonstrated one — the same rule an ordinary prerequisite follows.
+        let states = node_states(&[("c1", NodeState::Demonstrated), ("c2", NodeState::Skipped)]);
+        assert_eq!(
+            effective_state(&outline, &states, "book1"),
+            Some(NodeState::Demonstrated)
+        );
+    }
+
+    #[test]
+    fn effective_state_falls_back_to_a_direct_lookup_for_a_plain_node() {
+        use crate::events::aggregate::NodeState;
+        let node = outline_item("n1", None);
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![node],
+        };
+        let states = node_states(&[("n1", NodeState::Attempted)]);
+        assert_eq!(
+            effective_state(&outline, &states, "n1"),
+            Some(NodeState::Attempted)
+        );
+        assert_eq!(effective_state(&outline, &states, "no-such-id"), None);
     }
 
     fn mock_ai(reply: &str) -> Ai {

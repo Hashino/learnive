@@ -313,7 +313,7 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
         )),
         ChatMessage::assistant(
             r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book","topics":[]},
-                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":["limits of a function","properties of limits"]}]"#,
+                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":["limite de uma função","propriedades dos limites"]}]"#,
         ),
         ChatMessage::user(request(
             "recursion in C",

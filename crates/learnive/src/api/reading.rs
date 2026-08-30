@@ -936,6 +936,18 @@ pub(super) async fn prepare(
         .position(|i| i.id == item_id)
         .ok_or_else(|| "unknown outline item".to_string())?;
     let item = outline.items[idx].clone();
+    // S27g (2026-08-29): a `Book`/`Article` item whose children are
+    // topic-scoped `Chapter` proposals is a container, not content — see
+    // `engine::is_generable`'s doc comment. Checked here, not just in the
+    // client's view state, because the view state is advisory: this is the
+    // enforcement point that actually stops a stale/tampered client request
+    // from generating "the whole book" content on top of its own chapters.
+    if !engine::is_generable(&outline, &item) {
+        return Err(
+            "this outline item is a container (its topics were split into chapters); read one of its chapters instead"
+                .to_string(),
+        );
+    }
     // §S15b: a reference is by construction already generated (in the
     // OWNER, which is the only place `Demonstrated` evidence for it can
     // exist) — `prepare` is exclusively the pre-generation setup, so
@@ -969,9 +981,14 @@ pub(super) async fn prepare(
     // trees (siblings, integration exercises gated on ALL children) exist,
     // that's not just cosmetic: a skipped branch would otherwise leave its
     // parent's gate impossible to ever satisfy.
+    // `effective_state`, not a plain `states.get`, so a prerequisite that is
+    // itself a non-generable `Book`/`Article` container (S27g) resolves
+    // through its chapter children instead of never satisfying the gate —
+    // see that function's doc comment for the permanent-lock trap this
+    // avoids.
     let unlocked = item.prerequisites.iter().all(|p| {
         matches!(
-            states.get(p),
+            engine::effective_state(&outline, &states, p),
             Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
         )
     });

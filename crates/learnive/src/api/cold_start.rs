@@ -783,19 +783,39 @@ pub(super) fn outline_view(
         // (`parent_id.is_none()`); they filter explicitly at their own call
         // sites now that this view doesn't pre-filter for them.
         .map(|item| {
-            let view_state = match states.get(&item.id) {
-                Some(NodeState::Demonstrated) => "demonstrated",
-                Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
-                None => {
-                    // §S15: a `Skipped` prerequisite satisfies the gate too
-                    // — see `api::reading::prepare`'s matching check.
-                    let unlocked = item.prerequisites.iter().all(|p| {
-                        matches!(
-                            states.get(p),
-                            Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
-                        )
-                    });
-                    if unlocked { "available" } else { "locked" }
+            // S27g (2026-08-29): a non-generable `Book`/`Article` container
+            // (see `engine::is_generable`) never gets its own `Demonstrated`
+            // event — nothing ever generates it — so its view state is
+            // derived from its chapter children via `engine::effective_state`
+            // instead of looked up directly. It never shows `"available"`:
+            // there is nothing to click through to generate, only
+            // `"locked"` (chapters still in progress) or `"demonstrated"`
+            // (all of them done/skipped) — see that function's doc comment
+            // for why a container that never satisfies this would otherwise
+            // permanently lock everything after it in the reading list.
+            let view_state = if !engine::is_generable(outline, item) {
+                match engine::effective_state(outline, &states, &item.id) {
+                    Some(NodeState::Demonstrated) => "demonstrated",
+                    _ => "locked",
+                }
+            } else {
+                match states.get(&item.id) {
+                    Some(NodeState::Demonstrated) => "demonstrated",
+                    Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
+                    None => {
+                        // §S15: a `Skipped` prerequisite satisfies the gate
+                        // too — see `api::reading::prepare`'s matching
+                        // check. `effective_state` (not a plain `states.get`)
+                        // so a prerequisite that is itself a container
+                        // resolves through its own children.
+                        let unlocked = item.prerequisites.iter().all(|p| {
+                            matches!(
+                                engine::effective_state(outline, &states, p),
+                                Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
+                            )
+                        });
+                        if unlocked { "available" } else { "locked" }
+                    }
                 }
             };
             OutlineItemView {

@@ -48,8 +48,7 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
     // tests a real, working `Embedder` with no model download, same spirit
     // as `Ai::Mock`/`Source::Mock` above.
     let retriever =
-        crate::retrieval::Retriever::open(&dir, &corpus, crate::retrieval::Embedder::Mock)
-            .unwrap();
+        crate::retrieval::Retriever::open(&dir, &corpus, crate::retrieval::Embedder::Mock).unwrap();
 
     AppState {
         token: Arc::from(TOKEN),
@@ -2851,6 +2850,137 @@ async fn a_question_spawned_from_a_reference_shows_up_in_the_visitors_sidebar_tr
         !sub_view["content_html"].as_str().unwrap_or("").is_empty(),
         "opened sub-node must carry real content: {sub_view}"
     );
+}
+
+#[tokio::test]
+async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_correctly() {
+    // S27g (2026-08-29, added in review before the topic-proposal slice
+    // shipped): a `Book`/`Article` item that got topic-scoped `Chapter`
+    // children must never itself be generated — its chapters carry the
+    // actual content now — and whatever comes after it in the reading list
+    // must still unlock once every chapter is settled, even though the book
+    // item itself never receives a `Demonstrated` event (nothing ever
+    // generates it). Without this, the reported bug ("o livro todo estava
+    // sendo tratado como um nodo só") just relocates to the end of the
+    // reading list instead of going away, and — the second, worse failure
+    // mode this test also pins — anything gated behind the book would lock
+    // forever, since a container never satisfies a plain `states.get`
+    // prerequisite check.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
+                {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+            ]},
+            {"id":"after","title":"After the book","action":"learn","children":[]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    let find_state = |items: &serde_json::Value, id: &str| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it["id"] == id)
+            .unwrap_or_else(|| panic!("no item {id} in {items}"))["state"]
+            .clone()
+    };
+
+    // Neither chapter is done yet: the book is locked, not available — a
+    // container never shows "available", since there is nothing to click
+    // through to generate directly.
+    assert_eq!(
+        find_state(&created["items"], "book1"),
+        serde_json::json!("locked")
+    );
+    assert_eq!(
+        find_state(&created["items"], "after"),
+        serde_json::json!("locked")
+    );
+
+    // The server refuses to generate the book directly, regardless of what
+    // state the client thinks it's in — this is the enforcement point, not
+    // just the display hint.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/book1/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "SSE responses are always 200");
+    assert!(body.contains("event: error"));
+    assert!(body.contains("container"));
+    assert!(!body.contains("event: done"));
+
+    // Settle both chapters — one demonstrated via full generation, one
+    // skipped, exactly like an ordinary prerequisite chain.
+    generate_to_completion(&call, &doc_id, "c1").await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/c1/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/c2/skip"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    // The book synthesizes "demonstrated" from its settled children, even
+    // though it never received an event of its own...
+    assert_eq!(
+        find_state(&outline["items"], "book1"),
+        serde_json::json!("demonstrated")
+    );
+    // ...and whatever comes after it unlocks on that synthesized state, not
+    // never at all.
+    assert_eq!(
+        find_state(&outline["items"], "after"),
+        serde_json::json!("available")
+    );
+
+    // Still refused, even fully "done" — a container is never generable,
+    // not just "generable until its children finish".
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/book1/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: error"));
+    assert!(body.contains("container"));
 }
 
 #[tokio::test]
