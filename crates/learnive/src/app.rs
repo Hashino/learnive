@@ -198,6 +198,19 @@ pub fn build_router(state: AppState) -> Router {
             get(api::block_frame),
         )
         .route("/api/documents/{doc}/nodes/{id}/skip", post(api::skip_node))
+        // Terminal remediation for a chapter match_chapter (S27g) could not
+        // place — the "skip the whole book" and "pick the page yourself"
+        // arms (the third, "restart", is a plain client-side re-run of cold
+        // start and needs no route of its own). See `skip_book`'s doc
+        // comment for why this is not just `skip_node` looped client-side.
+        .route(
+            "/api/documents/{doc}/outline/{item}/skip_book",
+            post(api::skip_book),
+        )
+        .route(
+            "/api/documents/{doc}/outline/{item}/resolved_page",
+            put(api::set_resolved_page),
+        )
         // On-demand retrieval practice on an already-demonstrated node
         // (§S15 item 5) — overwrites the same rubric sidecar remediation
         // does, so `exercise-frame`/`answer` above serve/grade it unchanged.
@@ -295,6 +308,7 @@ async fn asset(Path(file): Path<String>) -> Response {
         "documents.js" => (JS, include_str!("assets/documents.js")),
         "acervo.js" => (JS, include_str!("assets/acervo.js")),
         "outline.js" => (JS, include_str!("assets/outline.js")),
+        "remediate.js" => (JS, include_str!("assets/remediate.js")),
         "reading.js" => (JS, include_str!("assets/reading.js")),
         "node.js" => (JS, include_str!("assets/node.js")),
         "settings.js" => (JS, include_str!("assets/settings.js")),

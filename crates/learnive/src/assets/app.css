@@ -710,6 +710,22 @@ body.source-resizing #askBar {
 #outline li.state-demonstrated:hover {
   color: var(--accent);
 }
+/* A chapter S27g's matching pass couldn't place is "locked" (no
+   resolved_page) but not stuck — it opens the remediation modal
+   (remediate.js), so it stays full-opacity and clickable despite the
+   generic .state-locked dimming above, and gets its own warning color
+   instead of the neutral lock badge. */
+#outline li.match-failed {
+  opacity: 1;
+  cursor: pointer;
+}
+#outline li.match-failed > .outline-row {
+  color: var(--nord11);
+}
+#outline li.match-failed:hover > .outline-row {
+  color: var(--nord11);
+  text-decoration: underline;
+}
 /* §S15: a sub-node (decomposed prerequisite or question-spawned
    elaboration) nests under its parent — its own `<ul>`, indented like any
    nested list, no extra decoration needed beyond that. */
@@ -1678,4 +1694,92 @@ body.source-open #annotationsLayer {
 }
 #setupMsg.err {
   color: var(--nord11);
+}
+
+/* Chapter-match-failure remediation (S27g, PLAN.md ~line 823): same
+   native-<dialog> idiom and the same plain look as #settingsModal — a
+   heading row, a `.muted` intro line, and top-bordered sections (the exact
+   `.settings-section` rhythm), not a distinct visual language of its own.
+   Three terminal options, ranked by plainness alone (no cards, no color
+   coding beyond the existing `.danger` button): pick-the-page first with a
+   muted "(recommended)" note, skip and restart as ordinary buttons below. */
+#chapterRemediateModal {
+  width: min(34rem, 92vw);
+  max-height: calc(100vh - 4rem);
+  padding: 1.5rem var(--card-pad-x) 2rem;
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+  background: var(--modal-bg);
+  color: var(--fg);
+  box-shadow: 0 20px 60px var(--card-shadow);
+  overflow-y: auto;
+}
+#chapterRemediateModal[open] {
+  display: block;
+}
+#chapterRemediateModal::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+#chapterRemediateModal h1 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+#chapterRemediateModal h2 {
+  font-size: 1rem;
+  margin: 0 0 0.4rem;
+}
+#remediateIntro {
+  margin-top: 0;
+}
+.remediate-option {
+  padding-top: 1.1rem;
+  margin-top: 1.1rem;
+  border-top: 1px solid var(--card-border);
+}
+.remediate-option > .muted {
+  font-size: 0.85rem;
+}
+.remediate-toc-entries {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+}
+.remediate-toc-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+}
+.remediate-toc-entry + .remediate-toc-entry {
+  border-top: 1px solid var(--card-border);
+}
+.remediate-manual-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.remediate-manual-row label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.remediate-manual-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+#remediateManualPage {
+  width: 5.5rem;
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  color: var(--field-fg);
+  background: var(--field-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--roundness);
+}
+.danger {
+  background: var(--nord11);
+  border-color: var(--nord11);
+  color: var(--nord6);
 }

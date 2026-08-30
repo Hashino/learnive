@@ -707,6 +707,18 @@ pub struct OutlineItemView {
     /// don't grow a field their outline never set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) mode: Option<&'static str>,
+    /// True for a `Chapter` item `source::match_chapter` could not place
+    /// anywhere in its book's confirmed table of contents (S27g's matching
+    /// pass already ran — the parent's `expansion` is `Expanded`, not still
+    /// `ChaptersProposed` — and still left `resolved_page: None`).
+    /// Omitted (never `true`) for every other item, and for a chapter
+    /// still waiting on that pass — a book with no confirmed TOC yet is
+    /// "not resolved yet", not "failed to resolve", and showing the same
+    /// remediation UI for both would train the learner to ignore it.
+    /// Drives the client's terminal remediation card: pick the page by
+    /// hand, skip the whole book, or restart cold start.
+    #[serde(default)]
+    pub(super) chapter_match_failed: bool,
 }
 
 #[derive(Serialize)]
@@ -838,6 +850,18 @@ pub(super) fn outline_view(
                     }
                 }
             };
+            // A chapter's parent is a `Book`/`Article` whose `expansion`
+            // reaching `Expanded` means the matching pass actually ran
+            // (not just proposed) — see `chapter_match_failed`'s doc
+            // comment for why "not run yet" must not read the same as
+            // "ran and failed".
+            let chapter_match_failed = item.item_type == OutlineItemType::Chapter
+                && item.resolved_page.is_none()
+                && item
+                    .parent_id
+                    .as_deref()
+                    .and_then(|pid| items.iter().find(|i| i.id == pid))
+                    .is_some_and(|book| book.expansion == ExpansionState::Expanded);
             OutlineItemView {
                 id: item.id.clone(),
                 title: item.title.clone(),
@@ -847,6 +871,7 @@ pub(super) fn outline_view(
                     NodeMode::Review => Some("review"),
                     NodeMode::Learn => None,
                 },
+                chapter_match_failed,
             }
         })
         .collect())

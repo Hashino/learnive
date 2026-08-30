@@ -706,6 +706,112 @@ pub async fn skip_node(
     }))
 }
 
+/// Terminal remediation for a chapter `source::match_chapter` could not
+/// place against the book's confirmed table of contents (S27g's matching
+/// pass ran — `ChaptersProposed` → `Expanded` — and still left
+/// `resolved_page: None`): the user picks the page directly, skips the
+/// whole book, or restarts cold start. This handler is the "skip the whole
+/// book" arm.
+///
+/// Deliberately its own endpoint rather than looping [`skip_node`] over the
+/// book's children client-side: a `Chapter` chains on the one before it
+/// (S27g), so every chapter past the first is `"locked"` before the reader
+/// reaches it, and `skip_node` refuses a locked node on principle ("skipping
+/// something you were never able to reach carries no real signal" — true
+/// for an ordinary skip, false here, where the user is abandoning the whole
+/// book on purpose). This appends `NodeSkipped` unconditionally for every
+/// direct `Chapter` child, no locked check.
+///
+/// Nothing is appended for the book item itself: [`engine::effective_state`]
+/// already synthesizes `Demonstrated` for a container once every direct
+/// child is `Demonstrated`/`Skipped` — the exact "fully skipped book" case
+/// its own doc comment names — so skipping every child is already sufficient
+/// for the reading list to unlock past it.
+pub async fn skip_book(
+    State(state): State<AppState>,
+    Path((doc_id, item_id)): Path<(String, String)>,
+) -> Result<Json<OutlineResp>, ApiError> {
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
+    let outline: engine::Outline =
+        serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let book = outline
+        .items
+        .iter()
+        .find(|i| i.id == item_id)
+        .ok_or_else(|| ApiError::BadRequest("unknown outline item".to_string()))?;
+    if !matches!(
+        book.item_type,
+        engine::OutlineItemType::Book | engine::OutlineItemType::Article
+    ) {
+        return Err(ApiError::BadRequest(
+            "only a book or article can be skipped this way".to_string(),
+        ));
+    }
+    let children: Vec<String> = outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(item_id.as_str()))
+        .map(|i| i.id.clone())
+        .collect();
+    if children.is_empty() {
+        return Err(ApiError::BadRequest(
+            "this book has no chapters to skip yet".to_string(),
+        ));
+    }
+
+    let event_log = state.store.event_log(&doc_id)?;
+    for child_id in &children {
+        if let Err(e) = event_log.append(Some(child_id), EventKind::NodeSkipped) {
+            eprintln!("event log append failed: {e}");
+        }
+    }
+    spawn_profile_distillation(state.clone(), doc_id.clone(), false);
+
+    let items = outline_view(&state, &doc_id, &outline)?;
+    let suggested_revisit = suggested_revisit(&state, &doc_id)?;
+    Ok(Json(OutlineResp {
+        items,
+        suggested_revisit,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ResolvedPageReq {
+    pub page: usize,
+}
+
+/// Terminal remediation, "pick the page yourself" arm — see [`skip_book`]'s
+/// doc comment for the other two arms of the same decision. Sets a
+/// `Chapter` item's `resolved_page` directly, the same field
+/// `source::match_chapter` would have written on a successful automatic
+/// match; nothing downstream needs to know this one came from the user
+/// instead (citation deep-links, once S27j exists, read this field either
+/// way).
+pub async fn set_resolved_page(
+    State(state): State<AppState>,
+    Path((doc_id, item_id)): Path<(String, String)>,
+    Json(req): Json<ResolvedPageReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            let item = outline
+                .items
+                .iter_mut()
+                .find(|i| i.id == item_id)
+                .ok_or_else(|| "unknown outline item".to_string())?;
+            if item.item_type != engine::OutlineItemType::Chapter {
+                return Err("only a chapter's page can be set this way".to_string());
+            }
+            item.resolved_page = Some(req.page);
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// One interaction-layer item, as shown to the client (§4.3) — the same
 /// `body_html` the append-only layer already stores, just retagged for
 /// display; nothing here is regraded or re-served as gradeable.

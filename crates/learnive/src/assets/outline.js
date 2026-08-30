@@ -89,11 +89,17 @@ function renderOutline() {
       it.id === state.currentId ? "current" : "",
       "state-" + it.state,
       it.mode === "review" ? "mode-review" : "",
+      it.chapter_match_failed ? "match-failed" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    const badge =
-      it.state === "locked" ? " 🔒" : it.state === "demonstrated" ? " ✓" : "";
+    const badge = it.chapter_match_failed
+      ? " ⚠"
+      : it.state === "locked"
+        ? " 🔒"
+        : it.state === "demonstrated"
+          ? " ✓"
+          : "";
     const reviewBadge = it.mode === "review" ? " " + t("prereq.reviewBadge") : "";
     const children = renderLevel(it.id);
     return (
@@ -121,7 +127,13 @@ function renderOutline() {
     .querySelectorAll(".outline-row[data-id]")
     .forEach((row) => {
       const it = state.allItems.find((i) => i.id === row.dataset.id);
-      if (it && it.state !== "locked") {
+      // A chapter S27g's matching pass could not place is "locked" (no
+      // resolved_page means nothing to generate) but not stuck: it opens
+      // the remediation modal (remediate.js) instead of the ordinary
+      // read/generate path.
+      if (it && it.chapter_match_failed) {
+        row.addEventListener("click", () => openChapterRemediate(it.id));
+      } else if (it && it.state !== "locked") {
         row.addEventListener("click", () => openNode(it.id));
       }
     });

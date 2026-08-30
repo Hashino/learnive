@@ -3000,6 +3000,193 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
 }
 
 #[tokio::test]
+async fn chapter_match_failure_offers_manual_page_or_whole_book_skip() {
+    // The terminal remediation for a `Chapter` that `source::match_chapter`
+    // could never place (S27g) — the user's own 2026-08-30 spec: pick the
+    // page directly, skip the whole book, or restart. This test pins the
+    // first two; "restart" is a plain client-side re-run of cold start with
+    // the document's stored topic and has no route of its own.
+    //
+    // The matching pass itself needs a real PDF + confirmed TOC to exercise
+    // end to end (see the S27g live test in `engine.rs`), which is out of
+    // scope for a router-level test — this one starts from the OUTCOME a
+    // failed match leaves behind (`expansion: expanded`,
+    // `resolved_page: null`), written directly to `outline.json` the same
+    // way `ensure_document_grounded` would have, and exercises everything
+    // downstream of that: the view flag, and both remediation endpoints.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
+                {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+            ]},
+            {"id":"after","title":"After the book","action":"learn","children":[]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    // Simulate `ensure_document_grounded` having run and matched c1 but not
+    // c2 — the exact shape a real match_chapter pass leaves behind.
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            for item in &mut outline.items {
+                if item.id == "book1" {
+                    item.expansion = crate::engine::ExpansionState::Expanded;
+                }
+                if item.id == "c1" {
+                    item.resolved_page = Some(42);
+                }
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    let find_item = |items: &serde_json::Value, id: &str| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it["id"] == id)
+            .unwrap_or_else(|| panic!("no item {id} in {items}"))
+            .clone()
+    };
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // c1 matched: no remediation flag.
+    assert_eq!(
+        find_item(&outline["items"], "c1")["chapter_match_failed"],
+        serde_json::Value::Bool(false)
+    );
+    // c2 did not: the flag the client keys its remediation card on.
+    assert_eq!(
+        find_item(&outline["items"], "c2")["chapter_match_failed"],
+        serde_json::Value::Bool(true)
+    );
+
+    // --- Arm 1: pick the page yourself ------------------------------------
+    let (status, _) = call(authed(
+        "PUT",
+        &format!("/api/documents/{doc_id}/outline/c2/resolved_page"),
+        r#"{"page":88}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let c2 = find_item(&outline["items"], "c2");
+    assert_eq!(c2["chapter_match_failed"], serde_json::Value::Bool(false));
+
+    // Only a chapter's page can be set this way — the book id must be
+    // refused, not silently accepted.
+    let (status, _) = call(authed(
+        "PUT",
+        &format!("/api/documents/{doc_id}/outline/book1/resolved_page"),
+        r#"{"page":1}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // --- Arm 2: skip the whole book, on a SECOND document -----------------
+    // A fresh document instead of continuing the one above: c1 there is
+    // already resolved and c2 already hand-picked, so neither would still
+    // be "locked" — this arm specifically needs c2 locked (chained after
+    // c1, unresolved) to prove `skip_book` does NOT go through `skip_node`'s
+    // locked check.
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
+                {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+            ]},
+            {"id":"after","title":"After the book","action":"learn","children":[]}
+        ]}"#,
+    ))
+    .await;
+    let created2: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id2 = created2["doc_id"].as_str().unwrap().to_string();
+    // c2 is locked (chained after c1, which has no event yet) — the case
+    // that would defeat a naive "loop skip_node over the children" client.
+    assert_eq!(
+        find_item(&created2["items"], "c2")["state"],
+        serde_json::json!("locked")
+    );
+
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id2}/outline/book1/skip_book"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id2}/outline"),
+        "",
+    ))
+    .await;
+    let outline2: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // Every child skipped, no event needed on the book id itself —
+    // `effective_state` synthesizes "demonstrated" from settled children.
+    assert_eq!(
+        find_item(&outline2["items"], "book1")["state"],
+        serde_json::json!("demonstrated")
+    );
+    assert_eq!(
+        find_item(&outline2["items"], "after")["state"],
+        serde_json::json!("available")
+    );
+
+    // A book with no chapter children yet is refused, not a silent no-op.
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"fractions","objective_text":"Learn fractions","nodes":[{"id":"n0","title":"Fractions","action":"learn","children":[]}]}"#,
+    ))
+    .await;
+    let created3: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id3 = created3["doc_id"].as_str().unwrap().to_string();
+    let (status, _) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id3}/outline/n0/skip_book"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn next_topic_appends_a_new_epoch_without_touching_the_first() {
     // §S15c ("what are we learning next?", PLAN.md's `TODO futuros`): once
     // a document's main line is fully demonstrated, confirming a new topic

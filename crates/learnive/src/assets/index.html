@@ -406,6 +406,76 @@
       </div>
     </dialog>
 
+    <!-- Chapter-match-failure remediation (S27g's designed-but-unbuilt
+         cascade step 3, PLAN.md ~line 823): shown when `source::match_chapter`
+         could not place a `Chapter` anywhere in its book's confirmed table of
+         contents (`OutlineItemView.chapter_match_failed`, cold_start.rs).
+         Same native-<dialog> idiom as `#settingsModal` above, opened from the
+         sidebar (`outline.js`'s badge click) instead of a nav-rail switch —
+         a failure can surface any time during ongoing reading, not just at
+         the acervo gate, so it isn't a sub-view of `#acervoGate`. Three
+         terminal options, never automatic: pick the page by hand (reusing
+         the acervo TOC-candidate read, `GET .../acervo/toc/{bookId}`), skip
+         the whole book (`POST .../skip_book` — see that handler's doc
+         comment for why it can't be a client-side loop over the ordinary
+         per-node skip), or restart cold start with the same topic
+         (`remediate.js`). -->
+    <dialog id="chapterRemediateModal" aria-label="Chapter not found">
+      <div class="settings-head">
+        <h1 data-i18n="remediate.title">Chapter not found</h1>
+        <button
+          type="button"
+          id="remediateCloseBtn"
+          class="icon-btn"
+          data-i18n-aria="settings.close"
+          aria-label="Close"
+        >×</button>
+      </div>
+      <p id="remediateIntro" class="muted"></p>
+
+      <section class="remediate-option">
+        <h2>
+          <span data-i18n="remediate.pickPage.heading">Pick the page yourself</span>
+          <span class="muted" data-i18n="remediate.recommended">(recommended)</span>
+        </h2>
+        <p id="remediateTocStatus" class="muted"></p>
+        <ol id="remediateTocEntries" class="remediate-toc-entries"></ol>
+        <div class="remediate-manual-row">
+          <label for="remediateManualPage" data-i18n="remediate.pickPage.manualLabel">
+            Know the page number? Enter it directly
+          </label>
+          <div class="remediate-manual-controls">
+            <input type="number" id="remediateManualPage" min="1" data-i18n-placeholder="remediate.pickPage.manualPlaceholder" placeholder="Page" />
+            <button type="button" id="remediateManualBtn" data-i18n="remediate.pickPage.manualButton">
+              Confirm
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="remediate-option">
+        <h2 data-i18n="remediate.skipBook.heading">Skip this book</h2>
+        <p class="muted" data-i18n="remediate.skipBook.desc">
+          Marks every chapter in this book as skipped and moves on. You can revisit it later.
+        </p>
+        <button type="button" id="remediateSkipBookBtn" class="danger" data-i18n="remediate.skipBook.button">
+          Skip the whole book
+        </button>
+      </section>
+
+      <section class="remediate-option">
+        <h2 data-i18n="remediate.restart.heading">Restart</h2>
+        <p class="muted" data-i18n="remediate.restart.desc">
+          Starts a fresh reading list for the same topic from scratch.
+        </p>
+        <button type="button" id="remediateRestartBtn" data-i18n="remediate.restart.button">
+          Restart the process
+        </button>
+      </section>
+
+      <p id="remediateStatus" class="muted"></p>
+    </dialog>
+
     <!-- Load order is load-bearing: core.js first (token, state, helpers),
          node.js last (it calls boot()). Classic scripts, not ES modules —
          module sub-imports would be fetched without the ?token query and the
@@ -416,6 +486,7 @@
     <script src="/assets/documents.js?token={{TOKEN}}"></script>
     <script src="/assets/acervo.js?token={{TOKEN}}"></script>
     <script src="/assets/outline.js?token={{TOKEN}}"></script>
+    <script src="/assets/remediate.js?token={{TOKEN}}"></script>
     <script src="/assets/reading.js?token={{TOKEN}}"></script>
     <script src="/assets/node.js?token={{TOKEN}}"></script>
   </body>

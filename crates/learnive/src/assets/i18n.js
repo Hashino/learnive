@@ -189,6 +189,28 @@ const I18N = {
     "error.prefix": "Error: ",
     "derived.unconfigured": "Not connected yet — no model configured.",
     "derived.models": "Models — fast: {0} · robust: {1}",
+    // Chapter-match-failure remediation (S27g, PLAN.md ~line 823)
+    "remediate.title": "Chapter not found",
+    "remediate.intro":
+      "“{0}” in “{1}” couldn't be matched to a page automatically.",
+    "remediate.recommended": "(recommended)",
+    "remediate.pickPage.heading": "Pick the page yourself",
+    "remediate.pickPage.loading": "Loading candidate chapters…",
+    "remediate.pickPage.empty": "No candidates with a page number were found — enter one directly below.",
+    "remediate.pickPage.page": "page {0}",
+    "remediate.pickPage.useThis": "Select",
+    "remediate.pickPage.manualLabel": "Know the page number? Enter it directly",
+    "remediate.pickPage.manualPlaceholder": "Page",
+    "remediate.pickPage.manualButton": "Confirm",
+    "remediate.skipBook.heading": "Skip this book",
+    "remediate.skipBook.desc":
+      "Marks every chapter in this book as skipped and moves on. You can revisit it later.",
+    "remediate.skipBook.button": "Skip the whole book",
+    "remediate.skipBook.confirm": "Click again to confirm",
+    "remediate.restart.heading": "Restart",
+    "remediate.restart.desc": "Starts a fresh reading list for the same topic from scratch.",
+    "remediate.restart.button": "Restart the process",
+    "remediate.restart.confirm": "Click again to confirm",
   },
   "pt-BR": {
     "nav.allDocuments": "Todos os documentos",
@@ -353,6 +375,28 @@ const I18N = {
     "error.prefix": "Erro: ",
     "derived.unconfigured": "Ainda não conectado — nenhum modelo configurado.",
     "derived.models": "Modelos — rápido: {0} · robusto: {1}",
+    // Correção de capítulo sem correspondência (S27g, PLAN.md ~linha 823)
+    "remediate.title": "Capítulo não encontrado",
+    "remediate.intro":
+      "“{0}” em “{1}” não pôde ser associado automaticamente a uma página.",
+    "remediate.recommended": "(recomendado)",
+    "remediate.pickPage.heading": "Escolha a página você mesmo",
+    "remediate.pickPage.loading": "Carregando capítulos candidatos…",
+    "remediate.pickPage.empty": "Nenhum candidato com número de página foi encontrado — digite uma abaixo.",
+    "remediate.pickPage.page": "página {0}",
+    "remediate.pickPage.useThis": "Selecionar",
+    "remediate.pickPage.manualLabel": "Sabe o número da página? Digite diretamente",
+    "remediate.pickPage.manualPlaceholder": "Página",
+    "remediate.pickPage.manualButton": "Confirmar",
+    "remediate.skipBook.heading": "Pular este livro",
+    "remediate.skipBook.desc":
+      "Marca todos os capítulos deste livro como pulados e segue em frente. Você pode revisitá-lo depois.",
+    "remediate.skipBook.button": "Pular o livro inteiro",
+    "remediate.skipBook.confirm": "Clique novamente para confirmar",
+    "remediate.restart.heading": "Reiniciar",
+    "remediate.restart.desc": "Começa uma nova lista de leitura do mesmo tema, do zero.",
+    "remediate.restart.button": "Reiniciar o processo",
+    "remediate.restart.confirm": "Clique novamente para confirmar",
   },
 };
 
