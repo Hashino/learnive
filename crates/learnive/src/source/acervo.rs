@@ -751,19 +751,42 @@ pub fn build_index_cache(
 /// corpus-shaped `Retriever` this deliberately doesn't reuse (module doc).
 /// Errors only on I/O/corruption; an empty/missing cache is the caller's
 /// job to have ruled out via [`IndexCheck`] first.
+///
+/// `page_range` narrows the candidate pool to one chapter (S27g item 1,
+/// PLAN.md, 2026-08-30): `Some((start, end))`, both 1-based and inclusive,
+/// `end: None` meaning "to the end of the book" (the last chapter has no
+/// next sibling to bound it). Filtering happens **before** ranking/`truncate`
+/// — narrowing after truncation would often hand back zero chunks instead of
+/// the book's own best passage. An empty result after filtering (a bad
+/// `resolved_page`, a range that lands between two chunks) falls back to the
+/// **whole book** rather than returning nothing: SPEC's "no source coverage
+/// ⇒ no generation" must never be triggered by a narrowing bug, and this
+/// costs no extra tokens either way (§15's free-tier corollary).
 pub fn search_index_cache(
     index_cache_dir: &Path,
     content_hash: &str,
     embedder: &Embedder,
     query: &str,
     k: usize,
+    page_range: Option<(usize, Option<usize>)>,
 ) -> std::io::Result<Vec<(usize, String, f32)>> {
     let path = index_cache_dir.join(format!("{content_hash}.json"));
     let json = fs::read(&path)?;
     let cached: Vec<CachedChunk> = serde_json::from_slice(&json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let pool: Vec<CachedChunk> = match page_range {
+        Some((start, end)) => {
+            let scoped: Vec<CachedChunk> = cached
+                .iter()
+                .filter(|c| c.page >= start && end.is_none_or(|e| c.page <= e))
+                .cloned()
+                .collect();
+            if scoped.is_empty() { cached } else { scoped }
+        }
+        None => cached,
+    };
     let query_vector = embedder.embed(query);
-    let mut scored: Vec<(usize, String, f32)> = cached
+    let mut scored: Vec<(usize, String, f32)> = pool
         .into_iter()
         .map(|c| {
             let score = cosine(&query_vector, &c.vector);
@@ -1698,6 +1721,72 @@ mod tests {
         assert_eq!(report.items[0].index, IndexCheck::Cached { path: built });
     }
 
+    /// S27g item 1 (PLAN.md, 2026-08-30): `page_range` must actually exclude
+    /// chunks outside it, not just carry the parameter. Uses `Embedder::Mock`
+    /// (no model download, unlike the sibling test below) — the mock's
+    /// hashed-bag-of-words vectors are enough to prove filtering, since this
+    /// test only needs "which pages came back", not "which ranked first".
+    #[test]
+    fn search_index_cache_excludes_pages_outside_the_range() {
+        let (mut doc, _pages) = build_document(
+            &[
+                "apple banana orchard fruit",
+                "car truck engine highway",
+                "dog cat kennel leash",
+                "sun moon star galaxy",
+            ],
+            Some("Four Topics"),
+            None,
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "four.pdf");
+        let cache_dir = index_dir(&tmp);
+
+        let path = lib.root().join("four.pdf");
+        let bytes = fs::read(&path).unwrap();
+        let hash = content_hash(&bytes);
+        let pdf = read_pdf(&path).unwrap();
+
+        let embedder = Embedder::Mock;
+        build_index_cache(&pdf, &hash, &cache_dir, &embedder).expect("build cache");
+
+        // Narrowed to pages 2..=3 ("car truck..." / "dog cat...") — page 1
+        // and page 4's chunks must never appear, regardless of query.
+        let hits = search_index_cache(
+            &cache_dir,
+            &hash,
+            &embedder,
+            "car truck dog cat",
+            4,
+            Some((2, Some(3))),
+        )
+        .expect("search");
+        assert!(!hits.is_empty(), "expected hits within the narrowed range");
+        for (page, _text, _score) in &hits {
+            assert!(
+                (2..=3).contains(page),
+                "page {page} fell outside the requested range"
+            );
+        }
+
+        // A range that matches nothing in the cache (bad `resolved_page`,
+        // e.g. from a stale match) must fall back to the whole book, not to
+        // an empty/failed grounding — "no source coverage ⇒ no generation"
+        // must never be tripped by a narrowing bug.
+        let fallback_hits = search_index_cache(
+            &cache_dir,
+            &hash,
+            &embedder,
+            "car truck dog cat",
+            4,
+            Some((100, Some(200))),
+        )
+        .expect("search");
+        assert!(
+            !fallback_hits.is_empty(),
+            "an out-of-bounds range must fall back to the whole book, not return nothing"
+        );
+    }
+
     /// S27m (PLAN.md, 2026-08-29): proves the read side of the gate's
     /// grounding fix — a hit carries the **physical page** it actually came
     /// from (the gap the old `pdf.text`-chunked cache had no way to close),
@@ -1733,6 +1822,7 @@ mod tests {
             &embedder,
             "recursive functions in programming",
             2,
+            None,
         )
         .expect("search");
         assert!(!hits.is_empty(), "expected at least one hit");

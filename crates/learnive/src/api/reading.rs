@@ -1679,6 +1679,70 @@ pub(super) async fn ensure_document_grounded(
     Ok(())
 }
 
+/// Walks from `item` up through `parent_id` to the nearest `Chapter`
+/// ancestor — `item` itself if it already is one, `None` if nothing between
+/// it and the document root is a `Chapter` (a `Node` hung straight off a
+/// `Book`, or off nothing at all). S27g item 2 (chapter→node splitting)
+/// isn't built yet, so today this is almost always `None` in practice; this
+/// function is written for the shape once that lands, and degrades to no
+/// narrowing until then — never an error.
+fn nearest_chapter<'a>(outline: &'a Outline, item: &OutlineItem) -> Option<&'a OutlineItem> {
+    if item.item_type == OutlineItemType::Chapter {
+        return outline.items.iter().find(|i| i.id == item.id);
+    }
+    let mut current = item.parent_id.clone();
+    while let Some(pid) = current {
+        let parent = outline.items.iter().find(|i| i.id == pid)?;
+        if parent.item_type == OutlineItemType::Chapter {
+            return Some(parent);
+        }
+        current = parent.parent_id.clone();
+    }
+    None
+}
+
+/// The page range (S27g item 1, PLAN.md, 2026-08-30) to narrow
+/// [`source::search_index_cache`] to, derived from `OutlineItem::resolved_page`
+/// — written by `source::match_chapter` during acervo validation and never
+/// read anywhere until now. `None` whenever narrowing isn't possible (no
+/// `Chapter` ancestor, or that chapter's page never resolved): the caller
+/// then searches the whole book exactly as before this slice, the same
+/// zero-token-cost fallback `search_index_cache` itself applies when a
+/// range excludes every cached chunk.
+///
+/// The upper bound comes from the **next sibling chapter's own
+/// `resolved_page`** (same `parent_id`, the smallest resolved page greater
+/// than this chapter's own) minus one, so a chapter's range never bleeds
+/// into the next one's text. `None` when there is no such sibling (the last
+/// chapter, or an unmatched one) — `search_index_cache` reads that as "to
+/// the end of the book", which is correct for the last chapter and, for an
+/// unmatched sibling, no worse than not knowing where it ends.
+///
+/// Deliberately reads `resolved_page` as a **physical** page number without
+/// any offset conversion: `source::toc::ResolvedTocEntry::page` (both the
+/// embedded-`/Outlines` path and the S27k heuristic-deduction path) and
+/// `CachedChunk::page` both document the same 1-based physical-page
+/// convention, confirmed by reading both doc comments before writing this
+/// function — a printed/label-page mismatch was the one thing that would
+/// have made this narrowing silently ground a chapter in the wrong text.
+fn chapter_page_range(outline: &Outline, item: &OutlineItem) -> Option<(usize, Option<usize>)> {
+    let chapter = nearest_chapter(outline, item)?;
+    let start = chapter.resolved_page?;
+    let end = outline
+        .items
+        .iter()
+        .filter(|i| {
+            i.item_type == OutlineItemType::Chapter
+                && i.parent_id == chapter.parent_id
+                && i.id != chapter.id
+        })
+        .filter_map(|i| i.resolved_page)
+        .filter(|&p| p > start)
+        .min()
+        .map(|next| next.saturating_sub(1));
+    Some((start, end))
+}
+
 /// The per-node half of S27m's gate: once [`ensure_document_grounded`] has
 /// passed for the whole document, resolves and retrieves THIS item's own
 /// grounding passages. A failure here after the document gate already
@@ -1732,8 +1796,16 @@ async fn ground_node(
     let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
     let hash = source::acervo::content_hash(&bytes);
 
-    let hits = source::search_index_cache(&index_cache_dir, &hash, &embedder, &item.title, 4)
-        .map_err(|e| format!("could not search the index for {filename}: {e}"))?;
+    let page_range = chapter_page_range(outline, item);
+    let hits = source::search_index_cache(
+        &index_cache_dir,
+        &hash,
+        &embedder,
+        &item.title,
+        4,
+        page_range,
+    )
+    .map_err(|e| format!("could not search the index for {filename}: {e}"))?;
     if hits.is_empty() {
         return Err(format!(
             "internal error: \"{}\" produced no retrievable content — this should not happen after the acervo gate passed",
