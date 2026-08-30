@@ -317,6 +317,40 @@ pub fn search_subject(topic: &str) -> Vec<ChatMessage> {
     ]
 }
 
+/// Reads a printed contents/sumário page's text and asks for its entries as
+/// structured data (S27k, PLAN.md, 2026-08-29) — the middle rung of §11.1's
+/// TOC cascade, between embedded bookmarks and the heading-line heuristic.
+/// Fast tier: a few KB of pre-textual input (never the book's body — see
+/// `source::toc::contents_pages_text`), one call per PDF, cached forever by
+/// content hash once resolved (`toc_confirm.rs`) — cheap enough that
+/// correctness of instruction-following matters more than robust-tier
+/// judgment.
+///
+/// Deliberately asks for the PRINTED page number verbatim, never asks the
+/// model to compute a physical offset itself — `source::toc::resolve_toc`
+/// does that arithmetic against the real extracted pages, which is the
+/// entire point of this cascade step (a model has no way to know how printed
+/// and physical pagination diverge in a given book).
+pub fn propose_toc(contents_page_text: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "You will be given the raw extracted text of a book or article's \
+             printed table of contents / sumário page(s). Return a JSON \
+             array, one object per entry, in the exact order they appear: \
+             {\"title\":\"...\",\"page\":N} — `title` is the entry's title \
+             exactly as printed (drop leading numbering like \"1.\" or \
+             \"Chapter 1:\" if present, keep the actual title text); `page` \
+             is the page number PRINTED next to that entry, as an integer, \
+             or `null` if the line has no trailing page number you can read. \
+             Include every entry you can read, front matter (preface, \
+             introduction) included — do not skip anything or invent \
+             entries that aren't there. Respond with ONLY the JSON array, \
+             nothing else.",
+        ),
+        ChatMessage::user(contents_page_text.to_string()),
+    ]
+}
+
 /// Formats retrieved passages into a user-message block the model can cite
 /// from. Empty string when there is no grounding (index still filling, §14).
 pub fn sources_block(sources: &str) -> String {

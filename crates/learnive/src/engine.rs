@@ -413,6 +413,23 @@ pub async fn propose_source_title(ai: &Ai, topic: &str) -> Result<String, Engine
     Ok(text.trim().trim_matches('"').to_string())
 }
 
+/// Reads a PDF's printed contents/sumário page (S27k, PLAN.md, 2026-08-29) —
+/// the deduction step between embedded bookmarks and the heading heuristic
+/// in §11.1's TOC cascade. `contents_page_text` is
+/// `source::toc::contents_pages_text`'s output, never the book's body. Fast
+/// tier (see `prompt::propose_toc`'s doc for why). A parse failure degrades
+/// to an empty list rather than an error — the caller (the acervo gate) is
+/// expected to fall through to the heading heuristic on either an empty
+/// list or an `Err` here, exactly as it already does when there's no
+/// contents page to try in the first place.
+pub async fn propose_toc(
+    ai: &Ai,
+    contents_page_text: &str,
+) -> Result<Vec<crate::source::toc::TocLlmEntry>, EngineError> {
+    let text = collect(ai, Tier::Fast, prompt::propose_toc(contents_page_text)).await?;
+    parse::toc_entries(&text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))
+}
+
 /// One item of the reading list an objective needs (S27e, PLAN.md §27,
 /// replacing the pre-pivot concept-decomposition tree this type used to
 /// describe alone — see git history / PLAN.md's S27e entry for that old

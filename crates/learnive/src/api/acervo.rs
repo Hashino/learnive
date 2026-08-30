@@ -51,6 +51,12 @@ fn index_cache_dir(state: &AppState) -> PathBuf {
         .join("library")
 }
 
+fn toc_confirm_dir(state: &AppState) -> PathBuf {
+    PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("toc")
+}
+
 fn manual_match_store(state: &AppState) -> Result<ManualMatchStore, ApiError> {
     ManualMatchStore::open(state.data_dir.as_ref())
         .map_err(|e| ApiError::Internal(format!("could not open manual-match store: {e}")))
@@ -210,6 +216,7 @@ pub async fn get_acervo_report(
         .to_string_lossy()
         .into_owned();
     let idx_dir = index_cache_dir(&state);
+    let toc_dir = toc_confirm_dir(&state);
     let ids: Vec<String> = expected.iter().map(|(id, _)| id.clone()).collect();
     let items_only: Vec<ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
 
@@ -236,7 +243,7 @@ pub async fn get_acervo_report(
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<source::acervo::AcervoProgress>();
         let mut task = spawn_blocking(move || {
-            source::acervo::validate_acervo_with_progress(&lib, &items_only, &idx_dir, move |p| {
+            source::acervo::validate_acervo_with_progress(&lib, &items_only, &idx_dir, &toc_dir, move |p| {
                 let _ = tx.send(p);
             })
         });
@@ -304,6 +311,7 @@ pub async fn get_acervo_report(
                 let needs_toc_confirmation = r.toc.needs_user_confirmation();
                 let toc = match &r.toc {
                     source::TocCheck::Embedded { .. } => "embedded",
+                    source::TocCheck::Deduced { .. } => "deduced",
                     source::TocCheck::Heuristic { .. } => "heuristic",
                     source::TocCheck::Unavailable => "unavailable",
                     source::TocCheck::Skipped => "skipped",
@@ -605,6 +613,10 @@ pub async fn put_acervo_toc(
         .map(|e| ConfirmedTocEntry {
             title: e.title,
             page: e.page,
+            // A full manual submission is always a user correction (S27k,
+            // never overwritten by a later deduction pass — see
+            // `TocConfirmStore::put_deduced`).
+            inferred: false,
         })
         .collect();
 
@@ -612,7 +624,13 @@ pub async fn put_acervo_toc(
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
         let hash = source::acervo::content_hash(&bytes);
         toc_store
-            .put(&hash, &ConfirmedToc { entries })
+            .put(
+                &hash,
+                &ConfirmedToc {
+                    entries,
+                    unresolved: Vec::new(),
+                },
+            )
             .map_err(|e| e.to_string())
     })
     .await

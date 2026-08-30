@@ -75,7 +75,7 @@ enum LabelStyle {
 /// etc.). Falls back to the plain 1-based physical page number when the PDF
 /// has no `/PageLabels`, which is the common case and must never be an
 /// error.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PageMap {
     pub page_count: usize,
     labels: Vec<PageLabelRun>,

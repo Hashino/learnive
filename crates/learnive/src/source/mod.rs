@@ -74,6 +74,7 @@ mod matching;
 pub mod mock;
 pub mod pdf;
 pub mod scihub;
+pub mod toc;
 pub mod toc_confirm;
 
 pub use acervo::{

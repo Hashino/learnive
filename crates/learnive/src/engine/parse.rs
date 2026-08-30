@@ -87,6 +87,16 @@ pub(crate) fn extract_json(text: &str) -> Option<&str> {
     }
 }
 
+/// A model's read of a printed contents page (S27k) — `[{"title":"...",
+/// "page":N|null}, ...]`, mapped straight onto `source::toc::TocLlmEntry`
+/// (same schema, no wrapping needed). `None` on anything unparseable —
+/// `engine::propose_toc`'s caller degrades to the heading heuristic on this,
+/// not a hard failure (SPEC: no PDF is ever rejected over its TOC).
+pub fn toc_entries(text: &str) -> Option<Vec<crate::source::toc::TocLlmEntry>> {
+    let json = extract_json(text)?;
+    serde_json::from_str(json).ok()
+}
+
 pub fn assessment(text: &str) -> Result<Assessment, EngineError> {
     let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
     serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))

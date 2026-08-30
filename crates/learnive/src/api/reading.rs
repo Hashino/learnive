@@ -1340,6 +1340,9 @@ pub(super) async fn ensure_document_grounded(
     let index_cache_dir = std::path::PathBuf::from(state.data_dir.as_ref())
         .join("index")
         .join("library");
+    let toc_confirm_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("toc");
 
     let items: Vec<source::ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
     // `validate_acervo` re-parses every PDF in the library (`pdf-extract` +
@@ -1350,8 +1353,14 @@ pub(super) async fn ensure_document_grounded(
     let lib_for_validate = library.clone();
     let items_for_validate = items.clone();
     let idx_dir_for_validate = index_cache_dir.clone();
+    let toc_dir_for_validate = toc_confirm_dir.clone();
     let report = spawn_blocking(move || {
-        source::validate_acervo(&lib_for_validate, &items_for_validate, &idx_dir_for_validate)
+        source::validate_acervo(
+            &lib_for_validate,
+            &items_for_validate,
+            &idx_dir_for_validate,
+            &toc_dir_for_validate,
+        )
     })
     .await
     .map_err(|e| format!("acervo validation task panicked: {e}"))?
@@ -1408,10 +1417,60 @@ pub(super) async fn ensure_document_grounded(
         let path = library.root().join(&filename);
         let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
         let hash = source::acervo::content_hash(&bytes);
-        let pdf =
-            source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
         source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
             .map_err(|e| format!("could not index {filename}: {e}"))?;
+    }
+
+    // S27k: the printed-contents-page deduction pass. Runs here, not inside
+    // `source::acervo::check_toc` (that module stays free of `Ai`/tokio) —
+    // this is the one call site in the whole gate that already has both an
+    // `Ai` provider and blocking file I/O available. Never gates anything
+    // (`TocCheck` is never in `blocking_failures`, per SPEC's "nenhum PDF é
+    // rejeitado por não ter bookmarks") and never hard-fails the document:
+    // a missing/unconfigured provider, an unreadable contents page, or a
+    // resolution below `is_resolution_acceptable`'s floor all degrade
+    // silently to the existing heading-heuristic/user-confirmation net.
+    let needs_toc_deduction: Vec<source::ExpectedItem> = report
+        .items
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.toc,
+                source::TocCheck::Heuristic { .. } | source::TocCheck::Unavailable
+            )
+        })
+        .map(|r| r.expected.clone())
+        .collect();
+    if !needs_toc_deduction.is_empty() {
+        let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir)
+            .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
+        let ai = state.ai.load_full();
+        for item in &needs_toc_deduction {
+            let Ok(Some(filename)) = source::resolve_matched_filename(&library, &manual, item)
+            else {
+                continue;
+            };
+            let path = library.root().join(&filename);
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(pdf) = source::read_pdf(&path) else {
+                continue;
+            };
+            let hash = source::acervo::content_hash(&bytes);
+            let Some(range) = source::toc::find_contents_pages(&pdf) else {
+                continue;
+            };
+            let contents_text = source::toc::contents_pages_text(&pdf, range);
+            let Ok(llm_entries) = engine::propose_toc(&ai, &contents_text).await else {
+                continue;
+            };
+            let resolution = source::toc::resolve_toc(&pdf, &llm_entries, range.1);
+            if source::toc::is_resolution_acceptable(&resolution) {
+                let _ = toc_confirm.put_deduced(&hash, &resolution);
+            }
+        }
     }
 
     Ok(())

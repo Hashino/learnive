@@ -71,6 +71,7 @@ use super::local::{LibraryEntry, LocalPdfSource};
 use super::manual_match::ManualMatchStore;
 use super::matching::{normalize, primary_title, surname_of};
 use super::pdf::{OutlineEntry, PdfDocument, read_pdf};
+use super::toc_confirm::TocConfirmStore;
 use crate::retrieval::{Embedder, chunk_text, cosine};
 
 /// A minimal, standalone description of one reading-list item to validate
@@ -142,6 +143,15 @@ pub enum TocCheck {
     Embedded {
         entries: usize,
     },
+    /// `source::toc`'s deduction cascade (S27k) read the printed contents
+    /// page and placed `resolved` entries on real physical pages;
+    /// `unresolved` is however many it could not place — the only thing
+    /// left for the S27f confirmation screen to ask about (never a blank
+    /// per-chapter form once this variant applies).
+    Deduced {
+        resolved: usize,
+        unresolved: usize,
+    },
     Heuristic {
         entries: usize,
     },
@@ -155,9 +165,14 @@ pub enum TocCheck {
 impl TocCheck {
     /// Whether this result still needs the S27f confirmation screen (SPEC's
     /// cascade step 3) before a chapter/section outline can be built from
-    /// it. True for anything short of a real embedded outline.
+    /// it. True for anything short of a real embedded outline or a fully
+    /// resolved S27k deduction (`Deduced` with nothing left `unresolved`).
     pub fn needs_user_confirmation(&self) -> bool {
-        !matches!(self, TocCheck::Embedded { .. })
+        match self {
+            TocCheck::Embedded { .. } => false,
+            TocCheck::Deduced { unresolved, .. } => *unresolved > 0,
+            _ => true,
+        }
     }
 }
 
@@ -286,8 +301,9 @@ pub fn validate_acervo(
     library: &LocalPdfSource,
     expected: &[ExpectedItem],
     index_cache_dir: impl AsRef<Path>,
+    toc_confirm_dir: impl AsRef<Path>,
 ) -> std::io::Result<AcervoReport> {
-    validate_acervo_with_progress(library, expected, index_cache_dir, |_| {})
+    validate_acervo_with_progress(library, expected, index_cache_dir, toc_confirm_dir, |_| {})
 }
 
 /// Which of the six checks is currently running for one item — surfaced so a
@@ -343,13 +359,23 @@ pub fn validate_acervo_with_progress(
     library: &LocalPdfSource,
     expected: &[ExpectedItem],
     index_cache_dir: impl AsRef<Path>,
+    toc_confirm_dir: impl AsRef<Path>,
     mut on_progress: impl FnMut(AcervoProgress),
 ) -> std::io::Result<AcervoReport> {
     let candidates = load_candidates(library)?;
     let index_cache_dir = index_cache_dir.as_ref();
+    let toc_confirm = TocConfirmStore::open_at(toc_confirm_dir)?;
     let items = expected
         .iter()
-        .map(|item| build_item_report(item, &candidates, index_cache_dir, &mut on_progress))
+        .map(|item| {
+            build_item_report(
+                item,
+                &candidates,
+                index_cache_dir,
+                &toc_confirm,
+                &mut on_progress,
+            )
+        })
         .collect();
     Ok(AcervoReport { items })
 }
@@ -385,6 +411,7 @@ fn build_item_report(
     item: &ExpectedItem,
     candidates: &[LibraryCandidate],
     index_cache_dir: &Path,
+    toc_confirm: &TocConfirmStore,
     on_progress: &mut impl FnMut(AcervoProgress),
 ) -> ItemReport {
     let tick = |phase: AcervoPhase, on_progress: &mut dyn FnMut(AcervoProgress)| {
@@ -412,7 +439,7 @@ fn build_item_report(
     tick(AcervoPhase::TextLayer, on_progress);
     let text_layer = check_text_layer(&cand.pdf);
     tick(AcervoPhase::Toc, on_progress);
-    let toc = check_toc(&cand.pdf);
+    let toc = check_toc(&cand.pdf, &cand.hash, toc_confirm);
     tick(AcervoPhase::PageMap, on_progress);
     let page_map = check_page_map(&cand.pdf);
     tick(AcervoPhase::Index, on_progress);
@@ -528,10 +555,24 @@ fn check_text_layer(pdf: &PdfDocument) -> TextLayerCheck {
     }
 }
 
-fn check_toc(pdf: &PdfDocument) -> TocCheck {
+/// `content_hash` is the candidate PDF's own hash — the same key
+/// `TocConfirmStore` is addressed by everywhere else, so a deduction pass
+/// run earlier (`api::acervo`'s async pre-pass, ahead of this synchronous
+/// six-check engine — this module stays free of `Ai`/tokio, S27k's own
+/// discipline note) shows up here without this function ever calling the
+/// model itself.
+fn check_toc(pdf: &PdfDocument, content_hash: &str, toc_confirm: &TocConfirmStore) -> TocCheck {
     if !pdf.outline.is_empty() {
         return TocCheck::Embedded {
             entries: count_outline_entries(&pdf.outline),
+        };
+    }
+    if let Some(confirmed) = toc_confirm.get(content_hash)
+        && (!confirmed.entries.is_empty() || !confirmed.unresolved.is_empty())
+    {
+        return TocCheck::Deduced {
+            resolved: confirmed.entries.len(),
+            unresolved: confirmed.unresolved.len(),
         };
     }
     let heuristic = heuristic_toc(pdf);
@@ -1041,6 +1082,10 @@ mod tests {
         tmp.path().join("data").join("index").join("library")
     }
 
+    fn toc_dir(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join("data").join("index").join("toc")
+    }
+
     // -- Presence -----------------------------------------------------
 
     #[test]
@@ -1052,7 +1097,8 @@ mod tests {
             kind: SourceKind::Book,
         }];
 
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items.len(), 1);
         let item = &report.items[0];
         assert_eq!(item.presence, PresenceCheck::Missing);
@@ -1079,7 +1125,8 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items[0].presence, PresenceCheck::Missing);
     }
 
@@ -1102,7 +1149,8 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Article, // sidestep the book page-count floor
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert_eq!(
             item.presence,
@@ -1134,7 +1182,8 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert!(
             matches!(item.identity, IdentityCheck::Mismatch { .. }),
@@ -1159,7 +1208,8 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert_eq!(item.identity, IdentityCheck::Match);
         assert_eq!(item.blocking_failures(), Vec::<&str>::new());
@@ -1181,7 +1231,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert!(matches!(
             report.items[0].text_layer,
             TextLayerCheck::Extractable { .. }
@@ -1202,7 +1253,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items[0].text_layer, TextLayerCheck::NoText);
         assert_eq!(report.items[0].blocking_failures(), vec!["text_layer"]);
     }
@@ -1236,7 +1288,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items[0].toc, TocCheck::Embedded { entries: 2 });
         assert!(!report.items[0].toc.needs_user_confirmation());
     }
@@ -1258,7 +1311,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert!(
             matches!(item.toc, TocCheck::Heuristic { entries } if entries >= 2),
@@ -1285,7 +1339,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert_eq!(item.toc, TocCheck::Unavailable);
         assert!(item.toc.needs_user_confirmation());
@@ -1308,7 +1363,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(
             report.items[0].page_map,
             PageMapCheck::PhysicalOnly { page_count: 3 }
@@ -1336,7 +1392,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(
             report.items[0].page_map,
             PageMapCheck::Labeled { page_count: 3 }
@@ -1355,7 +1412,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items[0].index, IndexCheck::Missing);
         // Missing index is reported but deliberately not a blocker in this
         // slice's scope (see the module doc's scope-reduction note).
@@ -1381,7 +1439,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, &cache_dir).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp)).expect("validate");
         assert!(matches!(report.items[0].index, IndexCheck::Cached { .. }));
     }
 
@@ -1414,7 +1472,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, &cache_dir).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp)).expect("validate");
         assert_eq!(report.items[0].index, IndexCheck::Cached { path: built });
     }
 
@@ -1487,7 +1545,8 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp)).expect("validate");
+        let report =
+            validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp)).expect("validate");
         let item = &report.items[0];
         assert!(item.passes(), "{item:?}");
         assert!(report.all_pass());
