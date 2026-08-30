@@ -1740,26 +1740,16 @@ body.source-open #annotationsLayer {
   font-size: 0.85rem;
 }
 /* Skip/restart: no heading, no description — just the two buttons side by
-   side, explanation left in the `title` tooltip. Colors inverted from the
-   normal solid button (transparent background, colored border/text) since
-   they read as traffic-light opposites — solid fill in both themes, same
-   fixed-nord-token convention as `.acervo-badge.found/.missing` and
-   `.prereq-tree`'s skip/review/learn segments above, not the
-   theme-swapping `--accent`/`--btn-bg`. */
+   side, explanation left in the `title` tooltip. Skip stays the ordinary
+   solid button (blue, `--btn-bg`, fixed nord10 in both themes); restart
+   gets `.danger` (solid red, fixed nord11) since it discards the current
+   document's progress. */
 .remediate-secondary-row {
   display: flex;
   gap: 0.6rem;
 }
 .remediate-secondary-row button {
   flex: 1;
-}
-.remediate-secondary-row .safe {
-  background: var(--nord14);
-  border-color: var(--nord14);
-  color: var(--nord0);
-}
-.remediate-secondary-row .safe:hover:not(:disabled) {
-  filter: brightness(1.08);
 }
 .remediate-toc-entries {
   list-style: none;
