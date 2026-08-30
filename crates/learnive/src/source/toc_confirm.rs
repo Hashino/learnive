@@ -47,6 +47,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ConfirmedTocEntry {
     pub title: String,
+    /// The entry's own printed chapter/section number (S27g, 2026-08-30,
+    /// `source::toc::ResolvedTocEntry::number`'s doc) — `None` for anything
+    /// confirmed by the user directly (`confirm_one` never asks for one) or
+    /// deduced from a book whose contents page carried no numbering.
+    /// [`match_chapter`] tries this first, before falling back to title.
+    #[serde(default)]
+    pub number: Option<String>,
     /// `None` for anything confirmed from the heuristic path — see the
     /// module doc's shape note.
     #[serde(default)]
@@ -148,6 +155,7 @@ impl TocConfirmStore {
             }
             toc.entries.push(ConfirmedTocEntry {
                 title: resolved.title.clone(),
+                number: resolved.number.clone(),
                 page: Some(resolved.page),
                 inferred: true,
             });
@@ -178,6 +186,7 @@ impl TocConfirmStore {
         toc.entries.retain(|e| e.title != title);
         toc.entries.push(ConfirmedTocEntry {
             title: title.to_string(),
+            number: None,
             page,
             inferred: false,
         });
@@ -187,6 +196,82 @@ impl TocConfirmStore {
     fn path_for(&self, content_hash: &str) -> PathBuf {
         self.dir.join(format!("{content_hash}.json"))
     }
+}
+
+/// Resolves an outline-proposed chapter/section (S27g's book→chapter
+/// contextual expansion, revised 2026-08-30 to elicit both a hierarchical
+/// number like `"2.2.1"` and a name — see `engine::prompt::propose_outline`'s
+/// doc for the full account of the reversal) against a book's own confirmed
+/// table of contents.
+///
+/// Number first: an exact match, after stripping everything but digits and
+/// dots (so `"§4.10"`, `"Ch. 4.10"`, `"4.10."` all normalize to `"4.10"`),
+/// is unambiguous within one printing and is trusted over the name. Falls
+/// back to the same lenient either-direction containment
+/// `source::matching::normalize` gives every other title comparison in
+/// `source` (`bibliography::plausible_match`, `acervo::candidate_matches`)
+/// when there's no proposed number, or the number matches nothing (a
+/// different edition's numbering, or the model was simply wrong) — a
+/// missing/wrong number must never block an otherwise-good name match.
+///
+/// Unlike `plausible_match` (a handful of catalog search results, title
+/// collisions unlikely), the name fallback here searches one book's ENTIRE
+/// table of contents, where a short, generic entry title ("Introduction",
+/// "Summary", "Functions") is common and can sit anywhere in the list.
+/// First-match-wins under either-direction containment is order-dependent
+/// and biased toward these short entries: `needle.contains(&hay)` is true
+/// the moment ANY short `hay` happens to be a substring of the proposed
+/// `name`, whether or not it's the entry the model meant. So among every
+/// entry that clears the containment bar, this picks the one with the
+/// LONGEST normalized title — the most specific match, and in particular
+/// the exact match when one exists (an exact title has `hay == needle`,
+/// which is always at least as long as any shorter substring competitor).
+/// (Flagged by review 2026-08-30 before this ever ran against a real,
+/// long table of contents; see `match_chapter_prefers_the_longer_of_two_containment_matches`.)
+///
+/// Returns `None`, not an error, when nothing clears the bar: the caller
+/// degrades to whole-work scope, the same convention as every other step of
+/// this cascade (S27k's `is_resolution_acceptable`, the acervo gate's
+/// `TocCheck::Heuristic`) — a chapter that fails to resolve is a "no
+/// page-level citation yet" outcome, not a "block generation" one.
+pub fn match_chapter<'a>(
+    entries: &'a [ConfirmedTocEntry],
+    number: Option<&str>,
+    name: &str,
+) -> Option<&'a ConfirmedTocEntry> {
+    if let Some(target) = number.map(normalize_number).filter(|n| !n.is_empty())
+        && let Some(hit) = entries
+            .iter()
+            .find(|e| e.number.as_deref().map(normalize_number).as_deref() == Some(target.as_str()))
+    {
+        return Some(hit);
+    }
+    let needle = super::matching::normalize(name);
+    if needle.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .filter_map(|e| {
+            let hay = super::matching::normalize(&e.title);
+            if !hay.is_empty() && (hay.contains(&needle) || needle.contains(&hay)) {
+                Some((hay.len(), e))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, e)| e)
+}
+
+/// Keeps only digits and dots, then trims a stray trailing dot — `"§4.10"`,
+/// `"Chapter 4.10"`, `"4.10."` and `"4.10"` all collapse to the same string.
+fn normalize_number(n: &str) -> String {
+    n.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .trim_matches('.')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -204,11 +289,13 @@ mod tests {
             entries: vec![
                 ConfirmedTocEntry {
                     title: "Chapter 1".into(),
+                    number: None,
                     page: Some(3),
                     inferred: false,
                 },
                 ConfirmedTocEntry {
                     title: "Chapter 2".into(),
+                    number: None,
                     page: None,
                     inferred: false,
                 },
@@ -231,6 +318,7 @@ mod tests {
                 &ConfirmedToc {
                     entries: vec![ConfirmedTocEntry {
                         title: "First draft".into(),
+                        number: None,
                         page: None,
                         inferred: false,
                     }],
@@ -244,6 +332,7 @@ mod tests {
                 &ConfirmedToc {
                     entries: vec![ConfirmedTocEntry {
                         title: "Corrected".into(),
+                        number: None,
                         page: Some(1),
                         inferred: false,
                     }],
@@ -268,6 +357,7 @@ mod tests {
                 &ConfirmedToc {
                     entries: vec![ConfirmedTocEntry {
                         title: "A's chapter".into(),
+                        number: None,
                         page: None,
                         inferred: false,
                     }],
@@ -277,6 +367,111 @@ mod tests {
             .expect("put a");
 
         assert_eq!(store.get("hash-b"), None);
+    }
+
+    fn confirmed_entry(
+        number: Option<&str>,
+        title: &str,
+        page: Option<usize>,
+    ) -> ConfirmedTocEntry {
+        ConfirmedTocEntry {
+            title: title.to_string(),
+            number: number.map(String::from),
+            page,
+            inferred: true,
+        }
+    }
+
+    /// S27g (2026-08-30): an exact number match wins even when the proposed
+    /// name is a total miss — numbering is unambiguous within one printing,
+    /// so it's trusted over a name the model may have guessed poorly.
+    #[test]
+    fn match_chapter_prefers_an_exact_number_match_over_the_name() {
+        let entries = vec![
+            confirmed_entry(Some("4"), "Functions and Program Structure", Some(70)),
+            confirmed_entry(Some("4.10"), "Recursion", Some(84)),
+        ];
+        let hit = match_chapter(&entries, Some("4.10"), "totally unrelated wording").unwrap();
+        assert_eq!(hit.page, Some(84));
+    }
+
+    /// The exact K&R counter-example this redesign is built around:
+    /// recursion lives in a section whose own chapter title never says
+    /// "recursion" — number-matching must land on the SECTION entry, not
+    /// the chapter's.
+    #[test]
+    fn match_chapter_resolves_the_kr_recursion_counter_example_by_number() {
+        let entries = vec![
+            confirmed_entry(Some("4"), "Functions and Program Structure", Some(70)),
+            confirmed_entry(Some("4.10"), "Recursion", Some(84)),
+        ];
+        let hit = match_chapter(&entries, Some("4.10"), "recursion in C").unwrap();
+        assert_eq!(hit.title, "Recursion");
+        assert_eq!(hit.page, Some(84));
+    }
+
+    /// A number that doesn't match anything in the real book (wrong
+    /// edition, or the model was simply wrong) must not block an otherwise-
+    /// good name match — falls back to lenient containment.
+    #[test]
+    fn match_chapter_falls_back_to_name_when_the_number_is_wrong() {
+        let entries = vec![confirmed_entry(Some("5.2"), "Recursion", Some(84))];
+        let hit = match_chapter(&entries, Some("4.10"), "Recursion").unwrap();
+        assert_eq!(hit.page, Some(84));
+    }
+
+    /// No proposed number at all — pure name matching, either-direction
+    /// containment (same rule `bibliography::plausible_match` uses).
+    #[test]
+    fn match_chapter_matches_by_name_alone_when_no_number_is_proposed() {
+        let entries = vec![confirmed_entry(None, "4.10 Recursion", Some(84))];
+        let hit = match_chapter(&entries, None, "recursion").unwrap();
+        assert_eq!(hit.page, Some(84));
+    }
+
+    /// A generic, short TOC entry ("Functions") is a valid containment
+    /// match for a longer proposed name ("Functions and Program
+    /// Structure") purely because it's a substring of it — but it's the
+    /// wrong chapter when a more specific entry with the exact title also
+    /// exists. First-match-wins would pick whichever is earlier in
+    /// `entries`; this asserts the LONGER (more specific) match wins
+    /// regardless of order, catching the regression flagged in
+    /// `match_chapter`'s own doc comment before it ever hit a real,
+    /// long table of contents.
+    #[test]
+    fn match_chapter_prefers_the_longer_of_two_containment_matches() {
+        let entries_short_first = vec![
+            confirmed_entry(None, "Functions", Some(10)),
+            confirmed_entry(None, "Functions and Program Structure", Some(60)),
+        ];
+        let hit = match_chapter(&entries_short_first, None, "Functions and Program Structure")
+            .unwrap();
+        assert_eq!(hit.page, Some(60));
+
+        let entries_long_first = vec![
+            confirmed_entry(None, "Functions and Program Structure", Some(60)),
+            confirmed_entry(None, "Functions", Some(10)),
+        ];
+        let hit = match_chapter(&entries_long_first, None, "Functions and Program Structure")
+            .unwrap();
+        assert_eq!(hit.page, Some(60));
+    }
+
+    /// Number strings are normalized before comparison: punctuation/prefix
+    /// noise around the digits must not defeat an otherwise-exact match.
+    #[test]
+    fn match_chapter_normalizes_number_punctuation_before_comparing() {
+        let entries = vec![confirmed_entry(Some("2.2.1"), "Nested Loops", Some(40))];
+        let hit = match_chapter(&entries, Some("§2.2.1."), "unrelated").unwrap();
+        assert_eq!(hit.page, Some(40));
+    }
+
+    /// Nothing clears the bar — degrades to `None`, never an error, so the
+    /// caller can leave the chapter un-narrowed.
+    #[test]
+    fn match_chapter_returns_none_when_nothing_matches() {
+        let entries = vec![confirmed_entry(Some("1"), "Introduction", Some(1))];
+        assert!(match_chapter(&entries, Some("9.9"), "completely unrelated topic").is_none());
     }
 
     fn resolution(
@@ -289,6 +484,7 @@ mod tests {
                 .iter()
                 .map(|(title, page)| ResolvedTocEntry {
                     title: title.to_string(),
+                    number: None,
                     page: *page,
                 })
                 .collect(),

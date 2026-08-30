@@ -604,6 +604,8 @@ pub async fn decide_plan_proposal(
                     item_type: OutlineItemType::Node,
                     expansion: ExpansionState::NotExpanded,
                     source: None,
+                    chapter_number: None,
+                    resolved_page: None,
                 })
                 .collect();
             outline.items.extend(sub_nodes);

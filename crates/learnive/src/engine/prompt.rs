@@ -199,30 +199,36 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
 /// own shape (see `parse::outline_tree`'s doc comment for why one schema,
 /// not a wrapping one) plus one extra field this call alone reads —
 /// `{"title":..., "authors":[...], "year":..., "edition":..., \
-/// "identifier":..., "kind":"book"|"article", "topics":[...]}`.
+/// "identifier":..., "kind":"book"|"article", "chapters":[...]}`.
 ///
-/// `topics` (S27g, PLAN.md, revised 2026-08-29 — see PLAN.md's own account
-/// of the revision, including the argument the assistant made and the user
-/// rejected, kept there because the wrong argument is plausible and will
-/// reappear): an optional list of within-work topics the curriculum
-/// actually needs from this item, empty when the whole work is in scope.
-/// The prohibition this replaces used to be "no children, no chapters —
-/// never guess a book's internal structure", which conflated two different
-/// things: asserting STRUCTURE the model cannot verify (a chapter number, an
-/// invented section title) — still forbidden, since only a real PDF table
-/// of contents can confirm that, later, once the library actually has the
-/// file — versus stating SCOPE, which the model can and must judge now, at
-/// the point where it has the whole curriculum plan in view (the user's own
-/// reasoning for why scope selection cannot wait for expansion: deciding it
-/// one item at a time, in calls made days or weeks apart with no memory of
-/// each other, fragments the curriculum's coherence). A `topics` entry is
-/// therefore a plain-language subject description ("recursion in C",
-/// "limits of a function"), never a chapter number or an asserted title —
-/// resolving it against the real book's contents is S27g's later matching
-/// pass, against the actual page text, not against the chapter title (a
-/// topic can live inside a chapter whose own title never names it — e.g.
-/// recursion is K&R 2nd ed. §4.10, inside a chapter titled "Functions and
-/// Program Structure").
+/// `chapters` (S27g, PLAN.md; introduced 2026-08-29 as `topics` — free-text
+/// subject descriptions never meant to be checked against the book's real
+/// structure — then reversed 2026-08-30 at the user's explicit instruction:
+/// *"proposing by topic is too broad and just as much prone to
+/// hallucinations [...] change the implementation to be by name with the
+/// resolve chapter logic"*. PLAN.md's account of the ORIGINAL topic-vs-number
+/// argument stays in place as history — the reasoning that a chapter
+/// NUMBER is unverifiable, edition-volatile guesswork was and still is
+/// correct, which is why `number` below stays optional and nullable rather
+/// than demanded — but the conclusion that a NAME can't be resolved either
+/// no longer holds: `source::match_chapter` resolves a proposed name against
+/// the book's own confirmed table of contents (S27k) by lenient
+/// containment, the exact same "propose, then verify against reality"
+/// pattern S27d already uses for the book itself. An optional list of
+/// within-work chapters/sections the curriculum actually needs from this
+/// item, one object per entry — `{"number":"..." or null,"name":"..."}` —
+/// empty when the whole work is in scope. `number` is the chapter/section
+/// number AS YOU RECALL IT, however the book prints it (a bare "4", a
+/// two-level "4.10", or a deeper "2.2.1" — whatever hierarchy the real book
+/// actually uses); `null` when you aren't genuinely confident of it, since a
+/// wrong number is checked against the real book next and a confident-sounding
+/// wrong guess is worse than admitting you don't know. `name` is always
+/// required: a short plain-language name for the chapter/section (the real
+/// title if you know it, otherwise the subject it covers, e.g. "recursion in
+/// C") — this is what `source::match_chapter` falls back to whenever the
+/// number is absent or doesn't match anything in the real book (a different
+/// edition's numbering, or your guess was wrong), so name it as if number
+/// might not be there at all.
 ///
 /// `rejected` names titles a prior round of this same cold start proposed
 /// that then failed S27d's existence verification (bounded one-round retry,
@@ -244,28 +250,33 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
          Each array element is shaped EXACTLY like this, no other fields: \
          {\"title\":\"...\",\"authors\":[\"Last, First\", ...], \
          \"year\":1234,\"edition\":\"...\" or null,\"identifier\":null,\
-         \"kind\":\"book\"|\"article\",\"topics\":[...]}. `authors` in \
+         \"kind\":\"book\"|\"article\",\"chapters\":[...]}. `authors` in \
          \"Last, First\" order when known; empty array if genuinely unknown \
          (never invent a name). `year`/`edition` null when unknown. \
          `identifier` stays null unless you have real, specific certainty \
          of an ISBN/DOI/arXiv id — guessing one is worse than omitting it, \
          since a wrong identifier is checked as if it were confirmed fact \
          by the next step.\n\n\
-         `topics`: when the learner needs the WHOLE work, leave this an \
+         `chapters`: when the learner needs the WHOLE work, leave this an \
          empty array. When only PART of a work is actually in scope for \
-         this objective, list the specific subjects needed, in the order \
-         they should be learned (a prerequisite path within the work — \
-         basics before the thing that depends on them). Each entry is a \
-         plain-language subject description (\"recursion in C\", \"limits \
-         of a function\"), NEVER a chapter number, a section title, or any \
-         other claim about the book's actual internal structure — you \
-         cannot verify that without the real table of contents, which \
-         happens later, against the real file. Naming the SUBJECT you need \
-         is judgment you can and should make now, with the whole curriculum \
-         in view; asserting the book's STRUCTURE is a guess you cannot \
-         verify and must not make. Do not pad this with a full chapter-by- \
-         chapter syllabus either — only the subjects this specific \
-         objective actually needs from this work, nothing broader.\n\n\
+         this objective, list the specific chapters/sections needed, in the \
+         order they should be learned (a prerequisite path within the work — \
+         basics before the thing that depends on them). Each entry is \
+         {\"number\":\"...\" or null,\"name\":\"...\"}: `number` is the \
+         chapter/section number exactly as you recall the real book \
+         printing it — a bare \"4\", a two-level \"4.10\", or a deeper \
+         \"2.2.1\", whatever depth the real book actually uses — or `null` \
+         when you are not genuinely confident of it (a wrong number is \
+         checked against the real book next, so a confident-sounding wrong \
+         guess is worse than admitting you don't know). `name` is always \
+         required: a short plain-language name for the chapter/section (the \
+         real title when you know it, otherwise the subject it covers, e.g. \
+         \"recursion in C\") — this is what resolution falls back to \
+         whenever `number` is absent or turns out wrong, so name it as if \
+         `number` might not be there at all. Do not pad this with a full \
+         chapter-by-chapter syllabus either — only the chapters this \
+         specific objective actually needs from this work, nothing \
+         broader.\n\n\
          Err toward INCLUDING a foundational work whenever you are unsure \
          the learner already has it: this list is a proposal, not a \
          commitment — the learner reviews it themselves and marks each \
@@ -280,13 +291,13 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
          title will simply fail that check.\n\n\
          Judge SCOPE from the objective, not a fixed count: a narrow, \
          self-contained question may need only the one work most directly \
-         covering it, often only part of it (use `topics`); a broad subject \
-         needs real foundational works ahead of it, most basic first. Write \
-         every title/author exactly as the real work is titled (do not \
-         translate a real title into the request's language) but keep this \
-         instruction's own language irrelevant to your choice of works. \
-         Respond ONLY with the JSON array — no comments, no markdown, no \
-         prose outside it.",
+         covering it, often only part of it (use `chapters`); a broad \
+         subject needs real foundational works ahead of it, most basic \
+         first. Write every title/author exactly as the real work is titled \
+         (do not translate a real title into the request's language) but \
+         keep this instruction's own language irrelevant to your choice of \
+         works. Respond ONLY with the JSON array — no comments, no \
+         markdown, no prose outside it.",
     );
     if !rejected.is_empty() {
         system.push_str(&format!(
@@ -305,22 +316,29 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
             "Understand how binary search finds a target in a sorted array and implement it correctly",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"Introduction to Algorithms","authors":["Cormen, Thomas H.","Leiserson, Charles E.","Rivest, Ronald L.","Stein, Clifford"],"year":2009,"edition":"3rd","identifier":null,"kind":"book","topics":[]}]"#,
+            r#"[{"title":"Introduction to Algorithms","authors":["Cormen, Thomas H.","Leiserson, Charles E.","Rivest, Ronald L.","Stein, Clifford"],"year":2009,"edition":"3rd","identifier":null,"kind":"book","chapters":[]}]"#,
         ),
         ChatMessage::user(request(
             "limites de uma função",
             "Aprender o conceito de limite de uma função e calcular limites usando suas propriedades",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book","topics":[]},
-                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":["limite de uma função","propriedades dos limites"]}]"#,
+            r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book","chapters":[]},
+                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","chapters":[{"number":"2.2","name":"O limite de uma função"},{"number":"2.3","name":"Calculando limites usando as propriedades dos limites"}]}]"#,
         ),
         ChatMessage::user(request(
             "recursion in C",
             "Understand how recursive functions work in C and be able to write them correctly",
         )),
         ChatMessage::assistant(
-            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","topics":["basic C syntax and control flow","variables and data types in C","functions in C","recursion in C"]}]"#,
+            // Deliberately mixes confidence levels: a null number for a
+            // chapter the model isn't sure of, a top-level number for one it
+            // is, and — the exact K&R 2nd ed. counter-example this whole
+            // redesign is built around — recursion named at SECTION
+            // granularity ("4.10") inside a chapter ("4") whose own title
+            // never says "recursion", demonstrating why `name` always
+            // carries real information rather than just echoing the number.
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":null,"name":"basic C syntax and control flow"},{"number":"2","name":"Types, Operators, and Expressions"},{"number":"4","name":"Functions and Program Structure"},{"number":"4.10","name":"Recursion"}]}]"#,
         ),
         ChatMessage::user(request(topic, objective)),
     ]
@@ -365,21 +383,36 @@ pub fn search_subject(topic: &str) -> Vec<ChatMessage> {
 /// does that arithmetic against the real extracted pages, which is the
 /// entire point of this cascade step (a model has no way to know how printed
 /// and physical pagination diverge in a given book).
+///
+/// `number` (S27g, 2026-08-30): an earlier version of this prompt told the
+/// model to DROP leading numbering ("1.", "Chapter 1:") and keep only the
+/// title text — reasonable in isolation, but it meant the confirmed TOC this
+/// pass ultimately feeds (`toc_confirm::ConfirmedTocEntry`) never carried a
+/// chapter/section number at all, so `source::match_chapter` would have had
+/// nothing to compare a proposed chapter's own number against. Now kept as
+/// its own field instead of discarded, so both halves of the cascade —
+/// what the model reads off THIS book's real printed contents page, and
+/// what `propose_outline` guesses for a chapter it hasn't seen yet — carry
+/// the same shape and can be matched on it.
 pub fn propose_toc(contents_page_text: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
             "You will be given the raw extracted text of a book or article's \
              printed table of contents / sumário page(s). Return a JSON \
              array, one object per entry, in the exact order they appear: \
-             {\"title\":\"...\",\"page\":N} — `title` is the entry's title \
-             exactly as printed (drop leading numbering like \"1.\" or \
-             \"Chapter 1:\" if present, keep the actual title text); `page` \
-             is the page number PRINTED next to that entry, as an integer, \
-             or `null` if the line has no trailing page number you can read. \
-             Include every entry you can read, front matter (preface, \
-             introduction) included — do not skip anything or invent \
-             entries that aren't there. Respond with ONLY the JSON array, \
-             nothing else.",
+             {\"number\":\"...\" or null,\"title\":\"...\",\"page\":N} — \
+             `number` is the entry's own printed chapter/section number \
+             exactly as it appears (e.g. \"4\", \"4.10\", \"2.2.1\"), or \
+             `null` if the line has no leading number at all; `title` is the \
+             entry's title text with that leading number removed (e.g. for \
+             the line \"4.10 Recursion .... 84\", `number` is \"4.10\" and \
+             `title` is \"Recursion\"); `page` is the page number PRINTED \
+             next to that entry, as an integer, or `null` if the line has no \
+             trailing page number you can read. Include every entry you can \
+             read, front matter (preface, introduction) included and any \
+             numbered sub-sections the page lists, not just top-level \
+             chapters — do not skip anything or invent entries that aren't \
+             there. Respond with ONLY the JSON array, nothing else.",
         ),
         ChatMessage::user(contents_page_text.to_string()),
     ]

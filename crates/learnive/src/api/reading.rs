@@ -551,6 +551,8 @@ pub async fn ask_question(
                     item_type: OutlineItemType::Node,
                     expansion: ExpansionState::NotExpanded,
                     source: None,
+                    chapter_number: None,
+                    resolved_page: None,
                 });
                 serde_json::to_string(&outline).map_err(|e| e.to_string())
             })?;
@@ -1006,7 +1008,7 @@ pub(super) async fn prepare(
     // precondition, checked once against the whole reading list, before any
     // per-node lookup — see `ensure_document_grounded`'s doc comment for why
     // this replaced the original per-item version.
-    if let Err(reason) = ensure_document_grounded(state, &outline).await {
+    if let Err(reason) = ensure_document_grounded(state, doc_id, &outline).await {
         if let Err(e) = event_log.append(
             Some(&item.id),
             EventKind::GenerationBlocked {
@@ -1343,6 +1345,7 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
 /// POST path rather than the read-only gate-report GET (§3.1).
 pub(super) async fn ensure_document_grounded(
     state: &AppState,
+    doc_id: &str,
     outline: &Outline,
 ) -> Result<(), String> {
     let expected = engine::expected_items(outline);
@@ -1456,6 +1459,95 @@ pub(super) async fn ensure_document_grounded(
             if source::toc::is_resolution_acceptable(&resolution) {
                 let _ = toc_confirm.put_deduced(&hash, &resolution);
             }
+        }
+    }
+
+    // S27g (2026-08-30): chapter-name resolution — for every Book/Article
+    // item whose `propose_outline`-time `Chapter` children haven't been
+    // matched against this book's real table of contents yet
+    // (`ExpansionState::ChaptersProposed`), resolve each proposed chapter's
+    // number/name against the book's confirmed TOC (S27k — which the
+    // deduction pass right above may have just populated) and record the
+    // resolved physical page on the child item. Degrades silently, the same
+    // convention as the rest of this cascade: a book whose TOC isn't
+    // confirmed yet (no embedded outline, deduction not yet acceptable,
+    // nobody's answered the S27f confirmation screen) is left untouched and
+    // retried on a later call; a chapter that matches nothing keeps
+    // generating unnarrowed (its proposed title stands in, `resolved_page:
+    // None`) rather than being blocked — this step is citation quality, not
+    // gating (scope was already fixed at cold start, PLAN.md's 2026-08-29
+    // revision: "a SELEÇÃO de escopo acontece na lista de leitura").
+    let needs_chapter_match: Vec<&OutlineItem> = outline
+        .items
+        .iter()
+        .filter(|i| matches!(i.expansion, ExpansionState::ChaptersProposed))
+        .collect();
+    if !needs_chapter_match.is_empty() {
+        let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir)
+            .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
+        // (book id, [(chapter id, resolved physical page)]) — computed here,
+        // outside the outline-mutating closure below, since resolution needs
+        // blocking file reads this closure (locked, synchronous) must not do.
+        type ChapterResolutions = Vec<(String, Vec<(String, Option<usize>)>)>;
+        let mut resolutions: ChapterResolutions = Vec::new();
+        for book in &needs_chapter_match {
+            let Some(ptr) = &book.source else { continue };
+            let expected = source::ExpectedItem {
+                title: ptr.item.title.clone(),
+                authors: ptr.item.authors.clone(),
+                kind: ptr.item.kind,
+            };
+            let Ok(Some(filename)) = source::resolve_matched_filename(&library, &manual, &expected)
+            else {
+                continue;
+            };
+            let path = library.root().join(&filename);
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let hash = source::acervo::content_hash(&bytes);
+            let Some(confirmed) = toc_confirm.get(&hash) else {
+                continue;
+            };
+            let chapters: Vec<(String, Option<usize>)> = outline
+                .items
+                .iter()
+                .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
+                .map(|chapter| {
+                    let page = source::match_chapter(
+                        &confirmed.entries,
+                        chapter.chapter_number.as_deref(),
+                        &chapter.title,
+                    )
+                    .and_then(|hit| hit.page);
+                    (chapter.id.clone(), page)
+                })
+                .collect();
+            resolutions.push((book.id.clone(), chapters));
+        }
+        if !resolutions.is_empty() {
+            state
+                .store
+                .update_outline_file(doc_id, |json| {
+                    let mut outline: Outline =
+                        serde_json::from_str(json).map_err(|e| e.to_string())?;
+                    for (book_id, chapters) in &resolutions {
+                        if let Some(book_item) = outline.items.iter_mut().find(|i| &i.id == book_id)
+                        {
+                            book_item.expansion = ExpansionState::Expanded;
+                        }
+                        for (chapter_id, page) in chapters {
+                            let Some(page) = page else { continue };
+                            if let Some(chapter_item) =
+                                outline.items.iter_mut().find(|i| &i.id == chapter_id)
+                            {
+                                chapter_item.resolved_page = Some(*page);
+                            }
+                        }
+                    }
+                    serde_json::to_string(&outline).map_err(|e| e.to_string())
+                })
+                .map_err(|e| format!("could not persist chapter resolution: {e}"))?;
         }
     }
 

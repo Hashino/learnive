@@ -177,6 +177,11 @@ pub struct ProposedNode {
     /// `propose_outline`'s verify step has run — `None` until then.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification: Option<crate::source::VerificationOutcome>,
+    /// The proposed chapter/section number (S27g, revised 2026-08-30) —
+    /// present only for a `Chapter`-typed node, shown alongside its `title`
+    /// (the proposed name) so the S15 confirmation screen can display both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chapter_number: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -421,6 +426,7 @@ fn resolve_outline_node(
         item_type: node.item_type,
         bibliography: node.bibliography.clone(),
         verification: node.verification.clone(),
+        chapter_number: node.chapter_number.clone(),
     }
 }
 
@@ -452,6 +458,10 @@ pub struct ConfirmedNode {
     /// Echoed back verbatim from `ProposedNode::verification`.
     #[serde(default)]
     verification: Option<crate::source::VerificationOutcome>,
+    /// Echoed back verbatim from `ProposedNode::chapter_number` (S27g,
+    /// revised 2026-08-30) — set only for a `Chapter`-typed node.
+    #[serde(default)]
+    chapter_number: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -556,6 +566,8 @@ fn materialize_outline_node(
                 // default rather than guessed.
                 expansion: ExpansionState::NotExpanded,
                 source: source_pointer_from(node),
+                chapter_number: node.chapter_number.clone(),
+                resolved_page: None,
             });
             return known.node_id.clone();
         }
@@ -574,16 +586,21 @@ fn materialize_outline_node(
                 item_type: node.item_type,
                 expansion: ExpansionState::NotExpanded,
                 source: source_pointer_from(node),
+                chapter_number: node.chapter_number.clone(),
+                resolved_page: None,
             });
         }
         PrereqAction::Learn => {
             // S27g (2026-08-29): a `Book`/`Article` item whose `children`
-            // already carry `propose_outline`'s topic-scoped `Chapter`
+            // already carry `propose_outline`'s `{number, name}` `Chapter`
             // proposals is `ChaptersProposed`, not `NotExpanded` — those
             // proposals exist and are about to be materialized right below,
             // they just haven't been matched against this book's real,
-            // resolved table of contents yet (that matching pass is the
-            // next slice of S27g). Every other case (no children, or a
+            // confirmed table of contents yet. That matching pass
+            // (`source::match_chapter`, run from
+            // `api::reading::ensure_document_grounded`) runs later, once a
+            // confirmed TOC exists — not here, and not blocking this
+            // materialization. Every other case (no children, or a
             // plain `Node`/`Chapter` item) is unaffected.
             let expansion = if matches!(
                 node.item_type,
@@ -611,6 +628,8 @@ fn materialize_outline_node(
                 item_type: node.item_type,
                 expansion,
                 source: source_pointer_from(node),
+                chapter_number: node.chapter_number.clone(),
+                resolved_page: None,
             });
         }
     }
@@ -658,6 +677,7 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             item_type: n.item_type,
             bibliography: n.bibliography.clone(),
             verification: n.verification.clone(),
+            chapter_number: n.chapter_number.clone(),
         })
         .collect()
 }
@@ -1616,6 +1636,7 @@ mod tests {
             item_type: OutlineItemType::Node,
             bibliography: None,
             verification: None,
+            chapter_number: None,
         }
     }
 
@@ -1629,6 +1650,7 @@ mod tests {
             item_type: OutlineItemType::Node,
             bibliography: None,
             verification: None,
+            chapter_number: None,
         }
     }
 
@@ -1728,6 +1750,7 @@ mod tests {
             item_type: OutlineItemType::Node,
             bibliography: None,
             verification: None,
+            chapter_number: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1763,6 +1786,7 @@ mod tests {
             item_type: OutlineItemType::Book,
             bibliography: None,
             verification: None,
+            chapter_number: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1793,6 +1817,7 @@ mod tests {
             item_type: OutlineItemType::Node,
             bibliography: None,
             verification: None,
+            chapter_number: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1837,6 +1862,7 @@ mod tests {
                     catalog: crate::source::Catalog::OpenLibrary,
                     matched_title: title.to_string(),
                 }),
+                chapter_number: None,
             }
         }
         let tree = vec![book("b1", "Pré-Cálculo"), book("b2", "Cálculo, Volume 1")];
@@ -1880,7 +1906,7 @@ mod tests {
     /// gates on last child" rule any other decomposed node already follows.
     #[test]
     fn book_with_chapter_children_materializes_as_chapters_proposed() {
-        fn chapter(id: &str, title: &str) -> ConfirmedNode {
+        fn chapter(id: &str, number: Option<&str>, title: &str) -> ConfirmedNode {
             ConfirmedNode {
                 id: id.to_string(),
                 title: title.to_string(),
@@ -1890,6 +1916,7 @@ mod tests {
                 item_type: OutlineItemType::Chapter,
                 bibliography: None,
                 verification: None,
+                chapter_number: number.map(String::from),
             }
         }
         let book = ConfirmedNode {
@@ -1898,8 +1925,8 @@ mod tests {
             action: PrereqAction::Learn,
             known: None,
             children: vec![
-                chapter("c1", "functions in C"),
-                chapter("c2", "recursion in C"),
+                chapter("c1", Some("4"), "functions in C"),
+                chapter("c2", Some("4.10"), "recursion in C"),
             ],
             item_type: OutlineItemType::Book,
             bibliography: Some(crate::source::ProposedItem {
@@ -1914,6 +1941,7 @@ mod tests {
                 catalog: crate::source::Catalog::OpenLibrary,
                 matched_title: "The C Programming Language".to_string(),
             }),
+            chapter_number: None,
         };
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1930,6 +1958,11 @@ mod tests {
         assert_eq!(c1.item_type, OutlineItemType::Chapter);
         assert_eq!(c1.parent_id, Some("b1".to_string()));
         assert!(c1.prerequisites.is_empty());
+        // S27g (revised 2026-08-30): the proposed chapter/section number is
+        // carried through materialization untouched, matching-independent.
+        assert_eq!(c1.chapter_number.as_deref(), Some("4"));
+        assert_eq!(c2.chapter_number.as_deref(), Some("4.10"));
+        assert_eq!(c1.resolved_page, None, "no matching pass has run yet");
         assert!(
             c1.source.is_none(),
             "a chapter inherits the book's source, it doesn't carry its own"
@@ -1957,6 +1990,7 @@ mod tests {
                 title: title.to_string(),
                 children: Vec::new(),
                 item_type: OutlineItemType::Book,
+                chapter_number: None,
                 bibliography: None,
                 verification: Some(verification),
             }
@@ -2001,6 +2035,7 @@ mod tests {
                 title: "Foundational Work".to_string(),
                 children: Vec::new(),
                 item_type: OutlineItemType::Book,
+                chapter_number: None,
                 bibliography: None,
                 verification: None,
             },
@@ -2008,6 +2043,7 @@ mod tests {
                 title: "Objective Work".to_string(),
                 children: Vec::new(),
                 item_type: OutlineItemType::Book,
+                chapter_number: None,
                 bibliography: None,
                 verification: None,
             },

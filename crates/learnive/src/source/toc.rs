@@ -30,9 +30,23 @@ use super::pdf::PdfDocument;
 /// One entry the model read off a printed contents/sumário page: a title and
 /// the page number as PRINTED there, if the line had one. Never used as a
 /// physical page offset directly — see the module doc.
+///
+/// `number` (S27g, 2026-08-30): the entry's own printed chapter/section
+/// number verbatim (e.g. `"4"`, `"4.10"`, `"2.2.1"`), `None` when the line
+/// carried no numbering at all. Kept as a plain string, never parsed into
+/// integers — a book's own numbering scheme is whatever it prints, and this
+/// only ever needs to be compared back against another string
+/// (`toc_confirm::match_chapter`), never computed with. This reverses an
+/// earlier version of this prompt/struct that dropped numbering entirely
+/// ("drop leading numbering like '1.'") on the theory that a chapter's
+/// title was the only stable handle; the user later asked for numbers too,
+/// specifically so `propose_outline`'s proposed chapters can carry BOTH and
+/// match on whichever the real book's TOC actually resolves.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TocLlmEntry {
     pub title: String,
+    #[serde(default)]
+    pub number: Option<String>,
     #[serde(default)]
     pub page: Option<i64>,
 }
@@ -41,6 +55,8 @@ pub struct TocLlmEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTocEntry {
     pub title: String,
+    /// Carried through verbatim from [`TocLlmEntry::number`] — see its doc.
+    pub number: Option<String>,
     /// 1-based physical page — matches `PdfDocument::page_texts`/`PageMap`'s
     /// convention everywhere else in `source`.
     pub page: usize,
@@ -228,6 +244,7 @@ pub fn resolve_toc(
         match placement {
             Some(page) => resolution.resolved.push(ResolvedTocEntry {
                 title: entry.title.clone(),
+                number: entry.number.clone(),
                 page,
             }),
             None => resolution.unresolved.push(entry.title.clone()),
@@ -299,6 +316,7 @@ mod tests {
     fn entry(title: &str, page: Option<i64>) -> TocLlmEntry {
         TocLlmEntry {
             title: title.to_string(),
+            number: None,
             page,
         }
     }
@@ -353,6 +371,7 @@ mod tests {
             resolution.resolved[0],
             ResolvedTocEntry {
                 title: "Introduction".into(),
+                number: None,
                 page: 2
             }
         );
@@ -360,6 +379,7 @@ mod tests {
             resolution.resolved[1],
             ResolvedTocEntry {
                 title: "Chapter One".into(),
+                number: None,
                 page: 4
             }
         );
@@ -379,6 +399,7 @@ mod tests {
             resolution.resolved,
             vec![ResolvedTocEntry {
                 title: "Chapter Two".into(),
+                number: None,
                 page: 3
             }]
         );
@@ -402,10 +423,12 @@ mod tests {
             vec![
                 ResolvedTocEntry {
                     title: "Chapter One".into(),
+                    number: None,
                     page: 3
                 },
                 ResolvedTocEntry {
                     title: "Appendix".into(),
+                    number: None,
                     page: 4
                 },
             ]
@@ -439,10 +462,12 @@ mod tests {
             vec![
                 ResolvedTocEntry {
                     title: "Chapter One".into(),
+                    number: None,
                     page: 3
                 },
                 ResolvedTocEntry {
                     title: "Chapter Two".into(),
+                    number: None,
                     page: 12
                 },
             ]
@@ -454,6 +479,7 @@ mod tests {
         let mostly_failed = TocResolution {
             resolved: vec![ResolvedTocEntry {
                 title: "A".into(),
+                number: None,
                 page: 1,
             }],
             unresolved: vec!["B".into(), "C".into(), "D".into()],
@@ -464,14 +490,17 @@ mod tests {
             resolved: vec![
                 ResolvedTocEntry {
                     title: "A".into(),
+                    number: None,
                     page: 1,
                 },
                 ResolvedTocEntry {
                     title: "B".into(),
+                    number: None,
                     page: 2,
                 },
                 ResolvedTocEntry {
                     title: "C".into(),
+                    number: None,
                     page: 3,
                 },
             ],

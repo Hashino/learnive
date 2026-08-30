@@ -33,27 +33,31 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
 
 /// Reading list (S27e, PLAN.md §27): a JSON array shaped almost exactly like
 /// `source::ProposedItem` — `{title, authors, year, edition, identifier,
-/// kind}`, plus one extra field this call alone reads, `topics` (S27g,
-/// 2026-08-29) — one object per book/article, foundational-first.
-/// Deliberately the SAME bibliographic schema S27d's `verify_bibliography`
-/// consumes, rather than inventing a parallel one: `Raw` below only adds
-/// `topics` on top via `#[serde(flatten)]`, so `ProposedItem` itself (used
-/// for verification, `ExpectedItem` construction, and everywhere else in
-/// `source`) never needs to know this concept exists — one schema for the
-/// bibliographic round trip, a private extension for the one caller that
-/// needs more.
+/// kind}`, plus one extra field this call alone reads, `chapters` (S27g,
+/// introduced 2026-08-29 as `topics`, reversed to number+name 2026-08-30 —
+/// see `prompt::propose_outline`'s doc for the full account) — one object
+/// per book/article, foundational-first. Deliberately the SAME bibliographic
+/// schema S27d's `verify_bibliography` consumes, rather than inventing a
+/// parallel one: `Raw` below only adds `chapters` on top via
+/// `#[serde(flatten)]`, so `ProposedItem` itself (used for verification,
+/// `ExpectedItem` construction, and everywhere else in `source`) never needs
+/// to know this concept exists — one schema for the bibliographic round
+/// trip, a private extension for the one caller that needs more.
 ///
-/// `topics`, when non-empty, becomes `Chapter`-typed `children` under this
-/// item — see `OutlineItemType::Chapter`'s doc comment for why `Chapter` is
-/// the right type for an unresolved topic-scoped proposal (not `Node`: a
-/// topic hasn't been matched against the real book's contents yet, and
-/// `Node` claims a concept is ready to teach). `bibliography: None` on each
-/// child — a chapter has no bibliographic identity of its own, it inherits
-/// its parent's (`engine::resolve_grounding_source`). `kind` on the OUTER
-/// item becomes `item_type` (`Book`/`Article` only — the reading-list schema
+/// `chapters`, when non-empty, becomes `Chapter`-typed `children` under this
+/// item, each carrying the proposed `number` on [`ProposedOutlineNode::
+/// chapter_number`] and the proposed `name` as its own `title` — see
+/// `OutlineItemType::Chapter`'s doc comment for why `Chapter` is the right
+/// type for an unresolved chapter proposal (not `Node`: it hasn't been
+/// matched against the real book's contents yet, and `Node` claims a
+/// concept is ready to teach). `bibliography: None` on each child — a
+/// chapter has no bibliographic identity of its own, it inherits its
+/// parent's (`engine::resolve_grounding_source`). `kind` on the OUTER item
+/// becomes `item_type` (`Book`/`Article` only — the reading-list schema
 /// itself still cannot mint a top-level `Chapter`/`Node`, since `SourceKind`
-/// has no such variants to parse into; only a `topics` entry, nested under a
-/// verified bibliographic parent, can).
+/// has no such variants to parse into; only a `chapters` entry, nested under
+/// a verified bibliographic parent, can). An entry with an empty/whitespace
+/// `name` is dropped — same defensive filter the old `topics` shape used.
 ///
 /// An empty array is NOT treated specially here — `engine::propose_outline`
 /// rejects it (there is always at least one work covering the objective
@@ -61,11 +65,18 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
 /// schema-conforming JSON at all.
 pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
     #[derive(Deserialize)]
+    struct RawChapter {
+        #[serde(default)]
+        number: Option<String>,
+        #[serde(default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
     struct Raw {
         #[serde(flatten)]
         item: ProposedItem,
         #[serde(default)]
-        topics: Vec<String>,
+        chapters: Vec<RawChapter>,
     }
     let json = extract_json(text)?;
     let raw_items = serde_json::from_str::<Vec<Raw>>(json).ok()?;
@@ -78,13 +89,14 @@ pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
                     SourceKind::Article => OutlineItemType::Article,
                 };
                 let children = raw
-                    .topics
+                    .chapters
                     .into_iter()
-                    .filter(|t| !t.trim().is_empty())
-                    .map(|topic| ProposedOutlineNode {
-                        title: topic,
+                    .filter(|c| !c.name.trim().is_empty())
+                    .map(|c| ProposedOutlineNode {
+                        title: c.name,
                         children: Vec::new(),
                         item_type: OutlineItemType::Chapter,
+                        chapter_number: c.number.filter(|n| !n.trim().is_empty()),
                         bibliography: None,
                         verification: None,
                     })
@@ -93,6 +105,7 @@ pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
                     title: raw.item.title.clone(),
                     children,
                     item_type,
+                    chapter_number: None,
                     bibliography: Some(raw.item),
                     verification: None,
                 }

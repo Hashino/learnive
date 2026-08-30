@@ -128,6 +128,23 @@ pub struct OutlineItem {
     /// `grounding_for`'s job, a later slice.
     #[serde(default)]
     pub source: Option<SourcePointer>,
+    /// The proposed chapter/section number for a `Chapter` item (S27g,
+    /// revised 2026-08-30) — carried verbatim from `ProposedOutlineNode::
+    /// chapter_number` through confirmation, `None` for a `Node`/`Book`/
+    /// `Article`. Stays on the item even after matching runs (unlike
+    /// `resolved_page`, nothing overwrites it) — it's what a re-match after
+    /// a library change re-resolves against.
+    #[serde(default)]
+    pub chapter_number: Option<String>,
+    /// The real physical page `source::match_chapter` placed this `Chapter`
+    /// on, once the book→chapter matching pass (S27g) has run against its
+    /// confirmed table of contents (S27k) — `None` until that pass runs, or
+    /// forever if nothing in the real book matched this chapter's proposed
+    /// number/name (degrades to whole-work-style generation, never blocks
+    /// it). Citation deep-links degrade to `#page=N` off this field once
+    /// S27j's PDF viewer route exists; nothing consumes it yet.
+    #[serde(default)]
+    pub resolved_page: Option<usize>,
 }
 
 /// What an outline item actually is (S27e, PLAN.md §27): only `Node` is
@@ -139,19 +156,24 @@ pub struct OutlineItem {
 /// `Chapter` **is** minted at cold start now (S27g, revised 2026-08-29 —
 /// PLAN.md has the full account, including an argument the assistant made
 /// and the user rejected, kept there because the wrong argument is
-/// plausible and will reappear): `engine::prompt::propose_outline`'s
-/// `topics` field lets the model name within-work subjects the objective
-/// actually needs, and `parse::outline_tree` turns each into a `Chapter`
-/// child. What's still true from the reasoning this comment used to make —
-/// a chapter can only be VERIFIED against a real PDF table of contents, not
-/// a bibliographic catalog — is why `Chapter` still cannot be confirmed
-/// structure at this point: a proposed `Chapter` names a SUBJECT (plain
-/// language, e.g. "recursion in C"), never an asserted chapter number or
-/// section title, and matching it onto the real book's actual contents is
-/// S27g's later, still-unbuilt content-matching pass, not this one. Don't
-/// read this doc comment as still forbidding chapter proposal — that
-/// prohibition was rewritten specifically because it conflated unverifiable
-/// STRUCTURE (still forbidden) with buildable SCOPE judgment (now allowed).
+/// plausible and will reappear, and a second same-day revision on top of
+/// that: the model no longer proposes a bare subject string, it proposes a
+/// structured `{number, name}` pair). `engine::prompt::propose_outline`'s
+/// `chapters` field lets the model name within-work subjects the objective
+/// actually needs — each carrying an optional hierarchical `number` (e.g.
+/// `"4.10"`) alongside the `name` — and `parse::outline_tree` turns each
+/// into a `Chapter` child. What's still true from the reasoning this
+/// comment used to make — a chapter can only be VERIFIED against a real PDF
+/// table of contents, not a bibliographic catalog — is why `Chapter` still
+/// isn't confirmed structure at proposal time: the model's `number`/`name`
+/// pair is an assertion, not a match. Resolving it onto the real book's
+/// confirmed table of contents is `source::match_chapter`
+/// (`toc_confirm.rs`), run from `api::reading::ensure_document_grounded`'s
+/// chapter-matching pass — no longer unbuilt (see `ChaptersProposed`
+/// below). Don't read this doc comment as still forbidding chapter
+/// proposal — that prohibition was rewritten specifically because it
+/// conflated unverifiable STRUCTURE (still forbidden at proposal time) with
+/// buildable SCOPE judgment (now allowed, and now resolvable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OutlineItemType {
@@ -176,14 +198,17 @@ pub enum ExpansionState {
     #[default]
     NotExpanded,
     /// S27g (added 2026-08-29): a `Book`/`Article` item whose `children`
-    /// already carry topic-scoped `Chapter` proposals straight out of
+    /// already carry `{number, name}` `Chapter` proposals straight out of
     /// `propose_outline`, but nothing has matched them against this book's
-    /// real, resolved table of contents yet — that matching pass (against
-    /// page text, per `SourcePointer`/S27k's machinery, not against chapter
-    /// titles) is the next slice of S27g, still unbuilt. An item stays here
-    /// until that pass runs; nothing currently reads this variant to change
-    /// behavior (same honest gap `NotExpanded`/`Expanded` already had, per
-    /// S27m's note that nothing read `expansion` at all before this).
+    /// real, confirmed table of contents yet. That matching pass now
+    /// exists — `api::reading::ensure_document_grounded` calls
+    /// `source::match_chapter` (number-first, name-fallback) against the
+    /// confirmed TOC (`TocConfirmStore`), persists each child's resolved
+    /// page, and advances the item to `Expanded`. Degrades silently (stays
+    /// `ChaptersProposed`, children keep `resolved_page: None`) whenever a
+    /// piece is missing — no confirmed TOC yet, file moved, hash mismatch —
+    /// never blocks generation; a later pass can pick it back up once the
+    /// missing piece shows up.
     ChaptersProposed,
     Expanded,
 }
@@ -534,11 +559,14 @@ pub async fn propose_toc(
 /// conceito não sobrevive como categoria própria"): there is no longer a
 /// separate "prerequisite of concept" category. `children` used to always
 /// come back empty from `propose_outline` — as of S27g (2026-08-29) it
-/// carries `Chapter`-typed, topic-scoped proposals whenever the model judges
-/// only part of a work is in scope (`parse::outline_tree`'s doc comment) —
-/// nothing below THOSE chapters is discovered at cold start yet; matching a
-/// chapter's topic onto the real book and, later, breaking it into concept
-/// nodes stay S27g's still-unbuilt contextual-expansion work, against the
+/// carries `Chapter`-typed, `{number, name}` proposals whenever the model
+/// judges only part of a work is in scope (`parse::outline_tree`'s doc
+/// comment) — nothing below THOSE chapters is discovered at cold start yet;
+/// matching a proposed chapter onto the real book is built
+/// (`source::match_chapter`, run from
+/// `api::reading::ensure_document_grounded`), but breaking a matched
+/// chapter into concept nodes stays S27g's still-unbuilt contextual-
+/// expansion work, against the
 /// real PDF. The field was already reused structurally by
 /// `api::cold_start`'s materialization before this (the sidebar tree shape),
 /// so no change was needed there for `Chapter` children to just work.
@@ -548,12 +576,23 @@ pub struct ProposedOutlineNode {
     #[serde(default)]
     pub children: Vec<ProposedOutlineNode>,
     /// S27e: `Book` or `Article` for every top-level item the reading-list
-    /// prompt proposes; as of S27g, a `topics`-derived child of one of those
-    /// is `Chapter` (see [`OutlineItemType`]'s doc comment). `Node` only
-    /// shows up on the old, still-compiled-but-unused-by-`propose_outline`
-    /// concept-tree shape this type also used to serve alone.
+    /// prompt proposes; as of S27g, a `chapters`-derived child of one of
+    /// those is `Chapter` (see [`OutlineItemType`]'s doc comment). `Node`
+    /// only shows up on the old, still-compiled-but-unused-by-
+    /// `propose_outline` concept-tree shape this type also used to serve
+    /// alone.
     #[serde(default)]
     pub item_type: OutlineItemType,
+    /// The proposed chapter/section NUMBER (S27g, revised 2026-08-30) as the
+    /// model recalled it — e.g. `"4"`, `"4.10"`, `"2.2.1"` — `None` for a
+    /// `Book`/`Article` (only a `Chapter` child ever carries one) or for a
+    /// `Chapter` the model wasn't confident enough about to number. Never
+    /// treated as verified structure on its own: `source::match_chapter`
+    /// resolves it against the book's real confirmed table of contents,
+    /// falling back to `title` (the chapter's name) when this is absent or
+    /// matches nothing.
+    #[serde(default)]
+    pub chapter_number: Option<String>,
     /// The proposed bibliographic identity for a `Book`/`Article` item —
     /// `None` for `Node`/`Chapter`. This alone is not yet a [`SourcePointer`]:
     /// verification hasn't run at the point `parse::outline_tree` produces
@@ -990,6 +1029,8 @@ mod tests {
             item_type: OutlineItemType::Node,
             expansion: ExpansionState::NotExpanded,
             source: None,
+            chapter_number: None,
+            resolved_page: None,
         }
     }
 
@@ -1275,15 +1316,18 @@ mod tests {
         assert!(parse::outline_tree(r#"[{"title":"Missing fields"}]"#).is_none());
     }
 
-    /// S27g (2026-08-29): a non-empty `topics` array becomes `Chapter`-typed
-    /// `children`, each with no bibliography of its own (it inherits the
-    /// parent's, `resolve_grounding_source`) — and a blank topic string is
-    /// dropped rather than materialized as an empty-titled chapter.
+    /// S27g (introduced 2026-08-29 as `topics`, reversed to number+name
+    /// 2026-08-30): a non-empty `chapters` array becomes `Chapter`-typed
+    /// `children`, each carrying `number` on `chapter_number` and `name` as
+    /// its own `title`, with no bibliography of its own (it inherits the
+    /// parent's, `resolve_grounding_source`) — a blank `name` is dropped
+    /// rather than materialized as an empty-titled chapter, and a missing or
+    /// blank `number` becomes `None`, never an empty string.
     #[test]
-    fn parse_outline_tree_topics_become_chapter_children() {
+    fn parse_outline_tree_chapters_become_chapter_children() {
         let nodes = parse::outline_tree(
-            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","topics":["functions in C","recursion in C","  "]},
-                {"title":"Calculus, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","topics":[]}]"#,
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":"4","name":"functions in C"},{"number":"4.10","name":"recursion in C"},{"number":"  ","name":"  "}]},
+                {"title":"Calculus, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","chapters":[]}]"#,
         )
         .unwrap();
         assert_eq!(nodes.len(), 2);
@@ -1292,12 +1336,23 @@ mod tests {
         assert_eq!(nodes[0].children.len(), 2);
         assert_eq!(nodes[0].children[0].title, "functions in C");
         assert_eq!(nodes[0].children[0].item_type, OutlineItemType::Chapter);
+        assert_eq!(nodes[0].children[0].chapter_number.as_deref(), Some("4"));
         assert!(nodes[0].children[0].bibliography.is_none());
         assert_eq!(nodes[0].children[1].title, "recursion in C");
+        assert_eq!(nodes[0].children[1].chapter_number.as_deref(), Some("4.10"));
 
-        // An empty `topics` array materializes no children at all — the
+        // An empty `chapters` array materializes no children at all — the
         // "whole work is in scope" case stays exactly like before S27g.
         assert!(nodes[1].children.is_empty());
+    }
+
+    #[test]
+    fn parse_outline_tree_a_chapter_with_no_confident_number_gets_none() {
+        let nodes = parse::outline_tree(
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":null,"name":"basic C syntax"}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(nodes[0].children[0].chapter_number, None);
     }
 
     #[test]
@@ -1789,6 +1844,122 @@ mod tests {
         .await
         .unwrap();
         assert!(a.all_demonstrated());
+    }
+
+    /// S27g live check (2026-08-30, user request: "do some tests with a
+    /// live provider and report the results"): drives the real,
+    /// `{number, name}`-structured `propose_outline` against the REAL
+    /// configured provider (`.env`), for a real book already in
+    /// `learnive-data/library/` — Stewart's *Calculus: Early
+    /// Transcendentals* — and resolves every proposed `Chapter` child
+    /// against that PDF's OWN embedded bookmarks (`source::pdf::read_pdf`'s
+    /// `outline`, not a mocked TOC) via `source::match_chapter`. This is
+    /// deliberately the wiring test in place of a router-level integration
+    /// test: unit coverage already exercises `match_chapter` in isolation
+    /// (`toc_confirm::tests`), and a synthetic TOC can't surface what a
+    /// REAL, long table of contents does — the short-title containment
+    /// collision this same commit's `match_chapter_prefers_the_longer_of_
+    /// two_containment_matches` regression test was written to catch was
+    /// found by reasoning about exactly this scenario, not by a synthetic
+    /// unit test alone. Not part of the normal suite — no oracle to assert
+    /// a specific outcome against (model output varies run to run), and it
+    /// spends real API budget. Prints a resolution-rate summary (proposed /
+    /// carried a number / resolved to a page) rather than asserting one,
+    /// since that number is inherently non-deterministic; the assertions
+    /// that DO run are structural (the schema round-trips, matching never
+    /// panics). Run with:
+    /// `cargo test -p learnive --lib engine::tests::live_chapter_number_matching_against_a_real_book -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "hits the real configured AI provider and reads a real library PDF; run manually, see doc comment"]
+    async fn live_chapter_number_matching_against_a_real_book() {
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
+        crate::load_dotenv(env_path);
+        let data_dir =
+            std::env::temp_dir().join(format!("learnive-live-check-{}", std::process::id()));
+        let config = crate::config::AppConfig::load(&data_dir);
+        let secret = crate::secret::SecretStore::open(&data_dir);
+        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+
+        let pdf_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library/[Stewart's Calculus Series] James (James Stewart) Stewart - Calculus_ Early Transcendentals (2007, Brooks Cole).pdf"
+        );
+        let doc = crate::source::read_pdf(pdf_path).expect("read the real Stewart Calculus PDF");
+
+        fn flatten(
+            entries: &[crate::source::OutlineEntry],
+            out: &mut Vec<crate::source::ConfirmedTocEntry>,
+        ) {
+            for e in entries {
+                out.push(crate::source::ConfirmedTocEntry {
+                    title: e.title.clone(),
+                    number: None,
+                    page: Some(e.page),
+                    inferred: true,
+                });
+                flatten(&e.children, out);
+            }
+        }
+        let mut toc_entries = Vec::new();
+        flatten(&doc.outline, &mut toc_entries);
+        println!(
+            "\n=== Stewart Calculus: {} embedded bookmark entries (flattened) ===",
+            toc_entries.len()
+        );
+        assert!(
+            !toc_entries.is_empty(),
+            "the fixture PDF has no embedded bookmarks — pick a different real book or fall back \
+             to S27k's TOC-deduction cascade instead of `outline` directly"
+        );
+
+        let nodes = propose_outline(
+            &ai,
+            "Calculus: Early Transcendentals",
+            "Understand derivatives, integrals, and the fundamental theorem of calculus well \
+             enough to apply them to related-rates and optimization problems.",
+            &[],
+        )
+        .await
+        .expect("live propose_outline call");
+        assert!(!nodes.is_empty(), "model proposed an empty reading list");
+
+        let mut proposed = 0usize;
+        let mut carried_number = 0usize;
+        let mut resolved = 0usize;
+        for book in &nodes {
+            println!("--- proposed work: {} ---", book.title);
+            for chapter in &book.children {
+                if chapter.item_type != OutlineItemType::Chapter {
+                    continue;
+                }
+                proposed += 1;
+                if chapter.chapter_number.is_some() {
+                    carried_number += 1;
+                }
+                let hit = crate::source::match_chapter(
+                    &toc_entries,
+                    chapter.chapter_number.as_deref(),
+                    &chapter.title,
+                );
+                match &hit {
+                    Some(entry) => {
+                        resolved += 1;
+                        println!(
+                            "  [{:?}] {:?} -> MATCHED \"{}\" (page {:?})",
+                            chapter.chapter_number, chapter.title, entry.title, entry.page
+                        );
+                    }
+                    None => println!(
+                        "  [{:?}] {:?} -> no match",
+                        chapter.chapter_number, chapter.title
+                    ),
+                }
+            }
+        }
+        println!(
+            "\n=== resolution rate: {resolved}/{proposed} resolved, {carried_number}/{proposed} \
+             carried a proposed number ==="
+        );
     }
 }
 

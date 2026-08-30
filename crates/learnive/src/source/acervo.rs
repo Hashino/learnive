@@ -1464,6 +1464,7 @@ mod tests {
                 &crate::source::toc::TocResolution {
                     resolved: vec![crate::source::toc::ResolvedTocEntry {
                         title: "Chapter One".into(),
+                        number: None,
                         page: 1,
                     }],
                     unresolved: Vec::new(),
@@ -1512,6 +1513,7 @@ mod tests {
                 &crate::source::toc::TocResolution {
                     resolved: vec![crate::source::toc::ResolvedTocEntry {
                         title: "Chapter One".into(),
+                        number: None,
                         page: 1,
                     }],
                     unresolved: vec!["Appendix".into()],

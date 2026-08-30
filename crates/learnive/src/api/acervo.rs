@@ -612,6 +612,7 @@ pub async fn put_acervo_toc(
         .into_iter()
         .map(|e| ConfirmedTocEntry {
             title: e.title,
+            number: None,
             page: e.page,
             // A full manual submission is always a user correction (S27k,
             // never overwritten by a later deduction pass — see
@@ -751,6 +752,8 @@ mod tests {
                 },
                 verification: None,
             }),
+            chapter_number: None,
+            resolved_page: None,
         }
     }
 
