@@ -13,9 +13,12 @@
 //! back into [`super::acervo::validate_acervo`]'s own candidate search — the
 //! task only asks that a manual decision be recorded "somewhere sensible"
 //! for a later slice to read, and consuming it inside the acervo gate's
-//! automatic matching belongs to whichever slice makes the gate itself real
-//! (S27g's contextual expansion or S27h's mandatory-gate wiring), neither of
-//! which this slice builds. The one place this slice *does* honor a manual
+//! automatic matching belongs to whichever slice makes the gate itself real —
+//! which turned out to be S27m (`api::reading::ensure_document_grounded`),
+//! not this one. (This line used to name "S27h's mandatory-gate wiring" as a
+//! candidate owner; S27h was the *evaluation* gate, never this, and was
+//! dropped by user decision on 2026-08-30.) The one place this slice *does*
+//! honor a manual
 //! pairing is its own TOC-confirmation endpoint (`api::acervo`), which needs
 //! *a* resolved filename before it can read a PDF's table of contents at
 //! all.

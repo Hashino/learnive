@@ -2,7 +2,12 @@
 // manual matching, and TOC confirmation. Surfaces the backend already built
 // in S27c/S27d/S27e (api/acervo.rs) — this file adds no policy of its own.
 //
-// Deliberately NOT a blocking gate (S27h's job, out of scope here): this
+// This screen is not itself the block — the server is. `ensure_document_
+// grounded` (S27m) refuses generation while the acervo isn't clear, so a
+// user who skips past this screen still can't generate. What follows is the
+// courtesy path, not the enforcement path. (This comment used to credit the
+// blocking to a future "S27h"; that slice was the evaluation gate, never
+// this, and was dropped by user decision on 2026-08-30.) This
 // screen opens (1) right after a document with book/article sources is
 // created, as a courtesy stop between confirmation and the first node's
 // generation — it auto-advances into node generation the moment every item
@@ -128,8 +133,9 @@ async function loadAcervoReport() {
     });
   } catch (err) {
     if (acervoState.mode === "coldstart") {
-      // Informational only in this slice (S27h makes it a real gate) — a
-      // broken check must never block generation.
+      // A broken check must never block here: the real refusal is the
+      // server's (`ensure_document_grounded`, S27m), so letting the user
+      // through on a client-side error costs nothing and avoids a dead end.
       continueFromAcervoGate();
       return;
     }

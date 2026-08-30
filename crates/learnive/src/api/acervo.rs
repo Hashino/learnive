@@ -7,10 +7,17 @@
 //! landed alongside it in `source::acervo` (`candidate_matches`,
 //! `unmatched_library_files`, `match_report`).
 //!
-//! **Deliberately not wired into cold start or `create_document`** — making
-//! the gate mandatory/blocking is explicitly S27h's job, not this slice's.
-//! These endpoints are read/act-on-demand: a document that never opens the
-//! acervo screen behaves exactly as it did before this module existed.
+//! **These endpoints are read/act-on-demand** — they report and let the user
+//! act, they don't gate anything themselves.
+//!
+//! **Correction (2026-08-30):** this comment used to say that making the gate
+//! mandatory/blocking was "S27h's job". That was wrong twice over, and PLAN.md
+//! records it as the origin of a real hole (nobody owned making the gate real,
+//! because everyone assumed S27h would). S27h was the *evaluation* gate — a
+//! different subject entirely — and it was dropped altogether by user decision
+//! on 2026-08-30. **The acervo gate is blocking today, and S27m is what made
+//! it so:** `api::reading::ensure_document_grounded` refuses generation for a
+//! document whose acervo isn't clear, as a document-level precondition.
 //!
 //! **Cost note:** `source::acervo::validate_acervo`/`candidate_matches`/
 //! `match_report` each read and parse every PDF in the library
@@ -171,10 +178,11 @@ struct AcervoPhaseResp {
     phase: &'static str,
 }
 
-/// The acervo gate's own report — real and actionable, but deliberately
-/// **not enforced** anywhere in the generation flow (S27h's job). Lists
-/// what's missing by bibliographic title, never by filename (SPEC's own
-/// wording).
+/// The acervo gate's own report — read-only and actionable. Enforcement is
+/// **not** here: `api::reading::ensure_document_grounded` (S27m) is what
+/// refuses generation while the acervo isn't clear. This endpoint only tells
+/// the user what's missing, by bibliographic title, never by filename (SPEC's
+/// own wording).
 ///
 /// **Streams progress over SSE (S27f, live-reported 2026-08-29: "a tela de
 /// checando acervo deveria reportar progresso")** — a real library can hold

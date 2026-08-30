@@ -256,8 +256,9 @@ pub fn build_router(state: AppState) -> Router {
             get(api::get_profile).post(api::revise_profile),
         )
         // S27f: the acervo gate report ("what's missing"), PDF<->item
-        // manual matching, and TOC-confirmation screens. On-demand only —
-        // never wired into the mandatory generation flow (S27h's job).
+        // manual matching, and TOC-confirmation screens. Read/act-on-demand:
+        // enforcement lives in `api::reading::ensure_document_grounded`
+        // (S27m), which refuses generation while the acervo isn't clear.
         .route("/api/documents/{doc}/acervo", get(api::get_acervo_report))
         .route(
             "/api/documents/{doc}/acervo/matches",
