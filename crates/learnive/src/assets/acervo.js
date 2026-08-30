@@ -272,6 +272,10 @@ function renderAcervoReport(report) {
       bits.push(t("acervo.identityMismatch", item.identity_reason || ""));
     }
     if (item.text_layer === "no_text") bits.push(t("acervo.noTextLayer"));
+    // Distinct from "no_text" on purpose: the book is correct and the user
+    // must not be sent to re-acquire it (SPEC §11.1's manual-acquisition cost).
+    if (item.text_layer === "extractor_failed")
+      bits.push(t("acervo.extractorFailed"));
     if (bits.length) {
       const details = document.createElement("div");
       details.className = "muted acervo-item-details";

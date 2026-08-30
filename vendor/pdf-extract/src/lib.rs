@@ -1579,6 +1579,55 @@ struct Processor<'a> {
 // operation up front instead of panicking (index-out-of-bounds, or a failed
 // `assert!`) partway through a page's operation list. Operators omitted here
 // either take no operands, or only iterate `operands` (safe for any length).
+/// learnive patch 2 — removes PDF comments (`%` to end of line) from a
+/// content stream, so `lopdf`'s decoder never meets a token it silently
+/// gives up the whole stream over. See `process_stream`'s call site.
+///
+/// A `%` inside a literal string `( … )` is DATA, not a comment, so this
+/// tracks string state rather than doing a blind line filter — otherwise a
+/// page whose text legitimately contains a percent sign would lose
+/// everything after it. Parenthesis nesting and `\` escapes are handled
+/// because the PDF spec allows both inside literal strings.
+fn strip_content_comments(content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len());
+    let mut depth = 0usize; // literal-string paren depth
+    let mut escaped = false;
+    let mut in_comment = false;
+    for &b in content {
+        if in_comment {
+            // A comment runs to the end of the line; keep the newline so
+            // token boundaries either side of it survive.
+            if b == b'\n' || b == b'\r' {
+                in_comment = false;
+                out.push(b);
+            }
+            continue;
+        }
+        if depth > 0 {
+            out.push(b);
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+            }
+            continue;
+        }
+        match b {
+            b'(' => {
+                depth = 1;
+                out.push(b);
+            }
+            b'%' => in_comment = true,
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
 fn min_operands(op: &str) -> usize {
     match op {
         "cm" | "c" | "Tm" => 6,
@@ -1596,6 +1645,16 @@ impl<'a> Processor<'a> {
     }
 
     fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
+        // learnive patch 2: strip PDF comments before decoding. `lopdf`'s
+        // content-stream decoder does not handle the `%` comment token and
+        // gives up on the WHOLE stream, returning `Ok` with ZERO operations —
+        // a silent total loss, not an error. Real scanners emit these: every
+        // page of the 1978 K&R scan starts `% CANON_PFINF_TYPE2_TEXTON`, and
+        // that one comment cost the entire book its text (236 of 236 pages
+        // empty, while poppler read the same file fine). Measured 2026-08-30;
+        // stripping comments takes a representative page from 0 to 505 ops.
+        // See PATCH.md.
+        let content = strip_content_comments(&content);
         let content = Content::decode(&content).unwrap();
         let mut gs: GraphicsState = GraphicsState {
             ts: TextState {

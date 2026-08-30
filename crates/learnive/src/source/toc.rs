@@ -306,6 +306,7 @@ mod tests {
     fn doc(pages: &[&str]) -> PdfDocument {
         let page_texts: Vec<String> = pages.iter().map(|s| s.to_string()).collect();
         PdfDocument {
+            text_layer_unreadable: false,
             text: page_texts.join("\n"),
             page_texts,
             outline: Vec::new(),

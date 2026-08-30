@@ -306,6 +306,11 @@ pub async fn get_acervo_report(
                 let text_layer = match &r.text_layer {
                     source::TextLayerCheck::Extractable { .. } => "extractable",
                     source::TextLayerCheck::NoText => "no_text",
+                    // Deliberately its own wire value, not folded into
+                    // `no_text` — the UI copy has to say "we couldn't read
+                    // this file", never "this book has no text", or it sends
+                    // the user off to re-acquire a book that is already fine.
+                    source::TextLayerCheck::ExtractorFailed => "extractor_failed",
                     source::TextLayerCheck::Skipped => "skipped",
                 };
                 let needs_toc_confirmation = r.toc.needs_user_confirmation();

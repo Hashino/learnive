@@ -204,30 +204,46 @@ impl TocConfirmStore {
 /// doc for the full account of the reversal) against a book's own confirmed
 /// table of contents.
 ///
-/// Number first: an exact match, after stripping everything but digits and
+/// Number first, **but the number is no longer trusted blindly** (revised
+/// 2026-08-30 from measurement, `docs/S27g-chapter-matching-measurements.md`
+/// §4.3): an exact number match, after stripping everything but digits and
 /// dots (so `"§4.10"`, `"Ch. 4.10"`, `"4.10."` all normalize to `"4.10"`),
-/// is unambiguous within one printing and is trusted over the name. Falls
-/// back to the same lenient either-direction containment
-/// `source::matching::normalize` gives every other title comparison in
-/// `source` (`bibliography::plausible_match`, `acervo::candidate_matches`)
-/// when there's no proposed number, or the number matches nothing (a
-/// different edition's numbering, or the model was simply wrong) — a
-/// missing/wrong number must never block an otherwise-good name match.
+/// is unambiguous *within one printing* — but the model is recalling the
+/// number from memory, and when it misremembers, following the number lands
+/// the node in a confidently wrong chapter. That is not hypothetical: **all
+/// three models that completed the 2026-08-30 bake-off** proposed Pro Git's
+/// "Git Internals" with a wrong number (`9`, `9`, `6`; the real one is `10`)
+/// and the old number-first rule followed every one of them into the wrong
+/// chapter. So a number hit is confirmed by a **similarity veto**: if the
+/// name of the entry the number points at is too far from the proposed name,
+/// the number is discarded and the name tier decides instead.
+///
+/// [`NAME_SIMILARITY_FLOOR`] is picked from the measured pairs, not guessed —
+/// on the real bake-off data the correct number matches score ≥ 0.786
+/// (`"branching"` vs `"git branching"`) and the wrong ones ≤ 0.682
+/// (`"git internals"` vs `"git and other systems"`), so the floor sits in
+/// that gap. The metric is **Jaro-Winkler**, which is prefix-weighted and
+/// character-level; token overlap gets these exactly backwards, because a
+/// correct match can share no whole token at all (`"integration"` vs
+/// `"integrals"`, 0.883) while a wrong one shares a leading word
+/// (`"git internals"` vs `"git and other systems"`).
 ///
 /// Unlike `plausible_match` (a handful of catalog search results, title
-/// collisions unlikely), the name fallback here searches one book's ENTIRE
+/// collisions unlikely), the name tier here searches one book's ENTIRE
 /// table of contents, where a short, generic entry title ("Introduction",
-/// "Summary", "Functions") is common and can sit anywhere in the list.
-/// First-match-wins under either-direction containment is order-dependent
-/// and biased toward these short entries: `needle.contains(&hay)` is true
-/// the moment ANY short `hay` happens to be a substring of the proposed
-/// `name`, whether or not it's the entry the model meant. So among every
-/// entry that clears the containment bar, this picks the one with the
-/// LONGEST normalized title — the most specific match, and in particular
-/// the exact match when one exists (an exact title has `hay == needle`,
-/// which is always at least as long as any shorter substring competitor).
-/// (Flagged by review 2026-08-30 before this ever ran against a real,
-/// long table of contents; see `match_chapter_prefers_the_longer_of_two_containment_matches`.)
+/// "Summary", "Functions") is common and can sit anywhere in the list. A
+/// candidate qualifies by either-direction containment **or** by clearing
+/// the same similarity floor, and among the qualifiers the **most similar**
+/// wins.
+///
+/// Ranking by similarity rather than by length is itself a correction:
+/// shipping "longest normalized title wins" (`ecc2488`) was measured wrong
+/// in the opposite direction — for the needle `"Integrals"` it picked
+/// `"15 - Multiple integrals"` (p978) over `"5 - Integrals"` (p382), 596
+/// pages off, because the wrong entry is longer. No length rule satisfies
+/// both that case and the `"Functions"` / `"Functions and Program Structure"`
+/// case it was added for; "most similar" satisfies both (exact title = 1.0,
+/// which no competitor can beat). See §2.7 of the measurements doc.
 ///
 /// Returns `None`, not an error, when nothing clears the bar: the caller
 /// degrades to whole-work scope, the same convention as every other step of
@@ -239,14 +255,28 @@ pub fn match_chapter<'a>(
     number: Option<&str>,
     name: &str,
 ) -> Option<&'a ConfirmedTocEntry> {
+    let needle = super::matching::normalize(name);
+
     if let Some(target) = number.map(normalize_number).filter(|n| !n.is_empty())
         && let Some(hit) = entries
             .iter()
             .find(|e| e.number.as_deref().map(normalize_number).as_deref() == Some(target.as_str()))
     {
-        return Some(hit);
+        // The similarity veto. With nothing to compare against — the model
+        // sent no name, or the TOC entry has no title — there is no
+        // disagreement to detect, so the number still stands.
+        let hay = super::matching::normalize(&hit.title);
+        if needle.is_empty()
+            || hay.is_empty()
+            || strsim::jaro_winkler(&needle, &hay) >= NAME_SIMILARITY_FLOOR
+        {
+            return Some(hit);
+        }
+        // Vetoed: the number pointed somewhere the name disagrees with. Fall
+        // through and let the name decide, rather than returning None — a
+        // wrong number must not block an otherwise-good name match.
     }
-    let needle = super::matching::normalize(name);
+
     if needle.is_empty() {
         return None;
     }
@@ -254,15 +284,26 @@ pub fn match_chapter<'a>(
         .iter()
         .filter_map(|e| {
             let hay = super::matching::normalize(&e.title);
-            if !hay.is_empty() && (hay.contains(&needle) || needle.contains(&hay)) {
-                Some((hay.len(), e))
-            } else {
-                None
+            if hay.is_empty() {
+                return None;
             }
+            let score = strsim::jaro_winkler(&needle, &hay);
+            let qualifies =
+                hay.contains(&needle) || needle.contains(&hay) || score >= NAME_SIMILARITY_FLOOR;
+            qualifies.then_some((score, e))
         })
-        .max_by_key(|(len, _)| *len)
+        .max_by(|(a, _), (b, _)| a.total_cmp(b))
         .map(|(_, e)| e)
 }
+
+/// Jaro-Winkler floor shared by the number-match veto and the name tier,
+/// calibrated on the 2026-08-30 bake-off pairs rather than guessed: the
+/// lowest-scoring *correct* number match measured 0.786 and the
+/// highest-scoring *wrong* one measured 0.682, so this sits in the gap.
+/// Raising it past ~0.78 starts rejecting real matches; lowering it past
+/// ~0.69 starts admitting the "Git Internals" class of error that all three
+/// bake-off models produced.
+pub const NAME_SIMILARITY_FLOOR: f64 = 0.72;
 
 /// Keeps only digits and dots, then trims a stray trailing dot — `"§4.10"`,
 /// `"Chapter 4.10"`, `"4.10."` and `"4.10"` all collapse to the same string.
@@ -382,17 +423,71 @@ mod tests {
         }
     }
 
-    /// S27g (2026-08-30): an exact number match wins even when the proposed
-    /// name is a total miss — numbering is unambiguous within one printing,
-    /// so it's trusted over a name the model may have guessed poorly.
+    /// S27g: an exact number match wins over a merely-similar name, as long
+    /// as the name at the number AGREES. **Rewritten 2026-08-30**: this test
+    /// used to assert that the number wins even against `"totally unrelated
+    /// wording"`, which the bake-off proved to be the wrong contract — see
+    /// `match_chapter_vetoes_a_number_match_whose_name_loudly_disagrees`.
     #[test]
     fn match_chapter_prefers_an_exact_number_match_over_the_name() {
         let entries = vec![
             confirmed_entry(Some("4"), "Functions and Program Structure", Some(70)),
             confirmed_entry(Some("4.10"), "Recursion", Some(84)),
         ];
-        let hit = match_chapter(&entries, Some("4.10"), "totally unrelated wording").unwrap();
+        let hit = match_chapter(&entries, Some("4.10"), "Recursion").unwrap();
         assert_eq!(hit.page, Some(84));
+    }
+
+    /// The measured failure this veto exists for, taken verbatim from the
+    /// 2026-08-30 bake-off: **all three** models that completed proposed Pro
+    /// Git's "Git Internals" with a wrong number (`9`, `9`, `6`; the real one
+    /// is `10`), and number-first followed each into the wrong chapter. The
+    /// name has to be able to overrule the number.
+    #[test]
+    fn match_chapter_vetoes_a_number_match_whose_name_loudly_disagrees() {
+        let entries = vec![
+            confirmed_entry(Some("9"), "Git and Other Systems", Some(305)),
+            confirmed_entry(Some("10"), "Git Internals", Some(324)),
+        ];
+        let hit = match_chapter(&entries, Some("9"), "Git Internals").unwrap();
+        assert_eq!(
+            hit.page,
+            Some(324),
+            "the name must overrule a confidently wrong number"
+        );
+    }
+
+    /// The veto must not fire on the many correct matches where the model's
+    /// wording differs from the book's — these all scored ≥ 0.786 in the
+    /// measured pairs and every one of them is a genuine hit.
+    #[test]
+    fn match_chapter_keeps_a_number_match_when_the_name_only_differs_in_wording() {
+        for (proposed, title) in [
+            ("Integration", "Integrals"),
+            ("Differentiation", "Differentiaton rules"), // the book's own typo
+            ("Limits and Continuity", "Limits and derivatives"),
+            ("Branching", "Git Branching"),
+        ] {
+            let entries = vec![
+                confirmed_entry(Some("3"), title, Some(200)),
+                confirmed_entry(Some("99"), "Decoy", Some(1)),
+            ];
+            let hit = match_chapter(&entries, Some("3"), proposed)
+                .unwrap_or_else(|| panic!("{proposed:?} vs {title:?} must not be vetoed"));
+            assert_eq!(hit.page, Some(200), "{proposed:?} vs {title:?}");
+        }
+    }
+
+    /// A vetoed number falls THROUGH to the name tier rather than returning
+    /// `None` — otherwise a wrong number would be worse than no number.
+    #[test]
+    fn match_chapter_vetoed_number_still_lets_the_name_find_the_right_entry() {
+        let entries = vec![
+            confirmed_entry(Some("2"), "Completely Different Topic", Some(10)),
+            confirmed_entry(Some("7"), "Pointers and Arrays", Some(93)),
+        ];
+        let hit = match_chapter(&entries, Some("2"), "Pointers and Arrays").unwrap();
+        assert_eq!(hit.page, Some(93));
     }
 
     /// The exact K&R counter-example this redesign is built around:
@@ -429,45 +524,68 @@ mod tests {
         assert_eq!(hit.page, Some(84));
     }
 
-    /// A generic, short TOC entry ("Functions") is a valid containment
-    /// match for a longer proposed name ("Functions and Program
-    /// Structure") purely because it's a substring of it — but it's the
-    /// wrong chapter when a more specific entry with the exact title also
-    /// exists. First-match-wins would pick whichever is earlier in
-    /// `entries`; this asserts the LONGER (more specific) match wins
-    /// regardless of order, catching the regression flagged in
-    /// `match_chapter`'s own doc comment before it ever hit a real,
-    /// long table of contents.
+    /// A generic, short TOC entry ("Functions") is a valid containment match
+    /// for a longer proposed name purely because it's a substring of it — but
+    /// it's the wrong chapter when a more specific entry with the exact title
+    /// also exists. Most-similar-wins picks the exact one (1.0) regardless of
+    /// order in `entries`.
     #[test]
-    fn match_chapter_prefers_the_longer_of_two_containment_matches() {
-        let entries_short_first = vec![
-            confirmed_entry(None, "Functions", Some(10)),
-            confirmed_entry(None, "Functions and Program Structure", Some(60)),
-        ];
-        let hit = match_chapter(
-            &entries_short_first,
-            None,
-            "Functions and Program Structure",
-        )
-        .unwrap();
-        assert_eq!(hit.page, Some(60));
+    fn match_chapter_prefers_the_most_similar_of_two_containment_matches() {
+        for entries in [
+            vec![
+                confirmed_entry(None, "Functions", Some(10)),
+                confirmed_entry(None, "Functions and Program Structure", Some(60)),
+            ],
+            vec![
+                confirmed_entry(None, "Functions and Program Structure", Some(60)),
+                confirmed_entry(None, "Functions", Some(10)),
+            ],
+        ] {
+            let hit = match_chapter(&entries, None, "Functions and Program Structure").unwrap();
+            assert_eq!(hit.page, Some(60));
+        }
+    }
 
-        let entries_long_first = vec![
-            confirmed_entry(None, "Functions and Program Structure", Some(60)),
-            confirmed_entry(None, "Functions", Some(10)),
-        ];
-        let hit =
-            match_chapter(&entries_long_first, None, "Functions and Program Structure").unwrap();
-        assert_eq!(hit.page, Some(60));
+    /// The case that proved "longest wins" wrong in the opposite direction
+    /// (measurements doc §2.7): for the needle `"Integrals"`, Stewart's TOC
+    /// offers both `"Integrals"` (p382) and the LONGER `"Multiple integrals"`
+    /// (p978). Length picked the one 596 pages away; similarity picks the
+    /// exact title. Both orders, since the old bug was order-sensitive too.
+    #[test]
+    fn match_chapter_does_not_let_a_longer_qualified_title_beat_the_exact_one() {
+        for entries in [
+            vec![
+                confirmed_entry(None, "Multiple integrals", Some(978)),
+                confirmed_entry(None, "Integrals", Some(382)),
+            ],
+            vec![
+                confirmed_entry(None, "Integrals", Some(382)),
+                confirmed_entry(None, "Multiple integrals", Some(978)),
+            ],
+        ] {
+            let hit = match_chapter(&entries, None, "Integrals").unwrap();
+            assert_eq!(hit.page, Some(382), "must not drift to Multiple integrals");
+        }
     }
 
     /// Number strings are normalized before comparison: punctuation/prefix
     /// noise around the digits must not defeat an otherwise-exact match.
+    /// (Name kept agreeing so the similarity veto isn't what's under test.)
     #[test]
     fn match_chapter_normalizes_number_punctuation_before_comparing() {
         let entries = vec![confirmed_entry(Some("2.2.1"), "Nested Loops", Some(40))];
-        let hit = match_chapter(&entries, Some("§2.2.1."), "unrelated").unwrap();
+        let hit = match_chapter(&entries, Some("§2.2.1."), "Nested Loops").unwrap();
         assert_eq!(hit.page, Some(40));
+    }
+
+    /// With no name to compare against there is no disagreement to detect,
+    /// so a number hit still stands — the veto must not turn "no name" into
+    /// "no match".
+    #[test]
+    fn match_chapter_keeps_a_number_match_when_there_is_no_name_to_veto_with() {
+        let entries = vec![confirmed_entry(Some("4.10"), "Recursion", Some(84))];
+        let hit = match_chapter(&entries, Some("4.10"), "   ").unwrap();
+        assert_eq!(hit.page, Some(84));
     }
 
     /// Nothing clears the bar — degrades to `None`, never an error, so the

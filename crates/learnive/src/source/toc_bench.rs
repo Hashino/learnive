@@ -624,3 +624,95 @@ mod raw_probe {
         }
     }
 }
+
+/// Regression probe for the K&R text-layer bug (2026-08-30): the file is a
+/// scan carrying a real, invisible OCR layer (`3 Tr`, non-embedded WinAnsi
+/// Helvetica, hex ASCII) that `pdf_extract` renders as 236 empty pages while
+/// poppler reads it fine. Asserts the acervo gate classifies that as
+/// `ExtractorFailed` (our bug) and never as `NoText` (go re-buy the book).
+#[cfg(test)]
+mod kr_text_layer {
+    #[test]
+    #[ignore = "reads a large library PDF; run manually"]
+    fn kr_is_reported_as_extractor_failure_not_as_a_missing_text_layer() {
+        let dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../learnive-data/library"
+        ));
+        let Some(path) = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().contains("Kernighan"))
+            })
+        else {
+            eprintln!("K&R not in the library; skipping");
+            return;
+        };
+        {
+            let ld = lopdf::Document::load(&path).unwrap();
+            let mut ns: Vec<u32> = ld.get_pages().keys().copied().collect();
+            ns.sort_unstable();
+            for n in ns.into_iter().take(3) {
+                let pid = ld.get_pages()[&n];
+                let raw = ld.get_page_content(pid);
+                match lopdf::content::Content::decode(&raw) {
+                    Ok(c) => {
+                        let ops: Vec<&str> =
+                            c.operations.iter().map(|o| o.operator.as_str()).collect();
+                        println!(
+                            "page {n}: {} bytes, {} ops, first: {:?}",
+                            raw.len(),
+                            ops.len(),
+                            &ops[..ops.len().min(14)]
+                        );
+                    }
+                    Err(e) => println!("page {n}: DECODE FAILED {e:?} ({} bytes)", raw.len()),
+                }
+                {
+                    let txt = String::from_utf8_lossy(&raw);
+                    println!("  raw head: {:?}", &txt[..txt.len().min(160)]);
+                    println!(
+                        "  has BT: {}  has Tj: {}",
+                        txt.contains("BT"),
+                        txt.contains("Tj")
+                    );
+                    // Hypothesis: the leading `%` comment defeats the decoder.
+                    let stripped: Vec<u8> = raw
+                        .split(|b| *b == b'\n')
+                        .filter(|l| !l.starts_with(b"%"))
+                        .flat_map(|l| l.iter().copied().chain(std::iter::once(b'\n')))
+                        .collect();
+                    match lopdf::content::Content::decode(&stripped) {
+                        Ok(c) => println!("  AFTER STRIPPING COMMENTS: {} ops", c.operations.len()),
+                        Err(e) => println!("  AFTER STRIPPING: still failed {e:?}"),
+                    }
+                }
+            }
+        }
+        let pdf = crate::source::read_pdf(&path).expect("read");
+        let chars = pdf.text.trim().chars().count();
+        let empty = pdf
+            .page_texts
+            .iter()
+            .filter(|t| t.trim().is_empty())
+            .count();
+        println!(
+            "K&R: {chars} chars over {} pages ({empty} empty)",
+            pdf.page_texts.len()
+        );
+        assert!(
+            chars > 10_000,
+            "the OCR text layer must now be readable (was 0 before the \
+             comment-stripping patch); got {chars} chars"
+        );
+        assert!(
+            !pdf.text_layer_unreadable,
+            "with text extracted, nothing is left to flag"
+        );
+    }
+}

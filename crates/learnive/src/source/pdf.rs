@@ -143,6 +143,22 @@ pub struct PdfDocument {
     pub page_texts: Vec<String>,
     pub outline: Vec<OutlineEntry>,
     pub pages: PageMap,
+    /// True when the page content streams DO contain text-showing operators
+    /// (`Tj`/`TJ`/`'`/`"`) even though [`Self::text`] came out empty — i.e.
+    /// the book has a real text layer and **our extractor is what failed**.
+    ///
+    /// This distinction is user-facing, not cosmetic. Measured 2026-08-30:
+    /// K&R (a scan carrying a perfectly good invisible OCR layer — `3 Tr`,
+    /// non-embedded WinAnsi Helvetica, hex-encoded ASCII) extracts as 236 of
+    /// 236 EMPTY pages under `pdf_extract`, while poppler's `pdftotext` reads
+    /// the same file fine. Without this flag the acervo gate reports "no text
+    /// layer", which tells the user to go re-acquire a book that is already
+    /// correct — the worst possible instruction under the acquisition route
+    /// where the user pays for every download by hand (SPEC §11.1).
+    ///
+    /// Only computed when extraction produced nothing, so a healthy book
+    /// never pays for the scan.
+    pub text_layer_unreadable: bool,
 }
 
 /// A genuinely unreadable/corrupt PDF — the only failure mode this module
@@ -210,11 +226,56 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
     let page_texts = extract_pages_resilient(path);
     let text = page_texts.join("\n");
 
+    // Only pay for this when there is a failure to explain (see
+    // `PdfDocument::text_layer_unreadable`).
+    let text_layer_unreadable = text.trim().is_empty() && has_text_operators(&doc);
+
     Ok(PdfDocument {
         text,
         page_texts,
         outline,
         pages: PageMap { page_count, labels },
+        text_layer_unreadable,
+    })
+}
+
+/// Do the page content streams contain any text-showing operator at all?
+///
+/// Answers "is there text in this file that we failed to read?" without
+/// caring what the text says — enough to tell an image-only scan (nothing to
+/// extract, the user really does need a different copy) apart from an
+/// extractor failure (the text is right there and we produced nothing).
+///
+/// Stops at the first page that carries text: a document only has to prove
+/// the point once, and a scan with no text layer anywhere is the case where
+/// walking every page would be most expensive.
+fn has_text_operators(doc: &lopdf::Document) -> bool {
+    // Deliberately a LEXICAL scan of the raw bytes, not a `Content::decode`
+    // walk. This is a detector for "the extractor failed", so it must not
+    // share a failure mode with the extractor: `lopdf`'s content decoder is
+    // exactly what returns zero operations on a stream it dislikes (the `%`
+    // comment bug the vendored `pdf-extract` patch fixes), which would make
+    // this report "no text" for precisely the files it exists to catch.
+    // Looking for a bare `BT` token is coarse but cannot be defeated the same
+    // way — and coarse is right here, since the question is only whether text
+    // is present at all, never what it says.
+    let pages = doc.get_pages();
+    let mut page_nums: Vec<u32> = pages.keys().copied().collect();
+    page_nums.sort_unstable();
+    page_nums.into_iter().any(|n| {
+        let Some(&page_id) = pages.get(&n) else {
+            return false;
+        };
+        let content = doc.get_page_content(page_id);
+        content.windows(2).enumerate().any(|(i, w)| {
+            w == b"BT"
+                && content
+                    .get(i.wrapping_sub(1))
+                    .is_none_or(|b| !b.is_ascii_alphanumeric())
+                && content
+                    .get(i + 2)
+                    .is_none_or(|b| !b.is_ascii_alphanumeric())
+        })
     })
 }
 

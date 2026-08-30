@@ -128,8 +128,20 @@ pub enum IdentityCheck {
 /// a node comes out sourceless.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextLayerCheck {
-    Extractable { chars: usize },
+    Extractable {
+        chars: usize,
+    },
+    /// The PDF genuinely has nothing to extract — an image-only scan with no
+    /// OCR. The user does need a different copy of this book.
     NoText,
+    /// The PDF **does** carry a text layer and our extractor produced nothing
+    /// from it (`PdfDocument::text_layer_unreadable`). Still blocking — an
+    /// unindexed source grounds nothing (SPEC §11.1) — but it must never be
+    /// reported to the user as `NoText`: telling someone to re-acquire a book
+    /// that is already correct is the worst instruction the acervo gate can
+    /// give, and under manual acquisition they pay for every download by hand.
+    /// Measured 2026-08-30 against K&R; see `PdfDocument::text_layer_unreadable`.
+    ExtractorFailed,
     Skipped,
 }
 
@@ -233,7 +245,10 @@ impl ItemReport {
         if matches!(self.identity, IdentityCheck::Mismatch { .. }) {
             out.push("identity");
         }
-        if matches!(self.text_layer, TextLayerCheck::NoText) {
+        if matches!(
+            self.text_layer,
+            TextLayerCheck::NoText | TextLayerCheck::ExtractorFailed
+        ) {
             out.push("text_layer");
         }
         out
@@ -547,7 +562,11 @@ fn check_identity(item: &ExpectedItem, cand: &LibraryCandidate) -> IdentityCheck
 fn check_text_layer(pdf: &PdfDocument) -> TextLayerCheck {
     let trimmed = pdf.text.trim();
     if trimmed.is_empty() {
-        TextLayerCheck::NoText
+        if pdf.text_layer_unreadable {
+            TextLayerCheck::ExtractorFailed
+        } else {
+            TextLayerCheck::NoText
+        }
     } else {
         TextLayerCheck::Extractable {
             chars: trimmed.chars().count(),

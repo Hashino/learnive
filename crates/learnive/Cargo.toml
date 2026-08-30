@@ -27,6 +27,15 @@ serde_json = "1"
 # (libgen.li serves `index.php` results as HTML; libgen.is answers the
 # `out=json` query), so we scrape the results table and keep a JSON fallback.
 scraper = "0.20"
+# Chapter-title similarity for `source::match_chapter` (S27g). Already in the
+# lock file transitively, so this costs no new build. Needed because the two
+# real failure modes measured 2026-08-30 cannot both be served by containment:
+# a correct match can share almost no tokens with the TOC title ("Integration"
+# -> "Integrals"), while a WRONG one can share a leading token ("Git Internals"
+# -> "Git and Other Systems"). Character-level, prefix-weighted similarity
+# separates them; token overlap gets them exactly backwards.
+strsim = "0.11"
+
 # Hot-swap the AI provider when the user (re)configures it in /setup (§12).
 arc-swap = "1"
 # HTML sanitization: kept for the model-prose side (§3.1's still-open

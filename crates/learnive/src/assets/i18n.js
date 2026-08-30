@@ -114,6 +114,8 @@ const I18N = {
     "acervo.filename": "File: {0}",
     "acervo.identityMismatch": "Possible wrong file: {0}",
     "acervo.noTextLayer": "No extractable text (scanned image?)",
+    "acervo.extractorFailed":
+      "This file has a text layer we couldn't read \u2014 the book is fine, our extractor isn't. Re-downloading won't help.",
     "acervo.reviewMatch": "Resolve match",
     "acervo.reviewToc": "Review chapters",
     "acervo.matches.title": "Match PDFs to your reading list",
@@ -278,6 +280,8 @@ const I18N = {
     "acervo.filename": "Arquivo: {0}",
     "acervo.identityMismatch": "Possível arquivo errado: {0}",
     "acervo.noTextLayer": "Sem texto extraível (digitalização de imagem?)",
+    "acervo.extractorFailed":
+      "Este arquivo tem camada de texto que não conseguimos ler \u2014 o livro está certo, o extrator é que falhou. Baixar de novo não resolve.",
     "acervo.reviewMatch": "Resolver correspondência",
     "acervo.reviewToc": "Revisar capítulos",
     "acervo.matches.title": "Casar PDFs com sua lista de leitura",
