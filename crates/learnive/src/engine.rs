@@ -294,26 +294,26 @@ pub fn expected_items(outline: &Outline) -> Vec<(String, crate::source::Expected
 }
 
 /// Whether an outline item can be directly generated as content (S27g,
-/// 2026-08-29, added in review before the topic-proposal slice shipped). A
-/// `Node`/`Chapter` always is — `Chapter` is today's leaf content unit
-/// (chapter→node fan-out is a later, unbuilt slice; see
-/// [`OutlineItemType::Chapter`]'s doc comment). A `Book`/`Article` is
-/// generable UNLESS `propose_outline` gave it topic-scoped `Chapter`
-/// children: those children carry the actual content now, and letting the
-/// whole-work item stay generable on top of them would just relocate the
-/// reported bug ("o livro todo tratado como um nodo só") to the END of the
-/// reading list instead of fixing it — the learner would get the N focused
-/// chapters, then a final node that tries to teach the entire book. A
-/// `Book`/`Article` with no children (the plain `topics: []` case) stays
-/// exactly as generable as it always was: no regression for a document that
-/// never needed chapter scoping. Checked by real children in `outline.items`
-/// (`parent_id`), not `item.expansion`, so this can't desync from what
-/// actually got materialized.
+/// 2026-08-29; generalized to `Chapter` 2026-08-30 for item 2's chapter→node
+/// split). A `Node` always is — it's the atomic content unit, never a
+/// container. Everything else (`Book`/`Article`/`Chapter`) is generable
+/// UNLESS it actually has children in `outline.items` right now: those
+/// children carry the real content, and letting the container stay
+/// generable on top of them would just relocate the reported bug ("o livro
+/// todo tratado como um nodo só") from the book level to the chapter level
+/// instead of fixing it — a chapter that got split would otherwise still
+/// generate itself as one monolithic node, then ALSO generate its subnodes.
+/// A container with no children yet (a `Book`/`Article` before chapter
+/// proposal, or a `Chapter` before it's had its first-visit split attempt —
+/// item 2 — regardless of whether that attempt found anything) stays exactly
+/// as generable as it always was: no regression for a document that never
+/// needed the deeper scoping. Checked by real children (`parent_id`), not
+/// `item.expansion`, so this can't desync from what actually got
+/// materialized — true uniformly at any depth, so a Book→Chapter→Node chain
+/// needs no special-casing here (each level asks the same question about
+/// itself).
 pub fn is_generable(outline: &Outline, item: &OutlineItem) -> bool {
-    if !matches!(
-        item.item_type,
-        OutlineItemType::Book | OutlineItemType::Article
-    ) {
+    if item.item_type == OutlineItemType::Node {
         return true;
     }
     !outline
@@ -323,17 +323,24 @@ pub fn is_generable(outline: &Outline, item: &OutlineItem) -> bool {
 }
 
 /// A node/container's gate-relevant state, synthesizing a container's from
-/// its children when it has none of its own (S27g, 2026-08-29). A
-/// non-generable `Book`/`Article` (see [`is_generable`]) never receives a
-/// `Demonstrated` event directly — nothing ever generates it — so without
-/// this, whatever comes after it in the reading list would stay locked
-/// forever the moment its chapters finish (the same "container never
-/// satisfies its own gate" trap a fully-skipped book would also fall into).
-/// A container counts as `Demonstrated` once every one of its direct
-/// children (by `parent_id`) is itself `Demonstrated` or `Skipped`,
-/// recursively — a container with no children at all (shouldn't happen once
-/// [`is_generable`] agrees it isn't one, but checked defensively) reports no
-/// state rather than vacuously "done".
+/// its children when it has none of its own (S27g, 2026-08-29; generalized
+/// to `Chapter` 2026-08-30 for item 2). A non-generable container (see
+/// [`is_generable`] — `Book`/`Article`/`Chapter` alike once it has real
+/// children) never receives a `Demonstrated` event directly — nothing ever
+/// generates it — so without this, whatever comes after it in the reading
+/// list would stay locked forever the moment its children finish (the same
+/// "container never satisfies its own gate" trap a fully-skipped book would
+/// also fall into). A container counts as `Demonstrated` once every one of
+/// its direct children (by `parent_id`) is itself `Demonstrated` or
+/// `Skipped`, recursively — which is what makes a `Book → Chapter → Node`
+/// chain work with no extra case: a mid-chain `Chapter` that split (item 2)
+/// recurses one level deeper into its own `Node` children before reporting
+/// up to the `Book`. A container with no children at all (shouldn't happen
+/// once [`is_generable`] agrees it isn't one, but checked defensively, and
+/// the ordinary case for a `Chapter` that never split) reports no state
+/// rather than vacuously "done" — falling through to `states.get` above on
+/// the next call up the chain would be wrong (a leaf `Chapter` genuinely has
+/// no state of its own until it either generates directly or splits).
 pub fn effective_state(
     outline: &Outline,
     states: &std::collections::HashMap<String, crate::events::aggregate::NodeState>,
@@ -344,10 +351,7 @@ pub fn effective_state(
         return Some(*s);
     }
     let item = outline.items.iter().find(|i| i.id == item_id)?;
-    if matches!(
-        item.item_type,
-        OutlineItemType::Node | OutlineItemType::Chapter
-    ) {
+    if item.item_type == OutlineItemType::Node {
         return None;
     }
     let children: Vec<&OutlineItem> = outline
@@ -365,6 +369,37 @@ pub fn effective_state(
         )
     });
     all_satisfied.then_some(NodeState::Demonstrated)
+}
+
+/// Most-recently-generated **leaf** reachable from an outline item, walking
+/// `parent_id` children as deep as the tree actually goes (S27g item 2,
+/// 2026-08-30) — generalizes `api::cold_start::list_documents`'s old
+/// one-level-only `Book → Chapter` resume fallback (added when a
+/// non-generable `Book`/`Article` container turned out to never get a node
+/// file of its own, so a plain `generated.contains(id)` lookup on it was
+/// always `None`) to any depth, so a `Chapter` that item 2 has since split
+/// into `Node`s resumes into the right one instead of stopping one level
+/// too early. Children are tried in reverse outline order (`.rev()`) — this
+/// resolves ties to the *last child in outline order with any generated
+/// descendant*, not necessarily the most recently generated one; it's the
+/// same tie-break the one-level fallback this replaces already used, so it's
+/// not a behavior change. Returns the item itself once it's directly
+/// generated, regardless of depth — the base case that makes the recursion
+/// correct for a plain leaf `Node` too, not just a container.
+pub fn resume_leaf(
+    outline: &Outline,
+    generated: &std::collections::HashSet<String>,
+    item_id: &str,
+) -> Option<String> {
+    if generated.contains(item_id) {
+        return Some(item_id.to_string());
+    }
+    outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(item_id))
+        .rev()
+        .find_map(|c| resume_leaf(outline, generated, &c.id))
 }
 
 /// Resolves which document actually owns a node's file/event-log (§S15b) —
@@ -1200,7 +1235,17 @@ mod tests {
     }
 
     #[test]
-    fn is_generable_is_always_true_for_a_node_or_chapter() {
+    fn is_generable_is_always_true_for_a_plain_node() {
+        let node = outline_item("n1", None);
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![node.clone()],
+        };
+        assert!(is_generable(&outline, &node));
+    }
+
+    #[test]
+    fn is_generable_is_true_for_a_chapter_with_no_node_children() {
         let mut book = outline_item("book1", None);
         book.item_type = OutlineItemType::Book;
         let mut items = vec![book];
@@ -1210,6 +1255,26 @@ mod tests {
             items,
         };
         assert!(is_generable(&outline, &outline.items[1]));
+    }
+
+    /// S27g item 2 (2026-08-30): a `Chapter` that split into `Node`
+    /// children stops being generable itself — same rule as a `Book` whose
+    /// `propose_outline`-time `Chapter` children arrived, generalized one
+    /// level deeper.
+    #[test]
+    fn is_generable_is_false_for_a_chapter_with_node_children() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut chapter = outline_item("c1", None);
+        chapter.item_type = OutlineItemType::Chapter;
+        chapter.parent_id = Some("book1".to_string());
+        let mut node = outline_item("n1", None);
+        node.parent_id = Some("c1".to_string());
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book, chapter.clone(), node],
+        };
+        assert!(!is_generable(&outline, &chapter));
     }
 
     fn node_states(
@@ -1281,6 +1346,86 @@ mod tests {
             Some(NodeState::Attempted)
         );
         assert_eq!(effective_state(&outline, &states, "no-such-id"), None);
+    }
+
+    /// S27g item 2 (2026-08-30): a `Book → Chapter → Node` chain where the
+    /// chapter split needs no special-casing in `effective_state` itself —
+    /// it recurses into the chapter's own `Node` children exactly the same
+    /// way it recurses into the book's `Chapter` children.
+    #[test]
+    fn effective_state_recurses_through_a_split_chapter_to_its_nodes() {
+        use crate::events::aggregate::NodeState;
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut chapter = outline_item("c1", None);
+        chapter.item_type = OutlineItemType::Chapter;
+        chapter.parent_id = Some("book1".to_string());
+        let mut node = outline_item("n1", None);
+        node.parent_id = Some("c1".to_string());
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book, chapter, node],
+        };
+        // The chapter itself never generates (it split); only its node did.
+        let states = node_states(&[("n1", NodeState::Demonstrated)]);
+        assert_eq!(
+            effective_state(&outline, &states, "c1"),
+            Some(NodeState::Demonstrated)
+        );
+        assert_eq!(
+            effective_state(&outline, &states, "book1"),
+            Some(NodeState::Demonstrated)
+        );
+    }
+
+    #[test]
+    fn resume_leaf_returns_the_item_itself_once_generated() {
+        let node = outline_item("n1", None);
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![node],
+        };
+        let generated: std::collections::HashSet<String> = ["n1".to_string()].into();
+        assert_eq!(
+            resume_leaf(&outline, &generated, "n1"),
+            Some("n1".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_leaf_descends_two_levels_into_a_split_chapters_node() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut chapter = outline_item("c1", None);
+        chapter.item_type = OutlineItemType::Chapter;
+        chapter.parent_id = Some("book1".to_string());
+        let mut node = outline_item("n1", None);
+        node.parent_id = Some("c1".to_string());
+        let outline = Outline {
+            topic: "t".to_string(),
+            items: vec![book, chapter, node],
+        };
+        // Neither the book nor the chapter itself was ever generated —
+        // only the node two levels down.
+        let generated: std::collections::HashSet<String> = ["n1".to_string()].into();
+        assert_eq!(
+            resume_leaf(&outline, &generated, "book1"),
+            Some("n1".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_leaf_is_none_when_nothing_under_the_item_ever_generated() {
+        let mut book = outline_item("book1", None);
+        book.item_type = OutlineItemType::Book;
+        let mut items = vec![book];
+        items.extend(chapters_under("book1", &["c1"]));
+        let outline = Outline {
+            topic: "t".to_string(),
+            items,
+        };
+        let generated: std::collections::HashSet<String> = std::collections::HashSet::new();
+        assert_eq!(resume_leaf(&outline, &generated, "book1"), None);
     }
 
     fn mock_ai(reply: &str) -> Ai {

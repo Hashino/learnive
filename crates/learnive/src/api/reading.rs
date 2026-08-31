@@ -1098,6 +1098,47 @@ pub(super) async fn prepare(
         }
         return Err(reason);
     }
+    // Re-read after the gate (2026-08-30, staleness bug caught before S27g
+    // item 2 was built on top of it): `ensure_document_grounded` persists
+    // chapter-number resolution (item 1) and, once item 2 exists, a
+    // chapter's first-visit split, through `store.update_outline_file` — a
+    // separate read-modify-write against disk that the `outline` binding
+    // above (read once, before the gate ran) never sees. Without this,
+    // `chapter_page_range` inside `ground_node` below would see
+    // `resolved_page: None` on exactly the request that just resolved it —
+    // item 1's narrowing silently missing its own chapter's first visit —
+    // and item 2's split would have no page range to work from on the one
+    // visit it's specified to run on. Every downstream use of
+    // `outline`/`item` switches to this fresh copy from here on.
+    let outline_json = state
+        .store
+        .read_doc_file(doc_id, "outline.json")
+        .map_err(|e| e.to_string())?;
+    let outline: Outline = serde_json::from_str(&outline_json).map_err(|e| e.to_string())?;
+    let item = outline
+        .items
+        .iter()
+        .find(|i| i.id == item_id)
+        .cloned()
+        .ok_or_else(|| "unknown outline item".to_string())?;
+    // Mirrors the container-refusal check near the top of this function: if
+    // this same call's gate just split this `Chapter` into `Node` children
+    // (S27g item 2), it is no longer generable — refuse the same way a
+    // `Book`/`Article` container always has, instead of generating the
+    // whole chapter on top of the subnodes that now carry its content.
+    if !engine::is_generable(&outline, &item) {
+        let reason = "this outline item is a container (its topics were split into nodes); read one of its children instead"
+            .to_string();
+        if let Err(e) = event_log.append(
+            Some(&item.id),
+            EventKind::GenerationBlocked {
+                reason: reason.clone(),
+            },
+        ) {
+            eprintln!("event log append failed: {e}");
+        }
+        return Err(reason);
+    }
     let grounding = match ground_node(state, &outline, &item).await {
         Ok(text) => text,
         Err(reason) => {
