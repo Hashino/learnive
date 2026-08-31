@@ -1,5 +1,15 @@
 //! Immutable source corpus (§4, §11).
 //!
+//! **Demoted to a route-A-only sink (S28 item 5b, PLAN.md, 2026-08-30).**
+//! The only writer left is `api::cold_start::acquire`'s LibGen/Sci-Hub path
+//! (§11.1 route A) — this is not dead code, since that route stays in the
+//! tree by explicit user decision, but the live bibliographic grounding path
+//! (§11.1 route B: a local PDF library + `source::search_index_cache`, what
+//! every S27-generated document actually uses) never reads from here. Kept,
+//! not deleted, for the same reason `LibGen`/`SciHub` themselves are kept:
+//! removing it would decide the still-open §11.1 acquisition-route question
+//! by omission rather than by a real decision.
+//!
 //! Sources join the **immutable corpus**: fetched once and reused, never edited
 //! (§4/§11). Layout, human-readable and rebuildable-cache-friendly (the §10
 //! index is derived from this, never the other way around):

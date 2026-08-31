@@ -41,7 +41,12 @@ const CHUNK_OVERLAP: usize = 120;
 pub struct Chunk {
     /// Corpus source id — becomes `<cite data-source-id=...>`.
     pub source_id: String,
-    /// Section locator (e.g. `sec:2.1`) — becomes `<cite data-locator=...>`.
+    /// `Section` locator, e.g. `chap:3;sec:2` (`Corpus`'s own convention,
+    /// S28 item 5b, PLAN.md) — becomes `<cite data-locator=...>`. This index
+    /// covers the `Corpus`-backed acquisition path (LibGen/Sci-Hub,
+    /// §11.1's route A) only; the live bibliographic grounding path
+    /// (`source::search_index_cache`, §11 route B) never builds a `Chunk`
+    /// and uses page locators (`p:N`) instead — see that module's own docs.
     pub locator: String,
     /// Human title of the source (for the citation label).
     pub source_title: String,

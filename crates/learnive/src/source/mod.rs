@@ -213,6 +213,11 @@ pub struct SourceMeta {
 pub struct Section {
     /// Locator string, e.g. `chap:3;sec:2` — goes verbatim into
     /// `<cite data-locator="...">` so a citation resolves back here (§4.3).
+    /// This is `Corpus`'s own convention (S28 item 5b, PLAN.md): it applies
+    /// only to sources acquired through this module's `LibGen`/`SciHub`
+    /// backends (§11.1 route A). The live bibliographic grounding path
+    /// (`search_index_cache`, route B, what `LocalPdfSource` feeds) never
+    /// constructs a `Section` and locates by physical page instead (`p:N`).
     pub locator: String,
     pub title: String,
     /// Extracted plain text — the normalization target used for retrieval
