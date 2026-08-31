@@ -32,7 +32,10 @@
 //! landed with a passing test and no caller. Wiring into `Source::LocalPdf`
 //! and the acervo gate is S27c/e and later, out of this slice's scope.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// One entry in a PDF's embedded outline (bookmark) tree. Mirrors the PDF's
 /// real `/Outlines` nesting (chapter → section → ...) rather than flattening
@@ -40,7 +43,7 @@ use std::path::Path;
 /// that hierarchy is real information the PDF already carries for free —
 /// losing it here would mean re-deriving it heuristically later for no
 /// reason.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutlineEntry {
     pub title: String,
     /// 1-based physical page the bookmark's destination points at.
@@ -52,7 +55,7 @@ pub struct OutlineEntry {
 /// (0-based) onward, until the next run's `start`, pages are labelled with
 /// `style` (or no numeric part at all, if the PDF omitted `/S`) prefixed by
 /// `prefix`, counting up from `start_num`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PageLabelRun {
     start: usize,
     style: Option<LabelStyle>,
@@ -60,7 +63,7 @@ struct PageLabelRun {
     start_num: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum LabelStyle {
     Decimal,
     UpperRoman,
@@ -75,7 +78,7 @@ enum LabelStyle {
 /// etc.). Falls back to the plain 1-based physical page number when the PDF
 /// has no `/PageLabels`, which is the common case and must never be an
 /// error.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PageMap {
     pub page_count: usize,
     labels: Vec<PageLabelRun>,
@@ -136,7 +139,7 @@ impl PageMap {
 /// document's text down with it (2026-08-29 live bug, see `read_pdf`'s doc
 /// comment), so `page_texts` is the real source and `text` is just its join,
 /// for callers that don't care about page boundaries.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfDocument {
     pub text: String,
     /// `text`, split per 1-based physical page (`page_texts[0]` is page 1).
@@ -237,6 +240,69 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
         pages: PageMap { page_count, labels },
         text_layer_unreadable,
     })
+}
+
+/// Sibling of the acervo gate's other content-hash-keyed caches
+/// (`TocConfirmStore`'s `<data>/index/toc/`, the embeddings index's
+/// `<data>/index/library/`) — same convention, `<data>/index/pdftext/`.
+pub fn pdftext_cache_dir(data_dir: impl AsRef<Path>) -> PathBuf {
+    data_dir.as_ref().join("index").join("pdftext")
+}
+
+/// [`read_pdf`], but checks a content-hash-keyed disk cache first (S27o, bug
+/// reported live 2026-08-31: an 11-book library made every acervo-gate check
+/// take many minutes, because [`super::acervo::validate_acervo_with_progress`]'s
+/// `load_candidates` step re-extracted text from EVERY PDF in the library on
+/// EVERY call — this module's own doc comment on `read_pdf` already measured
+/// that single cost at 222s for one 1,300-page textbook). Every production
+/// caller of `read_pdf` already computes `content_hash` from the same bytes
+/// it hands to `read_pdf` (to key the embeddings index / manual-match store /
+/// `TocConfirmStore`), so hashing first and checking a cache before parsing
+/// costs almost nothing extra on a cache hit, and turns every REPEAT visit to
+/// an already-seen PDF into one file read instead of a multi-minute reparse.
+///
+/// Keyed by [`super::acervo::content_hash`], exactly like every other derived
+/// cache this module's siblings already use — a changed file naturally gets
+/// a fresh entry (no invalidation logic needed), and the whole directory is a
+/// rebuildable derived cache (CLAUDE.md: "files are the source of truth;
+/// indexes are rebuildable derived caches") — safe to delete wholesale if it
+/// ever needs a reset. A corrupt/unreadable cache entry degrades to a full
+/// reparse rather than erroring, same "one bad file must not sink the batch"
+/// stance as the rest of `source::acervo`. Returns the hash alongside the
+/// parsed document since every caller needs both and would otherwise hash
+/// the bytes a second time.
+pub fn read_pdf_cached(
+    path: impl AsRef<Path>,
+    cache_dir: impl AsRef<Path>,
+) -> Result<(String, PdfDocument), PdfReadError> {
+    let path = path.as_ref();
+    let bytes = fs::read(path)
+        .map_err(|e| PdfReadError(format!("failed to read {}: {e}", path.display())))?;
+    let hash = super::acervo::content_hash(&bytes);
+    let cache_dir = cache_dir.as_ref();
+    let cache_path = cache_dir.join(format!("{hash}.json"));
+
+    if let Ok(cached_bytes) = fs::read(&cache_path)
+        && let Ok(cached) = serde_json::from_slice::<PdfDocument>(&cached_bytes)
+    {
+        return Ok((hash, cached));
+    }
+
+    let pdf = read_pdf(path)?;
+
+    // Best-effort write, atomically (tmp + rename, same idiom as
+    // `TocConfirmStore::put`/`build_index_cache`) — a failure here must
+    // never fail the read itself; the cache is a pure optimization.
+    if fs::create_dir_all(cache_dir).is_ok()
+        && let Ok(json) = serde_json::to_vec(&pdf)
+    {
+        let tmp = cache_path.with_extension("json.tmp");
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, &cache_path);
+        }
+    }
+
+    Ok((hash, pdf))
 }
 
 /// Do the page content streams contain any text-showing operator at all?
@@ -918,5 +984,102 @@ mod tests {
         std::fs::write(&path, b"this is not a pdf at all").expect("write junk file");
 
         assert!(read_pdf(&path).is_err());
+    }
+
+    // --- read_pdf_cached (S27o, bug reported live 2026-08-31) --------------
+
+    #[test]
+    fn read_pdf_cached_returns_the_same_document_read_pdf_would() {
+        let (mut doc, _) = build_test_document(&["one", "two", "three"]);
+        let (_dir, path) = save_to_temp(&mut doc, "cache-fixture.pdf");
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+        let direct = read_pdf(&path).expect("direct read");
+        let (_, cached) = read_pdf_cached(&path, cache_dir.path()).expect("cached read");
+        assert_eq!(direct, cached);
+    }
+
+    #[test]
+    fn read_pdf_cached_writes_an_entry_keyed_by_content_hash_and_reuses_it() {
+        let (mut doc, _) = build_test_document(&["hello", "world"]);
+        let (_dir, path) = save_to_temp(&mut doc, "cache-fixture.pdf");
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+        let (hash, _first) = read_pdf_cached(&path, cache_dir.path()).expect("first read, a miss");
+        let cache_path = cache_dir.path().join(format!("{hash}.json"));
+        assert!(cache_path.is_file(), "a miss must write a cache entry");
+
+        // Overwrite the cache entry with a document that could not possibly
+        // have come from re-parsing `path` (the fixture never contains this
+        // string). The file on disk is untouched — if the second call
+        // genuinely serves the cache instead of re-parsing, it must return
+        // THIS content, not the fixture's real text.
+        let planted = PdfDocument {
+            text: "PLANTED CACHE CONTENT, NOT THE REAL FIXTURE".to_string(),
+            page_texts: vec!["PLANTED CACHE CONTENT, NOT THE REAL FIXTURE".to_string()],
+            outline: Vec::new(),
+            pages: PageMap {
+                page_count: 999,
+                labels: Vec::new(),
+            },
+            text_layer_unreadable: false,
+        };
+        std::fs::write(&cache_path, serde_json::to_vec(&planted).unwrap())
+            .expect("plant a fake cache entry");
+
+        let (hash2, second) =
+            read_pdf_cached(&path, cache_dir.path()).expect("second read must hit the cache");
+        assert_eq!(
+            hash, hash2,
+            "the file didn't change, so the hash must not either"
+        );
+        assert_eq!(
+            second, planted,
+            "a cache hit must return the cached document verbatim, not re-parse the real file"
+        );
+    }
+
+    #[test]
+    fn read_pdf_cached_never_serves_stale_content_for_a_changed_file() {
+        // The exact correctness property a content-hash key buys: same path,
+        // different bytes, on the SAME cache directory — must never return
+        // the first version's text for the second version. If the cache
+        // were keyed by path/filename instead of content hash, this is
+        // precisely the bug it would reintroduce.
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("same-filename.pdf");
+
+        let (mut doc_a, _) = build_test_document(&["version A"]);
+        doc_a.save(&path).expect("save version A");
+        let (hash_a, pdf_a) = read_pdf_cached(&path, cache_dir.path()).expect("read version A");
+        assert!(pdf_a.text.contains("version A"));
+
+        let (mut doc_b, _) = build_test_document(&["version B, totally different"]);
+        doc_b.save(&path).expect("overwrite with version B");
+        let (hash_b, pdf_b) = read_pdf_cached(&path, cache_dir.path()).expect("read version B");
+
+        assert_ne!(hash_a, hash_b, "different bytes must hash differently");
+        assert!(
+            pdf_b.text.contains("version B"),
+            "must reflect the NEW content, not a stale cache entry keyed by the old hash: {:?}",
+            pdf_b.text
+        );
+        assert!(!pdf_b.text.contains("version A"));
+    }
+
+    #[test]
+    fn read_pdf_cached_degrades_to_a_full_reparse_on_a_corrupt_cache_entry() {
+        let (mut doc, _) = build_test_document(&["still readable"]);
+        let (_dir, path) = save_to_temp(&mut doc, "cache-fixture.pdf");
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+        let (hash, _) = read_pdf_cached(&path, cache_dir.path()).expect("first read");
+        let cache_path = cache_dir.path().join(format!("{hash}.json"));
+        std::fs::write(&cache_path, b"not valid json at all").expect("corrupt the cache entry");
+
+        let (_, pdf) =
+            read_pdf_cached(&path, cache_dir.path()).expect("must reparse, not error out");
+        assert!(pdf.text.contains("still readable"));
     }
 }

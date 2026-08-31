@@ -423,21 +423,39 @@ pub fn validate_acervo_with_progress(
     Ok(AcervoReport { items })
 }
 
+/// `<data>/index/pdftext/` — sibling of `library.root()` (`<data>/library/`)
+/// under the same `<data>/` root, derived from the library handle itself
+/// rather than threaded as a parameter. This lets every one of this
+/// function's callers (`candidate_matches`/`unmatched_library_files`/
+/// `match_report`/`validate_acervo_with_progress`, and their own callers
+/// across `api::reading`/`api::acervo` — 8+ production call sites) get the
+/// cache with zero signature changes, since every one of them already has a
+/// `&LocalPdfSource` in hand. See `pdf::read_pdf_cached`'s doc for why this
+/// cache exists (S27o, bug reported live 2026-08-31).
+fn pdftext_cache_dir_for(library: &LocalPdfSource) -> PathBuf {
+    library
+        .root()
+        .parent()
+        .map(|p| p.join("index").join("pdftext"))
+        .unwrap_or_else(|| library.root().join("index").join("pdftext"))
+}
+
 fn load_candidates(library: &LocalPdfSource) -> std::io::Result<Vec<LibraryCandidate>> {
+    let cache_dir = pdftext_cache_dir_for(library);
     let entries = library.scan()?;
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         let path = library.root().join(&entry.filename);
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(pdf) = read_pdf(&path) else {
+        // S27o (bug reported live 2026-08-31): every library PDF used to be
+        // re-extracted from scratch on EVERY acervo check — measured at
+        // minutes for an 11-book library. `read_pdf_cached` skips the
+        // extraction entirely on a repeat visit to an already-seen file.
+        let Ok((hash, pdf)) = super::pdf::read_pdf_cached(&path, &cache_dir) else {
             // Genuinely unreadable file: not a candidate for anything. Left
             // out rather than erroring the whole validation pass, matching
             // the module's "one bad file must not sink the batch" stance.
             continue;
         };
-        let hash = content_hash(&bytes);
         let (meta_title, meta_author) = read_info_metadata(&path);
         out.push(LibraryCandidate {
             entry,

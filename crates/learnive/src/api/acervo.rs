@@ -542,10 +542,10 @@ pub async fn get_acervo_toc(
         })?;
 
     let path = lib.root().join(&filename);
+    let pdftext_cache_dir = source::pdftext_cache_dir(state.data_dir.as_ref());
     let (source_label, editable, entries) = spawn_blocking(move || -> Result<_, String> {
-        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-        let pdf = source::read_pdf(&path).map_err(|e| e.to_string())?;
-        let hash = source::acervo::content_hash(&bytes);
+        let (hash, pdf) =
+            source::read_pdf_cached(&path, &pdftext_cache_dir).map_err(|e| e.to_string())?;
         if let Some(confirmed) = toc_store.get(&hash) {
             let entries = confirmed
                 .entries

@@ -1513,6 +1513,30 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
 /// Piece 1 (S27c's index-cache build) lives here too now, for every
 /// approved item that doesn't have one yet — triggered by this mutating
 /// POST path rather than the read-only gate-report GET (§3.1).
+/// Flattens a PDF's embedded bookmark tree into the flat shape
+/// [`source::match_chapter`] expects, depth-first, parent before children —
+/// used by [`ensure_document_grounded`]'s chapter-resolution pass for a book
+/// whose TOC check came back `Embedded` (real bookmarks), which never
+/// populates `TocConfirmStore` (that store is the S27k deduction path's
+/// output only). `number` is always `None` here — nothing splits a printed
+/// number out of the raw bookmark title (`toc_bench`'s `as_split` explored
+/// that as a possible improvement, unshipped); `match_chapter` still matches
+/// on title alone, same as any non-numbered confirmed entry.
+fn flatten_embedded_outline(
+    entries: &[source::OutlineEntry],
+    out: &mut Vec<source::ConfirmedTocEntry>,
+) {
+    for e in entries {
+        out.push(source::ConfirmedTocEntry {
+            title: e.title.clone(),
+            number: None,
+            page: Some(e.page),
+            inferred: true,
+        });
+        flatten_embedded_outline(&e.children, out);
+    }
+}
+
 pub(super) async fn ensure_document_grounded(
     state: &AppState,
     doc_id: &str,
@@ -1619,13 +1643,11 @@ pub(super) async fn ensure_document_grounded(
                 continue;
             };
             let path = library.root().join(&filename);
-            let Ok(bytes) = fs::read(&path) else {
+            let Ok((hash, pdf)) =
+                source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+            else {
                 continue;
             };
-            let Ok(pdf) = source::read_pdf(&path) else {
-                continue;
-            };
-            let hash = source::acervo::content_hash(&bytes);
             let Some(range) = source::toc::find_contents_pages(&pdf) else {
                 continue;
             };
@@ -1680,12 +1702,36 @@ pub(super) async fn ensure_document_grounded(
                 continue;
             };
             let path = library.root().join(&filename);
-            let Ok(bytes) = fs::read(&path) else {
+            let Ok((hash, pdf)) =
+                source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+            else {
                 continue;
             };
-            let hash = source::acervo::content_hash(&bytes);
-            let Some(confirmed) = toc_confirm.get(&hash) else {
-                continue;
+            // S27o follow-up (bug reported live 2026-08-31): a book with
+            // real embedded PDF bookmarks (`TocCheck::Embedded` — most
+            // well-formed textbooks, including Stewart/K&R/SICP per
+            // `toc_bench`'s own measurements) never gets its hash into
+            // `toc_confirm` — only the S27k deduction path
+            // (`Heuristic`/`Unavailable`) ever calls `put`/`put_deduced`.
+            // Falling straight to `continue` here left every embedded-TOC
+            // book's chapters permanently unresolved (`resolved_page` stuck
+            // at `None` forever) AND, because `resolutions` never gained an
+            // entry for the book, `expansion` never left `ChaptersProposed`
+            // — so this whole block re-ran, uselessly, on EVERY `/generate`
+            // request for the document's entire lifetime (the reported
+            // "grounding starts empty, Research fires every time" bug).
+            // Prefer the PDF's own embedded bookmarks when present; only
+            // fall back to the confirmed-deduction store when there are
+            // none to flatten.
+            let entries: Vec<source::ConfirmedTocEntry> = if !pdf.outline.is_empty() {
+                let mut flat = Vec::new();
+                flatten_embedded_outline(&pdf.outline, &mut flat);
+                flat
+            } else {
+                let Some(confirmed) = toc_confirm.get(&hash) else {
+                    continue;
+                };
+                confirmed.entries
             };
             let chapters: Vec<(String, Option<usize>)> = outline
                 .items
@@ -1693,7 +1739,7 @@ pub(super) async fn ensure_document_grounded(
                 .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
                 .map(|chapter| {
                     let page = source::match_chapter(
-                        &confirmed.entries,
+                        &entries,
                         chapter.chapter_number.as_deref(),
                         &chapter.title,
                     )
@@ -1760,9 +1806,9 @@ pub(super) async fn ensure_document_grounded(
             continue;
         };
         let path = library.root().join(&filename);
-        let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
-        let hash = source::acervo::content_hash(&bytes);
-        let pdf = source::read_pdf(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
+        let (hash, pdf) =
+            source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+                .map_err(|e| format!("could not read {filename}: {e}"))?;
         source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
             .map_err(|e| format!("could not index {filename}: {e}"))?;
     }
@@ -1931,13 +1977,11 @@ async fn try_split_chapter(
         return ChapterSplitOutcome::Deferred;
     };
     let path = library.root().join(&filename);
-    let Ok(bytes) = fs::read(&path) else {
+    let Ok((hash, pdf)) =
+        source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+    else {
         return ChapterSplitOutcome::Deferred;
     };
-    let Ok(pdf) = source::read_pdf(&path) else {
-        return ChapterSplitOutcome::Deferred;
-    };
-    let hash = source::acervo::content_hash(&bytes);
 
     let Some((start, end)) = chapter_page_range(outline, chapter) else {
         // The hard prerequisite this item depends on (item 1's page

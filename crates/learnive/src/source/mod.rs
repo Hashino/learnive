@@ -94,7 +94,9 @@ pub use libgen::LibGenSource;
 pub use local::{LibraryEntry, LocalPdfSource};
 pub use manual_match::{ManualMatch, ManualMatchStore};
 pub use mock::MockSource;
-pub use pdf::{OutlineEntry, PageMap, PdfDocument, PdfReadError, read_pdf};
+pub use pdf::{
+    OutlineEntry, PageMap, PdfDocument, PdfReadError, pdftext_cache_dir, read_pdf, read_pdf_cached,
+};
 pub use scihub::SciHubSource;
 pub use toc_confirm::{
     ConfirmedToc, ConfirmedTocEntry, TocConfirmStore, match_chapter, sub_entries_within,
