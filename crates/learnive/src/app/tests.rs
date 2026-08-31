@@ -29,17 +29,16 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
     // later we'll add a pdf specifically for demo mode") — this is that pdf,
     // now built. Both entries are `"kind":"book"`, which enforces an
     // `MIN_PLAUSIBLE_BOOK_PAGES` floor (`source::acervo`), hence 8 pages.
+    // S27i: `write_book_pdf` and the "Demo Foundations"/"Demo Document"
+    // identity live in `source::mock` now, shared with the eager library
+    // seed `app::AppState::new` runs for a live `LEARNIVE_DEMO=1` server —
+    // see that function's doc comment for why the seed moved out of
+    // `Source::Mock::fetch` instead of reforming it in place.
     let library = crate::source::LocalPdfSource::open(&dir).unwrap();
-    write_book_pdf(
-        &library.root().join("demo-foundations.pdf"),
-        "Demo Foundations",
-        "Demo Author",
-    );
-    write_book_pdf(
-        &library.root().join("demo-document.pdf"),
-        "Demo Document",
-        "Demo Author",
-    );
+    let (t1, a1) = crate::source::mock::DEMO_BOOK_1;
+    let (t2, a2) = crate::source::mock::DEMO_BOOK_2;
+    crate::source::mock::write_book_pdf(&library.root().join("demo-foundations.pdf"), t1, a1);
+    crate::source::mock::write_book_pdf(&library.root().join("demo-document.pdf"), t2, a2);
 
     let corpus = Corpus::open(&dir).unwrap();
     // A retriever is likewise now load-bearing for every bibliographic node
@@ -68,66 +67,6 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         // see the field's own doc comment on `AppState`.
         bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
     }
-}
-
-/// Writes a minimal but acervo-gate-passing PDF fixture: `page_count` pages
-/// (8, `source::acervo::MIN_PLAUSIBLE_BOOK_PAGES`, so a `"kind":"book"`
-/// expected item doesn't trip the "too short to plausibly be the claimed
-/// book" identity check), `/Info` Title+Author metadata, and the same text
-/// on the first page (belt-and-suspenders: identity matches on metadata OR
-/// first-page text, either is enough). Same technique
-/// `api::acervo`'s/`source::acervo`'s own test modules already use
-/// (`lopdf::Document`, one shared content stream reused across every page
-/// dict) — duplicated here rather than shared, matching how those two
-/// modules already keep their own separate copies rather than a
-/// production-code test-util.
-fn write_book_pdf(path: &std::path::Path, title: &str, author: &str) {
-    use lopdf::{Document, Object, Stream, dictionary};
-
-    const PAGE_COUNT: usize = 8;
-
-    let mut doc = Document::with_version("1.5");
-    let pages_id = doc.new_object_id();
-    let font_id = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Courier",
-    });
-    let resources_id = doc.add_object(dictionary! {
-        "Font" => dictionary! { "F1" => font_id },
-    });
-    let content = format!("BT /F1 12 Tf 20 700 Td ({title}, by {author}.) Tj ET");
-    let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-    let mut page_ids = Vec::with_capacity(PAGE_COUNT);
-    for _ in 0..PAGE_COUNT {
-        let page_id = doc.add_object(dictionary! {
-            "Type" => "Page",
-            "Parent" => pages_id,
-            "Contents" => content_id,
-            "Resources" => resources_id,
-            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-        });
-        page_ids.push(page_id);
-    }
-    doc.objects.insert(
-        pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages",
-            "Kids" => page_ids.iter().map(|&id| id.into()).collect::<Vec<Object>>(),
-            "Count" => PAGE_COUNT as i64,
-        }),
-    );
-    let info_id = doc.add_object(dictionary! {
-        "Title" => Object::string_literal(title),
-        "Author" => Object::string_literal(author),
-    });
-    let catalog_id = doc.add_object(dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    });
-    doc.trailer.set("Root", catalog_id);
-    doc.trailer.set("Info", info_id);
-    doc.save(path).expect("save book pdf fixture");
 }
 
 fn router() -> Router {

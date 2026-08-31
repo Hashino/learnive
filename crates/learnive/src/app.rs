@@ -92,6 +92,25 @@ impl AppState {
         let config = AppConfig::load(&data_dir);
         let secret = SecretStore::open(&data_dir);
 
+        // S27i (PLAN.md, 2026-08-30): under demo mode, eagerly seed
+        // `<data_dir>/library/` with the two canned PDF fixtures
+        // `api::provider::demo_responder`'s scripted reading list always
+        // proposes, so a *live* `LEARNIVE_DEMO=1` run — not just the
+        // router-test harness (`app::tests::test_state_with_ai`, which does
+        // the same seeding directly) — can pass the acervo gate and
+        // generate a real, citable, PDF-backed node. Must run before any
+        // request can reach `ensure_document_grounded`, hence here rather
+        // than inside `Source::Mock::fetch` (which only runs from a
+        // detached `tokio::spawn` in `api::cold_start::acquire` and would
+        // race the gate — see `source::mock::seed_demo_library`'s doc
+        // comment). Only-if-absent and demo-gated: never touches a real
+        // `LEARNIVE_DATA_DIR` library.
+        if std::env::var("LEARNIVE_DEMO").is_ok_and(|v| !v.is_empty())
+            && let Err(e) = crate::source::mock::seed_demo_library(&data_dir)
+        {
+            eprintln!("demo library seed failed (grounding may fail for demo docs): {e}");
+        }
+
         // Load the embedding model and open the retrieval index (§10). Non-fatal:
         // offline / first-run-download failures just disable grounding.
         let retriever = match crate::retrieval::Embedder::default_model() {

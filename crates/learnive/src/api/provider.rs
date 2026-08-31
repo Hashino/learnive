@@ -156,7 +156,16 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         // element (there's no more separate "unreviewed prerequisite"
         // category to drop — PLAN.md §27 decision 3), so both items land
         // in the materialized outline either way.
-        return r#"[{"title":"Demo Foundations","authors":["Demo Author"],"year":2020,"edition":null,"identifier":null,"kind":"book"},{"title":"Demo Document","authors":["Demo Author"],"year":2024,"edition":null,"identifier":null,"kind":"book"}]"#.to_string();
+        // Titles/authors come from `source::mock::{DEMO_BOOK_1, DEMO_BOOK_2}` —
+        // S27i (PLAN.md, 2026-08-30) made them the one shared source of truth
+        // so this scripted list and the PDF fixtures `app::AppState::new`
+        // eagerly seeds into `<data>/library/` under `LEARNIVE_DEMO` can never
+        // drift apart into naming two different "books".
+        let (t1, a1) = crate::source::mock::DEMO_BOOK_1;
+        let (t2, a2) = crate::source::mock::DEMO_BOOK_2;
+        return format!(
+            r#"[{{"title":"{t1}","authors":["{a1}"],"year":2020,"edition":null,"identifier":null,"kind":"book"}},{{"title":"{t2}","authors":["{a2}"],"year":2024,"edition":null,"identifier":null,"kind":"book"}}]"#
+        );
     }
     if text.contains("choosing the next move") {
         // movement::decide_move (L1/L2) contract.
