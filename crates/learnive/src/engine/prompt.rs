@@ -418,6 +418,37 @@ pub fn propose_toc(contents_page_text: &str) -> Vec<ChatMessage> {
     ]
 }
 
+/// S27g item 2 — asks the model to split a chapter into an ordered list of
+/// atomic sub-topics, from structural signal only (heading-shaped lines, or
+/// a short cross-page prose sample) — never the chapter's full text (see
+/// `engine::propose_chapter_split`'s doc for why). Explicitly permits "no
+/// split" as the right answer: a chapter can be genuinely single-topic, and
+/// forcing a split there would fragment content the way the
+/// `curriculum-quality-signal` decision warns against (redundant/thin nodes
+/// from over-fragmentation is the real risk, not broad coverage).
+pub fn propose_chapter_split(chapter_title: &str, signal_text: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "You will be given a book chapter's title and structural signal \
+             about its contents (heading-shaped lines, or a short sample of \
+             its prose) — never the full chapter text. Decide whether this \
+             chapter covers more than one distinct, teachable topic. If it \
+             does, return a JSON array of short topic titles, in the order \
+             they occur in the chapter, one per distinct topic — \"atomic \
+             knowledge\", meaning each title should name one coherent idea a \
+             learner could be taught and checked on by itself, not a vague \
+             theme or a restatement of the chapter title. If the chapter is \
+             really one cohesive topic, or the given signal is too thin to \
+             tell, return an empty JSON array \"[]\" — do not force a split \
+             that isn't really there. Respond with ONLY the JSON array, \
+             nothing else.",
+        ),
+        ChatMessage::user(format!(
+            "CHAPTER: {chapter_title}\n\nSIGNAL:\n{signal_text}"
+        )),
+    ]
+}
+
 /// Formats retrieved passages into a user-message block the model can cite
 /// from. Empty string when there is no grounding (index still filling, §14).
 pub fn sources_block(sources: &str) -> String {

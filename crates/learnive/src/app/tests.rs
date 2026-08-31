@@ -3126,6 +3126,451 @@ async fn chapter_match_failure_offers_manual_page_or_whole_book_skip() {
 }
 
 #[tokio::test]
+async fn chapter_split_redirects_generation_into_its_new_children() {
+    // S27g item 2 (PLAN.md): the first visit to a page-resolved `Chapter`
+    // tries splitting it into atomic `Node` sub-topics. This end-to-end
+    // router test pins the whole path: the model-fallback signal (no
+    // confirmed TOC exists for the demo fixture, so the split falls
+    // through past the zero-token TOC shortcut to one scripted model
+    // call), materialization/chaining of the new children, and — the bug
+    // this test was specifically written to catch — that the client's
+    // multi-request move-pause/continue loop (§S18), which keeps POSTing
+    // to the SAME chapter id across several requests, gets transparently
+    // redirected into the new child on every one of those requests, not
+    // just the first.
+    use crate::ai::{Ai, MockProvider, Models};
+
+    let scripted = crate::ai::Provider::Mock(MockProvider::scripted(|req| {
+        let text = req
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Unique to `prompt::propose_chapter_split`'s user message — see
+        // that function's doc comment.
+        if text.contains("SIGNAL:") {
+            r#"["Intro to Functions","Function Pointers"]"#.to_string()
+        } else {
+            crate::api::demo_responder(req)
+        }
+    }));
+    let ai = Ai::new(scripted, Models::single("chapter-split-demo"));
+    let state = test_state_with_ai(ai);
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    // `bibliography` mirrors `source::mock::DEMO_BOOK_1` exactly, so this
+    // book resolves against the real PDF `test_state_with_ai` already
+    // seeded into the library (`demo-foundations.pdf`) — the acervo gate
+    // and `try_split_chapter`'s own file/hash resolution both need a real
+    // match, not just a title string.
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book",
+             "bibliography":{"title":"Demo Foundations","authors":["Demo Author"],"kind":"book"},
+             "children":[
+                {"id":"c1","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+             ]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    // Simulate item 1 (S27g) having already resolved c1's page range — its
+    // own end-to-end matching pass (real TOC confirmation) is out of scope
+    // here, same convention `chapter_match_failure_offers_manual_page_or_
+    // whole_book_skip` above already uses. `expansion` stays `NotExpanded`
+    // (the default), which is item 2's own trigger condition.
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            for item in &mut outline.items {
+                if item.id == "c1" {
+                    item.resolved_page = Some(2);
+                }
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    // Drive c1's generation through completion. If the redirect only fired
+    // on the request that triggered the split, this would fail partway
+    // through with the container-refusal error the moment `expansion`
+    // stops being `NotExpanded` — see `prepare`'s doc comment on why the
+    // redirect step has to run on every visit.
+    let (status, body) = generate_to_completion(&call, &doc_id, "c1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("event: done"),
+        "chapter split + redirect should let generation finish normally, got: {body}"
+    );
+    assert!(!body.contains("event: error"), "got: {body}");
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let items = outline["items"].as_array().unwrap();
+
+    let children: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|i| i["parent_id"] == serde_json::json!("c1"))
+        .collect();
+    assert_eq!(
+        children.len(),
+        2,
+        "expected exactly the two split titles as c1's children: {items:?}"
+    );
+    let titles: Vec<&str> = children
+        .iter()
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, vec!["Intro to Functions", "Function Pointers"]);
+    let first_child_id = children[0]["id"].as_str().unwrap().to_string();
+    let second_child_id = children[1]["id"].as_str().unwrap().to_string();
+
+    // Sequentially chained, same convention as every other confirmed
+    // sibling list — the second sub-topic is locked behind the first.
+    // `OutlineItemView` (the client-facing `GET .../outline` shape) has no
+    // `prerequisites` field, so this reads the raw stored outline instead.
+    let raw_outline: crate::engine::Outline =
+        serde_json::from_str(&state.store.read_doc_file(&doc_id, "outline.json").unwrap()).unwrap();
+    let raw_second = raw_outline
+        .items
+        .iter()
+        .find(|i| i.id == second_child_id)
+        .unwrap();
+    assert_eq!(raw_second.prerequisites, vec![first_child_id.clone()]);
+
+    // c1 itself never generated a node file — the whole generation ran
+    // against its first child instead.
+    let (status, _) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/c1"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{first_child_id}"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // c1 flipped to `Expanded` — a later visit must never spend a second
+    // model call on the same chapter. The router has no direct way to
+    // assert "no second call" short of a call counter, but re-fetching the
+    // outline and confirming the children are stable (not duplicated) is
+    // the observable half of that guarantee.
+    let (_, body2) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline2: serde_json::Value = serde_json::from_str(&body2).unwrap();
+    let children2: Vec<&serde_json::Value> = outline2["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["parent_id"] == serde_json::json!("c1"))
+        .collect();
+    assert_eq!(children2.len(), 2, "split must not re-run on a later visit");
+
+    // `redirect_into_chapter_child` always hands back the FIRST child, on
+    // the argument that the client never revisits the chapter id once
+    // child 1 is `Demonstrated` — it would move on to child 2 directly.
+    // That assumption had no test behind it; pin it here. If it's wrong,
+    // the failure mode is silent: child 2 stays permanently unreachable
+    // instead of erroring.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{first_child_id}/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+
+    let (_, body3) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline3: serde_json::Value = serde_json::from_str(&body3).unwrap();
+    let items3 = outline3["items"].as_array().unwrap();
+    let find_state = |id: &str| -> &str {
+        items3
+            .iter()
+            .find(|i| i["id"] == serde_json::json!(id))
+            .unwrap()["state"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(find_state(&first_child_id), "demonstrated");
+    assert_eq!(
+        find_state(&second_child_id),
+        "available",
+        "second split child must become reachable once the first is demonstrated"
+    );
+    assert_eq!(
+        find_state("c1"),
+        "locked",
+        "the chapter container itself is never directly generable again"
+    );
+}
+
+#[tokio::test]
+async fn chapter_split_toc_shortcut_anchors_on_the_matched_entrys_own_number() {
+    // S27g item 2's zero-token first choice (`sub_entries_within`) was
+    // covered in isolation but never through `try_split_chapter`'s actual
+    // call site, which is the one place that decides WHICH number to anchor
+    // on. `try_split_chapter` must anchor on the matched TOC entry's own
+    // `number` — never on `chapter.chapter_number`, which is an unverified
+    // value the outline-proposal step guessed and S27g item 1 may not have
+    // corrected. Pin that here: outline says the chapter is number "9" (a
+    // stale/wrong guess), but the confirmed TOC has no "9" and matches by
+    // NAME instead to number "4" (`match_chapter`'s number-veto-then-name-
+    // fallback). If the anchor used "9" instead, it would either return
+    // nothing or — worse — silently return the decoy "9.1" entry's
+    // children, another chapter's content mislabeled as this one's.
+    use crate::ai::{Ai, MockProvider, Models};
+
+    // No `SIGNAL:` branch needed: a populated TOC shortcut must short-
+    // circuit before any model call, so scripting only the demo responder
+    // doubles as proof no split-proposal call happened (a `SIGNAL:` call
+    // this test didn't expect would panic the mock provider or, at worst,
+    // hit the fallback below and get the wrong answer for the wrong
+    // reason — either way the test would fail).
+    let scripted = crate::ai::Provider::Mock(MockProvider::scripted(crate::api::demo_responder));
+    let ai = Ai::new(scripted, Models::single("chapter-toc-shortcut-demo"));
+    let state = test_state_with_ai(ai);
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book",
+             "bibliography":{"title":"Demo Foundations","authors":["Demo Author"],"kind":"book"},
+             "children":[
+                {"id":"c1","title":"recursion in C","action":"learn","item_type":"chapter","chapter_number":"9","children":[]}
+             ]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            for item in &mut outline.items {
+                if item.id == "c1" {
+                    item.resolved_page = Some(2);
+                }
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    // Seed a confirmed TOC for the real fixture PDF `test_state_with_ai`
+    // already wrote into the library — same content-hash pattern
+    // `library_routes_resolve_a_hash_present_in_the_index` uses.
+    let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
+    let library = crate::source::LocalPdfSource::open(&data_dir).unwrap();
+    let pdf_bytes = std::fs::read(library.root().join("demo-foundations.pdf")).unwrap();
+    let hash = crate::source::acervo::content_hash(&pdf_bytes);
+    let toc_confirm =
+        crate::source::TocConfirmStore::open_at(data_dir.join("index").join("toc")).unwrap();
+    toc_confirm
+        .put(
+            &hash,
+            &crate::source::ConfirmedToc {
+                entries: vec![
+                    crate::source::ConfirmedTocEntry {
+                        title: "recursion in C".to_string(),
+                        number: Some("4".to_string()),
+                        page: Some(1),
+                        inferred: false,
+                    },
+                    crate::source::ConfirmedTocEntry {
+                        title: "Intro to Functions".to_string(),
+                        number: Some("4.1".to_string()),
+                        page: Some(2),
+                        inferred: false,
+                    },
+                    crate::source::ConfirmedTocEntry {
+                        title: "Function Pointers".to_string(),
+                        number: Some("4.2".to_string()),
+                        page: Some(3),
+                        inferred: false,
+                    },
+                    // Decoy: shares the outline's WRONG guessed number "9",
+                    // under some unrelated chapter. If the anchor used
+                    // `chapter.chapter_number` instead of the matched
+                    // entry's own number, this is what would leak in.
+                    crate::source::ConfirmedTocEntry {
+                        title: "Unrelated Topic".to_string(),
+                        number: Some("9.1".to_string()),
+                        page: Some(9),
+                        inferred: false,
+                    },
+                ],
+                unresolved: vec![],
+            },
+        )
+        .unwrap();
+
+    let (status, body) = generate_to_completion(&call, &doc_id, "c1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: done"), "got: {body}");
+    assert!(!body.contains("event: error"), "got: {body}");
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let items = outline["items"].as_array().unwrap();
+    let mut titles: Vec<&str> = items
+        .iter()
+        .filter(|i| i["parent_id"] == serde_json::json!("c1"))
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
+    titles.sort_unstable();
+    assert_eq!(
+        titles,
+        vec!["Function Pointers", "Intro to Functions"],
+        "split children must come from the matched entry's own number (4.1/4.2), \
+         never the decoy under the outline's wrong guessed number (9.1): {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn chapter_split_declining_leaves_the_chapter_directly_generable() {
+    // S27g item 2's other sanctioned outcome: the model reports the
+    // chapter as single-topic (an empty JSON array) and the chapter
+    // generates exactly as it always has — `expansion` flips to
+    // `Expanded` (so a later visit never spends a second call) but no
+    // children are added and the chapter's own id stays directly
+    // generable, not redirected anywhere.
+    use crate::ai::{Ai, MockProvider, Models};
+
+    let scripted = crate::ai::Provider::Mock(MockProvider::scripted(|req| {
+        let text = req
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.contains("SIGNAL:") {
+            "[]".to_string()
+        } else {
+            crate::api::demo_responder(req)
+        }
+    }));
+    let ai = Ai::new(scripted, Models::single("chapter-nosplit-demo"));
+    let state = test_state_with_ai(ai);
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book",
+             "bibliography":{"title":"Demo Foundations","authors":["Demo Author"],"kind":"book"},
+             "children":[
+                {"id":"c1","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+             ]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            for item in &mut outline.items {
+                if item.id == "c1" {
+                    item.resolved_page = Some(2);
+                }
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    let (status, body) = generate_to_completion(&call, &doc_id, "c1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: done"), "got: {body}");
+    assert!(!body.contains("event: error"), "got: {body}");
+
+    // The generated content really did land on c1 itself — no redirect.
+    let (status, _) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/c1"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let raw_outline: crate::engine::Outline =
+        serde_json::from_str(&state.store.read_doc_file(&doc_id, "outline.json").unwrap()).unwrap();
+    let c1 = raw_outline.items.iter().find(|i| i.id == "c1").unwrap();
+    assert_eq!(c1.expansion, crate::engine::ExpansionState::Expanded);
+    assert!(
+        !raw_outline
+            .items
+            .iter()
+            .any(|i| i.parent_id.as_deref() == Some("c1")),
+        "a declined split must not add any children"
+    );
+}
+
+#[tokio::test]
 async fn next_topic_appends_a_new_epoch_without_touching_the_first() {
     // §S15c ("what are we learning next?", PLAN.md's `TODO futuros`): once
     // a document's main line is fully demonstrated, confirming a new topic

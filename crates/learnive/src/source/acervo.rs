@@ -814,15 +814,24 @@ fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
 /// the body. Deliberately unsophisticated — the real safety net is the S27f
 /// user-confirmation screen, not this heuristic.
 pub(crate) fn heuristic_toc(pdf: &PdfDocument) -> Vec<String> {
-    let from_contents_page = toc_page_heuristic(pdf);
+    heuristic_toc_over(&pdf.page_texts)
+}
+
+/// Same heuristic as [`heuristic_toc`], over an arbitrary page-text slice —
+/// lets S27g item 2's chapter split run it against just a chapter's own
+/// page range instead of the whole book, keeping the model-call input to
+/// structural signal instead of raw prose (measured 8000 TPM free-tier
+/// ceiling, `docs/S27g-chapter-matching-measurements.md`).
+pub(crate) fn heuristic_toc_over(pages: &[String]) -> Vec<String> {
+    let from_contents_page = toc_page_heuristic(pages);
     if !from_contents_page.is_empty() {
         return from_contents_page;
     }
-    heading_line_heuristic(pdf)
+    heading_line_heuristic(pages)
 }
 
-fn toc_page_heuristic(pdf: &PdfDocument) -> Vec<String> {
-    for page in &pdf.page_texts {
+fn toc_page_heuristic(pages: &[String]) -> Vec<String> {
+    for page in pages {
         let head: String = page.chars().take(60).collect::<String>().to_lowercase();
         if !(head.contains("contents") || head.contains("sumário") || head.contains("sumario")) {
             continue;
@@ -851,9 +860,9 @@ fn toc_page_heuristic(pdf: &PdfDocument) -> Vec<String> {
     Vec::new()
 }
 
-fn heading_line_heuristic(pdf: &PdfDocument) -> Vec<String> {
+fn heading_line_heuristic(pages: &[String]) -> Vec<String> {
     let mut out = Vec::new();
-    for page in &pdf.page_texts {
+    for page in pages {
         for line in page.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {

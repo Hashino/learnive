@@ -315,6 +315,42 @@ fn normalize_number(n: &str) -> String {
         .to_string()
 }
 
+/// Direct TOC sub-entries of a chapter — exactly one more dotted segment
+/// than the chapter's own number (chapter `"4"` -> `"4.1"`, `"4.2"`, never
+/// `"4.1.1"` or `"4"` itself). This is S27g item 2's zero-token first
+/// choice for the chapter split: when the book's own confirmed TOC already
+/// has this structure, using it beats asking a model to guess it from
+/// prose. `chapter_number` must be the *matched TOC entry's own* number
+/// (`ConfirmedTocEntry::number`, from [`match_chapter`]'s hit) — never an
+/// unverified model-proposed number, which the name-tier match can return
+/// when the model misremembered it; anchoring to the wrong number would
+/// silently return a different chapter's children. Returns empty when
+/// `chapter_number` is absent or nothing matches — both are sanctioned
+/// "fall through to the model, or stay one node" outcomes, not errors.
+pub fn sub_entries_within<'a>(
+    entries: &'a [ConfirmedTocEntry],
+    chapter_number: Option<&str>,
+) -> Vec<&'a ConfirmedTocEntry> {
+    let Some(raw) = chapter_number else {
+        return Vec::new();
+    };
+    let parent = normalize_number(raw);
+    if parent.is_empty() {
+        return Vec::new();
+    }
+    let parent_depth = parent.split('.').count();
+    let prefix = format!("{parent}.");
+    entries
+        .iter()
+        .filter(|e| {
+            let Some(n) = e.number.as_deref().map(normalize_number) else {
+                return false;
+            };
+            n.starts_with(&prefix) && n.split('.').count() == parent_depth + 1
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +630,56 @@ mod tests {
     fn match_chapter_returns_none_when_nothing_matches() {
         let entries = vec![confirmed_entry(Some("1"), "Introduction", Some(1))];
         assert!(match_chapter(&entries, Some("9.9"), "completely unrelated topic").is_none());
+    }
+
+    /// S27g item 2's zero-token shortcut: direct children only, one dotted
+    /// segment deeper than the chapter — grandchildren and the chapter's own
+    /// entry are excluded.
+    #[test]
+    fn sub_entries_within_returns_only_direct_children() {
+        let entries = vec![
+            confirmed_entry(Some("4"), "Functions and Program Structure", Some(70)),
+            confirmed_entry(Some("4.1"), "Functions", Some(70)),
+            confirmed_entry(Some("4.2"), "Pointers", Some(75)),
+            confirmed_entry(Some("4.2.1"), "Pointer Arithmetic", Some(76)),
+            confirmed_entry(Some("5"), "Pointers and Arrays", Some(93)),
+        ];
+        let titles: Vec<&str> = sub_entries_within(&entries, Some("4"))
+            .into_iter()
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Functions", "Pointers"]);
+    }
+
+    /// A dotted chapter number narrows the prefix accordingly — `"4.10"`'s
+    /// children are `"4.10.x"`, not `"4.x"`.
+    #[test]
+    fn sub_entries_within_handles_a_dotted_chapter_number() {
+        let entries = vec![
+            confirmed_entry(Some("4.10"), "Recursion", Some(84)),
+            confirmed_entry(Some("4.10.1"), "Recursive Descent", Some(85)),
+            confirmed_entry(Some("4.1"), "Functions", Some(70)),
+        ];
+        let titles: Vec<&str> = sub_entries_within(&entries, Some("4.10"))
+            .into_iter()
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Recursive Descent"]);
+    }
+
+    #[test]
+    fn sub_entries_within_is_empty_with_no_chapter_number() {
+        let entries = vec![confirmed_entry(Some("4.1"), "Functions", Some(70))];
+        assert!(sub_entries_within(&entries, None).is_empty());
+    }
+
+    #[test]
+    fn sub_entries_within_is_empty_when_the_toc_has_no_sub_entries() {
+        let entries = vec![
+            confirmed_entry(Some("4"), "Functions and Program Structure", Some(70)),
+            confirmed_entry(Some("5"), "Pointers and Arrays", Some(93)),
+        ];
+        assert!(sub_entries_within(&entries, Some("4")).is_empty());
     }
 
     fn resolution(

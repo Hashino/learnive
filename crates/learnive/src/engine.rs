@@ -623,6 +623,56 @@ pub async fn propose_toc(
 /// actually overruns here.
 const TOC_PAGE_MAX_TOKENS: u32 = 4000;
 
+/// Proposes an ordered split of a chapter into atomic sub-topics (S27g item
+/// 2, PLAN.md — user's words: "each chapter is represented as a node in the
+/// outline but when the generation gets to that chapter the agent tries to
+/// split the chapter into subnodes with atomic knowledge"). `signal_text` is
+/// structural signal about the chapter's own content — heading-shaped lines
+/// from `source::acervo::heuristic_toc_over`, scoped to the chapter's page
+/// range, when there are any; a short cross-page prose sample otherwise (see
+/// `api::reading`'s caller for which one it built) — **never** the chapter's
+/// full text, which would blow the same free-tier TPM budget
+/// `TOC_PAGE_MAX_TOKENS`'s doc measured. Truncated defensively here too, in
+/// case a future caller forgets to bound it itself.
+///
+/// Returns an empty `Vec`, not an error, whenever the attempt doesn't
+/// produce a real split — an unparseable response, or the model correctly
+/// reporting a single cohesive topic. "Tries" is literal (PLAN.md): a
+/// chapter that doesn't split stays one node, which this function's
+/// contract treats as a normal outcome, not a failure. Only a genuine
+/// provider-level failure (network, `429`) surfaces as `Err`; either way the
+/// caller must not retry within the same visit (§14/§15: no speculative or
+/// retried spend), and must still mark the chapter `Expanded`.
+pub async fn propose_chapter_split(
+    ai: &Ai,
+    chapter_title: &str,
+    signal_text: &str,
+) -> Result<Vec<String>, EngineError> {
+    let capped: String = signal_text
+        .chars()
+        .take(CHAPTER_SPLIT_INPUT_CHAR_CAP)
+        .collect();
+    if capped.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let messages = prompt::propose_chapter_split(chapter_title, &capped);
+    let text = ai
+        .complete_within(Tier::Fast, messages, Some(CHAPTER_SPLIT_MAX_TOKENS))
+        .await?;
+    Ok(parse::chapter_split(&text).unwrap_or_default())
+}
+
+/// Input cap for [`propose_chapter_split`]'s `signal_text`, in characters.
+/// Heading-only signal is normally far under this; it exists mainly to
+/// bound the prose-sample fallback against the free-tier TPM ceiling
+/// measured for [`TOC_PAGE_MAX_TOKENS`].
+const CHAPTER_SPLIT_INPUT_CHAR_CAP: usize = 6000;
+
+/// Response budget for [`propose_chapter_split`] — a handful of short
+/// titles, nowhere near [`TOC_PAGE_MAX_TOKENS`]'s ceiling for a dense
+/// contents page.
+const CHAPTER_SPLIT_MAX_TOKENS: u32 = 1200;
+
 /// One item of the reading list an objective needs (S27e, PLAN.md §27,
 /// replacing the pre-pivot concept-decomposition tree this type used to
 /// describe alone — see git history / PLAN.md's S27e entry for that old

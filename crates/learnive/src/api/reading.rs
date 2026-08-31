@@ -1017,6 +1017,16 @@ pub(super) async fn prepare(
         .position(|i| i.id == item_id)
         .ok_or_else(|| "unknown outline item".to_string())?;
     let item = outline.items[idx].clone();
+    // S27g item 2: a `Chapter` that already gained real `Node` children on
+    // an EARLIER visit is a container by the time this request even
+    // starts — redirect before the refusal below ever sees it. This must
+    // run here, not only after the split-attempt block further down,
+    // because the client's move-pause/continue loop (§S18) re-enters
+    // `prepare` with this SAME chapter id on every request of a child's
+    // multi-move generation, long after `expansion` has already flipped to
+    // `Expanded` and the split-attempt block stops running. See
+    // `redirect_into_chapter_child`'s doc for the full account.
+    let item = redirect_into_chapter_child(&outline, item);
     // S27g (2026-08-29): a `Book`/`Article` item whose children are
     // topic-scoped `Chapter` proposals is a container, not content — see
     // `engine::is_generable`'s doc comment. Checked here, not just in the
@@ -1121,11 +1131,51 @@ pub(super) async fn prepare(
         .find(|i| i.id == item_id)
         .cloned()
         .ok_or_else(|| "unknown outline item".to_string())?;
-    // Mirrors the container-refusal check near the top of this function: if
-    // this same call's gate just split this `Chapter` into `Node` children
-    // (S27g item 2), it is no longer generable — refuse the same way a
-    // `Book`/`Article` container always has, instead of generating the
-    // whole chapter on top of the subnodes that now carry its content.
+
+    // S27g item 2 (PLAN.md, "tenta é literal"): the FIRST visit to a
+    // `Chapter` (page range already resolved by item 1 — the hard
+    // prerequisite the split's own input depends on) tries splitting it
+    // into atomic `Node` sub-topics before anything else runs. This must
+    // happen before the container-refusal check below, not inside
+    // `ensure_document_grounded` above: that gate iterates every
+    // `ChaptersProposed` item in the WHOLE outline unconditionally (it's
+    // zero-token, so that's fine there), but a split costs at most one
+    // model call — running it from there would fire on every unvisited
+    // chapter the first time ANY chapter in the book is opened, which is
+    // exactly the speculative spend §14 killed prefetch over. Scoping it to
+    // this one already-resolved `item`, gated on `NotExpanded`, is what
+    // keeps it to "one call per chapter, at that chapter's own arrival" —
+    // `try_split_chapter` always leaves `expansion` at `Expanded` (with or
+    // without children) once it genuinely attempts, so this branch can
+    // never fire twice for the same chapter.
+    let (outline, item) = if item.item_type == OutlineItemType::Chapter
+        && item.expansion == ExpansionState::NotExpanded
+        && item.resolved_page.is_some()
+    {
+        let _ = try_split_chapter(state, doc_id, &outline, &item).await;
+        let outline_json = state
+            .store
+            .read_doc_file(doc_id, "outline.json")
+            .map_err(|e| e.to_string())?;
+        let outline: Outline = serde_json::from_str(&outline_json).map_err(|e| e.to_string())?;
+        let item = outline
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .cloned()
+            .ok_or_else(|| "unknown outline item".to_string())?;
+        (outline, item)
+    } else {
+        (outline, item)
+    };
+    // The split attempt above may have JUST turned `item` into a
+    // container this very call — redirect again for that case (the
+    // top-of-function redirect only caught an EARLIER visit's split).
+    let item = redirect_into_chapter_child(&outline, item);
+    // Mirrors the container-refusal check near the top of this function —
+    // reached now only by a `Book`/`Article` container (never a split
+    // `Chapter`, redirected above) or the defensive case where a `Chapter`
+    // somehow has no children despite `is_generable` reporting false.
     if !engine::is_generable(&outline, &item) {
         let reason = "this outline item is a container (its topics were split into nodes); read one of its children instead"
             .to_string();
@@ -1720,6 +1770,41 @@ pub(super) async fn ensure_document_grounded(
     Ok(())
 }
 
+/// A `Chapter` that has real `Node` children (S27g item 2 — split just now,
+/// or on an earlier visit) is a container: resolves to its first child
+/// instead of leaving the caller to hit the container-refusal error.
+/// `prepare` calls this at **two** points — right after its initial
+/// outline read, and again after the split-attempt block further down —
+/// because the client's move-pause/continue loop (§S18) keeps POSTing to
+/// this SAME chapter id across several requests while one child generates:
+/// the first call redirects a chapter that was ALREADY split on an earlier
+/// visit (`expansion` no longer `NotExpanded`, so the split-attempt block
+/// itself never runs), the second catches a split that just happened this
+/// very call. Missing either point reintroduces the container-refusal
+/// error mid-generation — confirmed live while building this, not just
+/// reasoned about: the error only ever appeared starting on request 2 of a
+/// multi-move node.
+///
+/// Children are materialized in prerequisite-chained order
+/// (`materialize_split_children`), so "first child" is well-defined and,
+/// in practice, is always the one currently being generated —
+/// `outline_view` never shows a container as directly available, so there
+/// is no route back to this chapter's own id once its first child is
+/// `Demonstrated` and the client moves on to the next one directly.
+/// `Book`/`Article` containers are untouched (the `item_type` guard) —
+/// that refusal predates this slice and stays a hard error for them.
+fn redirect_into_chapter_child(outline: &Outline, item: OutlineItem) -> OutlineItem {
+    if item.item_type != OutlineItemType::Chapter || engine::is_generable(outline, &item) {
+        return item;
+    }
+    outline
+        .items
+        .iter()
+        .find(|i| i.parent_id.as_deref() == Some(item.id.as_str()))
+        .cloned()
+        .unwrap_or(item)
+}
+
 /// Walks from `item` up through `parent_id` to the nearest `Chapter`
 /// ancestor — `item` itself if it already is one, `None` if nothing between
 /// it and the document root is a `Chapter` (a `Node` hung straight off a
@@ -1782,6 +1867,262 @@ fn chapter_page_range(outline: &Outline, item: &OutlineItem) -> Option<(usize, O
         .min()
         .map(|next| next.saturating_sub(1));
     Some((start, end))
+}
+
+/// What [`try_split_chapter`] decided, and what the caller should do about
+/// `expansion` (S27g item 2).
+enum ChapterSplitOutcome {
+    /// Couldn't even attempt — the library file, its hash, or the PDF
+    /// itself didn't resolve. `expansion` must stay `NotExpanded`: nothing
+    /// was tried, so nothing was learned, and a later visit (after whatever
+    /// infrastructure gap closes) should get to try again at zero token
+    /// cost — the same degrade-and-retry convention item 1's own
+    /// chapter-matching pass already uses.
+    Deferred,
+    /// A real attempt ran (the TOC shortcut, or one model call) and ended
+    /// with no split — a genuinely single-topic chapter, an unparseable/
+    /// empty model response, or a provider error (`429` included). Caller
+    /// must set `expansion = Expanded` regardless: this IS the "already
+    /// tried, it's one node" outcome PLAN.md specifies, not a failure to
+    /// recover from.
+    NoSplit,
+    /// A real attempt produced children, already persisted with
+    /// `expansion = Expanded`. The caller doesn't need the new ids from
+    /// here — the container-redirect step right after this call re-reads
+    /// the outline and finds them the same way it would on any later visit
+    /// (`prepare`'s doc comment on that step explains why it has to run on
+    /// every visit regardless).
+    Split,
+}
+
+/// S27g item 2's split attempt, scoped to one already-page-resolved
+/// `Chapter`. Tries, in order: (1) the confirmed TOC's own sub-entries
+/// under this chapter's number (`source::sub_entries_within`) — zero token,
+/// real structure, tried first because "a app não adivinha estrutura que
+/// existe de verdade"; (2) failing that, one Fast-tier model call fed
+/// structural signal only (heading-shaped lines over the chapter's own page
+/// range, or, lacking any, a short prose sample spread across that range —
+/// never the chapter's full text, see `engine::propose_chapter_split`'s doc
+/// for why). At most one model call, ever, per chapter — enforced by the
+/// caller only invoking this on `ExpansionState::NotExpanded`, which this
+/// function always clears to `Expanded` on every path except
+/// [`ChapterSplitOutcome::Deferred`].
+async fn try_split_chapter(
+    state: &AppState,
+    doc_id: &str,
+    outline: &Outline,
+    chapter: &OutlineItem,
+) -> ChapterSplitOutcome {
+    let Some(ptr) = engine::resolve_grounding_source(outline, chapter) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let expected = source::ExpectedItem {
+        title: ptr.item.title.clone(),
+        authors: ptr.item.authors.clone(),
+        kind: ptr.item.kind,
+    };
+    let Ok(library) = source::LocalPdfSource::open(state.data_dir.as_ref()) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let Ok(manual) = source::ManualMatchStore::open(state.data_dir.as_ref()) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let Ok(Some(filename)) = source::resolve_matched_filename(&library, &manual, &expected) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let path = library.root().join(&filename);
+    let Ok(bytes) = fs::read(&path) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let Ok(pdf) = source::read_pdf(&path) else {
+        return ChapterSplitOutcome::Deferred;
+    };
+    let hash = source::acervo::content_hash(&bytes);
+
+    let Some((start, end)) = chapter_page_range(outline, chapter) else {
+        // The hard prerequisite this item depends on (item 1's page
+        // resolution) is what the caller already checked via
+        // `resolved_page.is_some()` — reaching here despite that would mean
+        // `chapter_page_range` itself couldn't find `chapter` as its own
+        // nearest `Chapter` ancestor, which cannot happen for `chapter`
+        // being passed as both `item` and its own ancestor. Deferred rather
+        // than panicking: defensive, not expected.
+        return ChapterSplitOutcome::Deferred;
+    };
+    let end = end.unwrap_or(pdf.page_texts.len());
+    if start == 0 || start > pdf.page_texts.len() {
+        return ChapterSplitOutcome::Deferred;
+    }
+    let end = end.min(pdf.page_texts.len());
+    let slice = &pdf.page_texts[start - 1..end];
+
+    let toc_confirm_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("toc");
+    let sub_titles: Vec<String> = (|| {
+        let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir).ok()?;
+        let confirmed = toc_confirm.get(&hash)?;
+        let matched = source::match_chapter(
+            &confirmed.entries,
+            chapter.chapter_number.as_deref(),
+            &chapter.title,
+        )?;
+        let subs = source::sub_entries_within(&confirmed.entries, matched.number.as_deref());
+        (!subs.is_empty()).then(|| subs.into_iter().map(|e| e.title.clone()).collect())
+    })()
+    .unwrap_or_default();
+
+    let sub_titles = if !sub_titles.is_empty() {
+        sub_titles
+    } else {
+        let signal = {
+            let headings = source::acervo::heuristic_toc_over(slice);
+            if !headings.is_empty() {
+                headings.join("\n")
+            } else {
+                sampled_prose(slice)
+            }
+        };
+        let ai = state.ai.load_full();
+        match engine::propose_chapter_split(&ai, &chapter.title, &signal).await {
+            Ok(titles) => titles,
+            Err(e) => {
+                eprintln!(
+                    "chapter split attempt failed for \"{}\": {e}",
+                    chapter.title
+                );
+                Vec::new()
+            }
+        }
+    };
+
+    if sub_titles.is_empty() {
+        return match mark_chapter_expanded(state, doc_id, &chapter.id, &[]).await {
+            Ok(()) => ChapterSplitOutcome::NoSplit,
+            Err(e) => {
+                // Couldn't even persist "this chapter stays one node" — no
+                // model call was spent deciding that (the TOC shortcut is
+                // zero-token, and any model call above already returned
+                // before this branch on success), so it's safe to retry a
+                // later visit instead of silently pretending it landed.
+                eprintln!(
+                    "could not persist chapter split outcome for \"{}\": {e}",
+                    chapter.title
+                );
+                ChapterSplitOutcome::Deferred
+            }
+        };
+    }
+
+    let incoming_gate = chapter.prerequisites.first().cloned();
+    let children = materialize_split_children(&chapter.id, &sub_titles, incoming_gate);
+    match mark_chapter_expanded(state, doc_id, &chapter.id, &children).await {
+        Ok(()) => ChapterSplitOutcome::Split,
+        Err(e) => {
+            eprintln!(
+                "could not persist chapter split for \"{}\": {e}",
+                chapter.title
+            );
+            ChapterSplitOutcome::Deferred
+        }
+    }
+}
+
+/// Every-Nth-page-opening sample of a chapter's own prose, spread across
+/// its whole page range rather than truncated to its first pages — the
+/// fallback signal for [`try_split_chapter`] when the chapter has no
+/// heading-shaped lines to work from. Bounded per-page and overall so a
+/// long chapter still produces a small, cheap prompt
+/// (`engine::propose_chapter_split` caps its input again regardless, this
+/// just keeps the string built here from being wastefully large).
+fn sampled_prose(pages: &[String]) -> String {
+    const PER_PAGE_CHARS: usize = 400;
+    const TOTAL_CHAR_CAP: usize = 6000;
+    let mut out = String::new();
+    for page in pages {
+        if out.len() >= TOTAL_CHAR_CAP {
+            break;
+        }
+        let sample: String = page.chars().take(PER_PAGE_CHARS).collect();
+        if sample.trim().is_empty() {
+            continue;
+        }
+        out.push_str(sample.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// Sequential sibling-prerequisite chaining, mirroring
+/// `api::cold_start::materialize_outline_tree`'s convention (each item's
+/// sole prerequisite is the id of the item immediately before it) without
+/// pulling in that function's unrelated `ConfirmedNode`/`PrereqAction`
+/// machinery — S27g item 2 mints plain titles, not confirmed proposal
+/// nodes. `resolved_page: None` on every child is deliberate, not an
+/// omission: `nearest_chapter`/`chapter_page_range` already narrow through
+/// to the parent `Chapter`'s own `resolved_page`, so a per-child value
+/// would be dead data no code reads.
+fn materialize_split_children(
+    chapter_id: &str,
+    titles: &[String],
+    incoming_gate: Option<String>,
+) -> Vec<OutlineItem> {
+    let mut gate = incoming_gate;
+    let mut out = Vec::with_capacity(titles.len());
+    for title in titles {
+        let id = engine::new_id();
+        out.push(OutlineItem {
+            id: id.clone(),
+            title: title.clone(),
+            prerequisites: gate.into_iter().collect(),
+            parent_id: Some(chapter_id.to_string()),
+            mode: NodeMode::Learn,
+            source_doc_id: None,
+            item_type: OutlineItemType::Node,
+            expansion: ExpansionState::NotExpanded,
+            source: None,
+            chapter_number: None,
+            resolved_page: None,
+        });
+        gate = Some(id);
+    }
+    out
+}
+
+/// Persists a chapter split's outcome: appends `children` (if any) and sets
+/// `chapter_id`'s own `expansion = Expanded` — always together, in the same
+/// `update_outline_file` pass, so the two can never land inconsistently
+/// (children present but the chapter still `NotExpanded`, or vice versa).
+/// When `children` is non-empty, also rewrites the chapter's own
+/// `prerequisites` to `[last_child_id]`, mirroring
+/// `materialize_outline_node`'s "this node's own prerequisites become its
+/// LAST child's id" convention — not load-bearing (`prepare` checks
+/// `is_generable` before ever reading a container's own `prerequisites`),
+/// kept only for consistency with that existing pattern.
+async fn mark_chapter_expanded(
+    state: &AppState,
+    doc_id: &str,
+    chapter_id: &str,
+    children: &[OutlineItem],
+) -> Result<(), String> {
+    let children = children.to_vec();
+    let chapter_id = chapter_id.to_string();
+    state
+        .store
+        .update_outline_file(doc_id, move |json| {
+            let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
+            if let Some(last) = children.last() {
+                if let Some(chapter) = outline.items.iter_mut().find(|i| i.id == chapter_id) {
+                    chapter.expansion = ExpansionState::Expanded;
+                    chapter.prerequisites = vec![last.id.clone()];
+                }
+                outline.items.extend(children.clone());
+            } else if let Some(chapter) = outline.items.iter_mut().find(|i| i.id == chapter_id) {
+                chapter.expansion = ExpansionState::Expanded;
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// The per-node half of S27m's gate: once [`ensure_document_grounded`] has

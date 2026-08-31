@@ -96,7 +96,9 @@ pub use manual_match::{ManualMatch, ManualMatchStore};
 pub use mock::MockSource;
 pub use pdf::{OutlineEntry, PageMap, PdfDocument, PdfReadError, read_pdf};
 pub use scihub::SciHubSource;
-pub use toc_confirm::{ConfirmedToc, ConfirmedTocEntry, TocConfirmStore, match_chapter};
+pub use toc_confirm::{
+    ConfirmedToc, ConfirmedTocEntry, TocConfirmStore, match_chapter, sub_entries_within,
+};
 
 /// What kind of thing a source is — steers how a locator is read (§4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

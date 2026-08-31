@@ -139,6 +139,22 @@ pub fn toc_entries(text: &str) -> Option<Vec<crate::source::toc::TocLlmEntry>> {
     serde_json::from_str(json).ok()
 }
 
+/// S27g item 2: `["Sub-topic A","Sub-topic B",...]`, filtered for non-empty
+/// titles after trimming. `None` only when the response has no JSON at
+/// all — `engine::propose_chapter_split` degrades that identically to an
+/// empty array (the chapter stays one node), per PLAN.md's "tenta é
+/// literal, falhar é um desfecho normal".
+pub fn chapter_split(text: &str) -> Option<Vec<String>> {
+    let json = extract_json(text)?;
+    let raw: Vec<String> = serde_json::from_str(json).ok()?;
+    Some(
+        raw.into_iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    )
+}
+
 pub fn assessment(text: &str) -> Result<Assessment, EngineError> {
     let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
     serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))
