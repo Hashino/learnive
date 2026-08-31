@@ -315,6 +315,70 @@ fn normalize_number(n: &str) -> String {
         .to_string()
 }
 
+/// Splits a leading printed chapter number off a raw embedded-bookmark
+/// title — `"2 - Limits and derivatives"` becomes
+/// `(Some("2"), "Limits and derivatives")`. Handles a bare `"4.10 Recursion"`,
+/// a `"Chapter 4: ..."`/`"Part 4 "` prefix, and the assorted dash/colon/dot
+/// separators real books use. Returns `(None, trimmed)` when there's no
+/// leading number to split (front matter, "Appendixes", etc.).
+///
+/// Ported from `toc_bench`'s `as_split` measurement (S27g bake-off,
+/// 2026-08-30) into production for S27o (2026-08-31, live bug): without
+/// this, [`match_chapter`]'s entries built from an embedded PDF outline
+/// always carried `number: None` (nothing populated it), which skips the
+/// number-first tier entirely and falls straight to name similarity —
+/// exactly the tier the veto floor's own comment says loses real matches
+/// whose wording differs (measured live: Stewart's real bookmark "2 -
+/// Limits and derivatives" never matched a proposed "Limits and Continuity"
+/// chapter numbered "2", because "continuity" vs "derivatives" alone don't
+/// clear [`NAME_SIMILARITY_FLOOR`] — but WITH the number split out, the
+/// number-first tier finds the "2" match directly and the veto's own
+/// wording-tolerant comparison, `"limits and continuity"` vs `"limits and
+/// derivatives"`, easily clears the floor on their long shared prefix).
+pub fn split_printed_number(title: &str) -> (Option<String>, String) {
+    // Real books put NON-BREAKING spaces inside the numbering (Think
+    // Python's bookmarks are literally "Chapter\u{a0}1.\u{a0}The Way of the
+    // Program") — measured 2026-08-30, and it silently defeated a first
+    // version of this splitter on all 270 of that book's entries. Fold
+    // every unicode space to a plain one before anything else.
+    let folded: String = title
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let t = folded.trim();
+    let lower = t.to_lowercase();
+    let rest = if let Some(stripped) = lower.strip_prefix("chapter ") {
+        &t[t.len() - stripped.len()..]
+    } else if let Some(stripped) = lower.strip_prefix("part ") {
+        &t[t.len() - stripped.len()..]
+    } else {
+        t
+    };
+
+    let digits_end = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits_end == 0 {
+        return (None, rest.trim().to_string());
+    }
+    let number = rest[..digits_end].trim_matches('.').to_string();
+    if number.is_empty() {
+        return (None, rest.trim().to_string());
+    }
+    let tail = rest[digits_end..]
+        .trim_start_matches([' ', '\t', '-', '\u{2013}', '\u{2014}', ':', '.', ')'])
+        .trim();
+    // A "number" that ate the whole title (a TOC entry that is literally
+    // just "1") leaves nothing to match on by name — keep the original.
+    if tail.is_empty() {
+        return (None, rest.trim().to_string());
+    }
+    (Some(number), tail.to_string())
+}
+
 /// Direct TOC sub-entries of a chapter — exactly one more dotted segment
 /// than the chapter's own number (chapter `"4"` -> `"4.1"`, `"4.2"`, never
 /// `"4.1.1"` or `"4"` itself). This is S27g item 2's zero-token first
@@ -799,5 +863,43 @@ mod tests {
             .expect("present");
         assert_eq!(appendix.page, Some(200));
         assert!(!appendix.inferred);
+    }
+
+    /// The exact live bug (S27o, reported 2026-08-31): a raw embedded PDF
+    /// bookmark ("2 - Limits and derivatives", Stewart's real chapter 2)
+    /// fed straight into `match_chapter` with `number: None` — the shape
+    /// `ensure_document_grounded`'s chapter-resolution pass produced before
+    /// this fix — never matches a model-proposed "Limits and Continuity"
+    /// numbered "2": the raw, unsplit title defeats both the (absent)
+    /// number tier and the name-similarity tier ("2 limits and derivatives"
+    /// vs "limits and continuity" doesn't clear the floor). Splitting the
+    /// number out first (what `flatten_embedded_outline` now does) restores
+    /// the number-first tier, whose veto-protected name comparison
+    /// ("limits and derivatives" vs "limits and continuity", long shared
+    /// prefix) clears the floor easily. This is the regression that left
+    /// Stewart's own chapter 2 permanently unresolved end to end.
+    #[test]
+    fn split_number_then_match_resolves_a_bookmark_the_raw_title_alone_cannot() {
+        let (number, title) = split_printed_number("2 - Limits and derivatives");
+        assert_eq!(number.as_deref(), Some("2"));
+        assert_eq!(title, "Limits and derivatives");
+
+        let split_entries = vec![confirmed_entry(number.as_deref(), &title, Some(110))];
+        assert!(
+            match_chapter(&split_entries, Some("2"), "Limits and Continuity").is_some(),
+            "the split entry must match by number, wording difference vetoed"
+        );
+
+        // Same bookmark, unsplit (the pre-fix shape) — must NOT match, which
+        // is exactly what silently broke live.
+        let raw_entries = vec![confirmed_entry(
+            None,
+            "2 - Limits and derivatives",
+            Some(110),
+        )];
+        assert!(
+            match_chapter(&raw_entries, Some("2"), "Limits and Continuity").is_none(),
+            "the raw unsplit title is the documented failure mode, not a new expectation"
+        );
     }
 }

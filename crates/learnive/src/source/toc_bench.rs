@@ -22,7 +22,7 @@
 #[cfg(test)]
 mod tests {
     use crate::source::matching::normalize;
-    use crate::source::{ConfirmedTocEntry, OutlineEntry, match_chapter};
+    use crate::source::{ConfirmedTocEntry, OutlineEntry, match_chapter, split_printed_number};
 
     fn library_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(
@@ -48,55 +48,9 @@ mod tests {
         out
     }
 
-    /// Splits a leading printed chapter number off a TOC title — the fix
-    /// under evaluation. `"4 - Applications of differentiation "` becomes
-    /// `(Some("4"), "Applications of differentiation")`. Handles a bare
-    /// `"4.10 Recursion"`, a `"Chapter 4: ..."` prefix, and the assorted
-    /// dash/colon/dot separators real books use. Returns `(None, trimmed)`
-    /// when there's no leading number to split.
-    fn split_printed_number(title: &str) -> (Option<String>, String) {
-        // Real books put NON-BREAKING spaces inside the numbering (Think
-        // Python's bookmarks are literally "Chapter\u{a0}1.\u{a0}The Way of
-        // the Program") — measured 2026-08-30, and it silently defeated a
-        // first version of this splitter on all 270 of that book's entries.
-        // Fold every unicode space to a plain one before anything else.
-        let folded: String = title
-            .chars()
-            .map(|c| if c.is_whitespace() { ' ' } else { c })
-            .collect();
-        let t = folded.trim();
-        let lower = t.to_lowercase();
-        let rest = if let Some(stripped) = lower.strip_prefix("chapter ") {
-            &t[t.len() - stripped.len()..]
-        } else if let Some(stripped) = lower.strip_prefix("part ") {
-            &t[t.len() - stripped.len()..]
-        } else {
-            t
-        };
-
-        let digits_end = rest
-            .char_indices()
-            .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
-            .map(|(i, c)| i + c.len_utf8())
-            .last()
-            .unwrap_or(0);
-        if digits_end == 0 {
-            return (None, rest.trim().to_string());
-        }
-        let number = rest[..digits_end].trim_matches('.').to_string();
-        if number.is_empty() {
-            return (None, rest.trim().to_string());
-        }
-        let tail = rest[digits_end..]
-            .trim_start_matches([' ', '\t', '-', '\u{2013}', '\u{2014}', ':', '.', ')'])
-            .trim();
-        // A "number" that ate the whole title (a TOC entry that is literally
-        // just "1") leaves nothing to match on by name — keep the original.
-        if tail.is_empty() {
-            return (None, rest.trim().to_string());
-        }
-        (Some(number), tail.to_string())
-    }
+    // `split_printed_number` shipped to production in `toc_confirm.rs` as
+    // part of S27o (2026-08-31) — this bench now calls that copy instead of
+    // keeping its own, so the two can never silently drift apart again.
 
     fn flatten(entries: &[OutlineEntry], depth: usize, out: &mut Vec<(usize, String, usize)>) {
         for e in entries {

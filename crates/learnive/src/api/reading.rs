@@ -1518,18 +1518,31 @@ async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool
 /// used by [`ensure_document_grounded`]'s chapter-resolution pass for a book
 /// whose TOC check came back `Embedded` (real bookmarks), which never
 /// populates `TocConfirmStore` (that store is the S27k deduction path's
-/// output only). `number` is always `None` here — nothing splits a printed
-/// number out of the raw bookmark title (`toc_bench`'s `as_split` explored
-/// that as a possible improvement, unshipped); `match_chapter` still matches
-/// on title alone, same as any non-numbered confirmed entry.
+/// output only).
+///
+/// **Splits the printed number out of the raw bookmark title**
+/// ([`source::split_printed_number`]) rather than leaving `number: None` —
+/// an earlier version of this function didn't, and shipped a live bug
+/// (2026-08-31): with `number` always `None`, `match_chapter`'s number-first
+/// tier can never fire, so every embedded-outline match falls straight to
+/// name similarity — which Stewart's own real bookmark defeats (`"2 -
+/// Limits and derivatives"` vs. a proposed "Limits and Continuity" chapter
+/// numbered `"2"`: the number matches exactly, but "derivatives" and
+/// "continuity" alone don't clear the name-similarity floor, so the chapter
+/// silently stayed unresolved and the next `explain` move's grounding
+/// search fell back to unscoped, sometimes triggering an unhelpful
+/// `research` move on top). Splitting the number out first restores the
+/// number-first tier's veto-protected match, the same one the deduction
+/// path already gets from `resolve_toc`/`propose_toc`.
 fn flatten_embedded_outline(
     entries: &[source::OutlineEntry],
     out: &mut Vec<source::ConfirmedTocEntry>,
 ) {
     for e in entries {
+        let (number, title) = source::split_printed_number(&e.title);
         out.push(source::ConfirmedTocEntry {
-            title: e.title.clone(),
-            number: None,
+            title,
+            number,
             page: Some(e.page),
             inferred: true,
         });
