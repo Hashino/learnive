@@ -108,13 +108,11 @@
     <aside id="sourcePanel" data-i18n-aria="source.title" aria-label="Source">
       <!-- Resizable split (§11.1 item 7): drag to resize, wired in node.js. -->
       <div id="sourcePanelHandle"></div>
-      <div class="source-head">
-        <div>
-          <div id="sourceTitle"></div>
-          <div id="sourceMeta" class="muted"></div>
-        </div>
-        <button type="button" id="sourceCloseBtn" data-i18n-aria="source.close" aria-label="Close">×</button>
-      </div>
+      <!-- Edge toggle (replaces the old top bar/×, 2026-08-30): a single
+           vertically-centered chevron on the panel's left edge closes it —
+           the native PDF viewer already shows the document's own title, so
+           a persistent chrome bar on top of it was redundant. -->
+      <button type="button" id="sourceCloseBtn" class="source-edge-toggle" data-i18n-aria="source.close" aria-label="Close" title="Close">›</button>
       <div id="sourceBody"></div>
     </aside>
 

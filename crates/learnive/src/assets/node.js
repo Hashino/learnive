@@ -1032,42 +1032,41 @@ async function openSourcePanel(sourceId, locator) {
   // Split-view (§11.1): re-centers `.main-container` in the half of the
   // screen the panel doesn't occupy (`app.css`'s `body.source-open` rule).
   document.body.classList.add("source-open");
-  el("sourceTitle").textContent = t("source.loading");
-  el("sourceMeta").textContent = "";
-  el("sourceBody").innerHTML = "";
+  // 2026-08-30: the panel lost its title/meta top bar (native PDF viewer
+  // shows the document's own title), so loading/error states now render
+  // as plain text directly in `#sourceBody` instead of a separate strip.
+  el("sourceBody").textContent = t("source.loading");
   try {
     let index = sourceIndexCache.get(sourceId);
     if (!index) {
       index = await fetchSourceIndex(sourceId);
       sourceIndexCache.set(sourceId, index);
     }
-    el("sourceTitle").textContent = index.title;
-    const bits = [];
-    if (index.authors && index.authors.length) {
-      bits.push(index.authors.join(", "));
-    }
-    if (index.license) bits.push(index.license);
-    el("sourceMeta").textContent = bits.join(" · ");
     if (index.assetUrl) {
       // A fresh element every open, never a reused one: mutating only the
       // `#page=` fragment on an existing iframe's `src` does not renavigate
       // in Chrome, so a second citation into a different page would
       // silently keep showing the first page.
       const iframe = document.createElement("iframe");
-      iframe.title = t("source.title");
+      iframe.title = index.title || t("source.title");
       const url = new URL(index.assetUrl, location.origin);
       url.searchParams.set("token", TOKEN);
       const page = parsePageLocator(locator);
       iframe.src = page ? `${url.toString()}#page=${page}` : url.toString();
       el("sourceBody").replaceChildren(iframe);
     } else {
-      // Legacy/mock corpus entry with no PDF asset on disk (S27i): fall
-      // back to meta-only, same as before S27j.
-      el("sourceBody").innerHTML = "";
+      // Legacy/mock corpus entry with no PDF asset on disk (S27i): no
+      // display surface left without the removed meta bar — same
+      // information the old bar would have shown, just inline.
+      const bits = [index.title];
+      if (index.authors && index.authors.length) {
+        bits.push(index.authors.join(", "));
+      }
+      if (index.license) bits.push(index.license);
+      el("sourceBody").textContent = bits.join(" · ");
     }
   } catch (err) {
-    el("sourceTitle").textContent = t("source.unavailable");
-    el("sourceMeta").textContent = String(err);
+    el("sourceBody").textContent = `${t("source.unavailable")}: ${err}`;
   }
 }
 
