@@ -322,6 +322,44 @@ pub fn is_generable(outline: &Outline, item: &OutlineItem) -> bool {
         .any(|i| i.parent_id.as_deref() == Some(item.id.as_str()))
 }
 
+/// True for a `Chapter` item `source::match_chapter` could not place
+/// anywhere in its book's confirmed table of contents (S27g's matching
+/// pass already ran and still left `resolved_page: None`) — promoted here
+/// from `api::cold_start::outline_view` (bug reported live 2026-09-01) so
+/// `api::reading::prepare` can share the exact same predicate instead of a
+/// second copy silently drifting out of sync with it. That drift was a
+/// real bug, not theoretical: `outline_view` computed this for the
+/// sidebar's remediation badge, but `prepare`/`ground_node` never checked
+/// it — a chapter with `resolved_page: None` still fell through to
+/// `ground_node`'s unscoped full-book-search fallback and generated real
+/// content, so a learner could open a node that already has real prose and
+/// still be offered "restart this document" / "skip this chapter" by the
+/// remediation modal. The user's stated invariant is that this must be
+/// architecturally impossible — a node is always the correspondent of a
+/// chapter or part of one, so it must never be possible to start
+/// generating before that chapter's match is settled.
+///
+/// A chapter's parent reaching `ExpansionState::Expanded` means the
+/// matching pass actually RAN (not just that chapters were proposed) — a
+/// book still sitting at `ChaptersProposed` hasn't been matched yet at
+/// all, and "not run yet" must not read the same as "ran and failed".
+///
+/// Takes a plain item slice, not `&Outline` — `cold_start::outline_view`
+/// evaluates this over a list merged with cross-document reference items
+/// (`owner_subtree_items`), not `outline.items` alone, so a parent lookup
+/// scoped to `outline.items` would silently miss a referenced chapter's
+/// real parent and under-report this predicate. `prepare` (which only
+/// ever has its own document's `outline.items`) passes that directly.
+pub fn chapter_match_failed(items: &[OutlineItem], item: &OutlineItem) -> bool {
+    item.item_type == OutlineItemType::Chapter
+        && item.resolved_page.is_none()
+        && item
+            .parent_id
+            .as_deref()
+            .and_then(|pid| items.iter().find(|i| i.id == pid))
+            .is_some_and(|book| book.expansion == ExpansionState::Expanded)
+}
+
 /// A node/container's gate-relevant state, synthesizing a container's from
 /// its children when it has none of its own (S27g, 2026-08-29; generalized
 /// to `Chapter` 2026-08-30 for item 2). A non-generable container (see

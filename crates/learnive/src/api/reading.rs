@@ -1189,6 +1189,31 @@ pub(super) async fn prepare(
         }
         return Err(reason);
     }
+    // Bug reported live 2026-09-01: a `Chapter` `source::match_chapter`
+    // could not place in its book's TOC (`engine::chapter_match_failed`,
+    // shared with `cold_start::outline_view`'s remediation badge) used to
+    // fall straight through to `ground_node`'s unscoped full-book-search
+    // fallback below and generate real content anyway — so a learner could
+    // open a node with real prose already on it and still be offered
+    // "restart this document" / "skip this chapter" by the client's
+    // remediation modal, which only checks the SAME flag `outline_view`
+    // computes. Refusing here, before `ground_node` ever runs, closes that
+    // contradiction: the flag and the enforcement now agree, and the only
+    // way past an unmatched chapter is the remediation modal itself (pick
+    // the page by hand, skip the book, or restart cold start) — never
+    // silent degraded generation.
+    if engine::chapter_match_failed(&outline.items, &item) {
+        let reason = "this chapter could not be matched against its book's table of contents; resolve it from the library check before it can generate".to_string();
+        if let Err(e) = event_log.append(
+            Some(&item.id),
+            EventKind::GenerationBlocked {
+                reason: reason.clone(),
+            },
+        ) {
+            eprintln!("event log append failed: {e}");
+        }
+        return Err(reason);
+    }
     let grounding = match ground_node(state, &outline, &item).await {
         Ok(text) => text,
         Err(reason) => {

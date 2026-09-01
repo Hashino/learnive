@@ -850,18 +850,11 @@ pub(super) fn outline_view(
                     }
                 }
             };
-            // A chapter's parent is a `Book`/`Article` whose `expansion`
-            // reaching `Expanded` means the matching pass actually ran
-            // (not just proposed) — see `chapter_match_failed`'s doc
-            // comment for why "not run yet" must not read the same as
-            // "ran and failed".
-            let chapter_match_failed = item.item_type == OutlineItemType::Chapter
-                && item.resolved_page.is_none()
-                && item
-                    .parent_id
-                    .as_deref()
-                    .and_then(|pid| items.iter().find(|i| i.id == pid))
-                    .is_some_and(|book| book.expansion == ExpansionState::Expanded);
+            // Promoted to `engine::chapter_match_failed` (bug reported live
+            // 2026-09-01) — `prepare` now shares this exact predicate
+            // instead of only this view computing it. See that function's
+            // doc comment for the drift bug this closes.
+            let chapter_match_failed = engine::chapter_match_failed(&items, item);
             OutlineItemView {
                 id: item.id.clone(),
                 title: item.title.clone(),
