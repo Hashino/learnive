@@ -1497,6 +1497,20 @@ pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOu
             source_title: None,
         };
     };
+    // Both acquisition slots empty (the 2026-09-01 unplug) → there is nothing
+    // to search, and `propose_source_title` below is a paid model call that
+    // would only name queries for backends that don't exist. The `research`
+    // move — this function's other consumer — then reports "no adequate
+    // source found" instantly instead of after a mirror timeout (§12.2: never
+    // spend a call to learn what the type already knows).
+    if matches!(*state.source, Source::Unconfigured)
+        && matches!(*state.fallback_source, Source::Unconfigured)
+    {
+        return AcquisitionOutcome {
+            grounded: false,
+            source_title: None,
+        };
+    }
     let ai = state.ai.load_full();
     let title = engine::propose_source_title(&ai, query_hint)
         .await
@@ -1592,49 +1606,56 @@ fn spawn_acquisition(state: AppState, topic: String) {
 
 /// The runtime acquisition backend (§11.1). Origin is deliberately open
 /// (`source::mod` doc comment) — the earlier OpenStax/Wikipedia backends were
-/// deleted, but the façade now also ships LibGen and Sci-Hub backends, enabled
-/// by pointing them at a mirror the user controls: `LEARNIVE_LIBGEN_URL` and
-/// `LEARNIVE_SCIHUB_URL`. When neither is set this still returns
-/// `Source::Unconfigured`, whose calls fail fast with `SourceError::Unconfigured`
-/// — `acquire`/`try_acquire_from` already treat that as a normal, recoverable
-/// "nothing acquired" outcome.
-/// Built-in candidate mirrors tried in order when the user hasn't pointed the
-/// app at one via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`. LibGen/Sci-Hub
-/// domains rotate frequently, so these are lists (whichever answers first
-/// wins), not single hard-coded hosts. Override entirely with the env var
-/// (also comma-separated to supply several candidates).
-// Mirror lists are candidate roots tried in order (whichever answers first
-// wins). They rotate constantly, so keep several current ones here; the user
-// can override entirely via `LEARNIVE_LIBGEN_URL` / `LEARNIVE_SCIHUB_URL`.
+/// deleted, and although the façade still ships LibGen and Sci-Hub backends,
+/// **both slots are UNPLUGGED as of 2026-09-01 (user decision)**:
+/// `build_source`/`build_fallback_source` return `Source::Unconfigured`
+/// unless the user points them at a mirror via `LEARNIVE_LIBGEN_URL` /
+/// `LEARNIVE_SCIHUB_URL` — the env vars are the only plug. The built-in
+/// default mirror lists that used to make the slot always-on are out of the
+/// build path (retained below, unreferenced): live QA that day showed the
+/// always-on default burning a cold start on 7 mirror rejections (HTTP
+/// 500/503) before one download landed, and grounding on real documents
+/// comes from the local library (route B) anyway — remote
+/// search-and-download must be an explicit act, never a background default.
+/// `Source::Unconfigured`'s calls fail fast with `SourceError::Unconfigured`,
+/// and `acquire` short-circuits before even proposing a search title.
+// Retained for re-plugging (2026-09-01): candidate roots tried in order
+// (whichever answers first wins). They rotate constantly, so REFRESH these
+// lists when plugging back in — these are what was live at unplug time.
+// Re-plug by restoring the `unwrap_or_else(DEFAULT_…)` fallbacks in
+// `build_source`/`build_fallback_source`, or just set the env vars.
 // `sci-hub.ee` is a reliably-ungated mirror (no Cloudflare interstitial) that
 // works where `.se`/`.st`/`.wf` are challenged. libgen.im/libgen.li are tried
 // first because they answer from more networks; libgen.is/rs/st are the older
 // generation that still works where reachable.
+#[allow(dead_code)]
 const DEFAULT_LIBGEN_URLS: &str =
     "https://libgen.li,https://libgen.im,https://libgen.is,https://libgen.rs,https://libgen.st";
+#[allow(dead_code)]
 const DEFAULT_SCIHUB_URLS: &str = "https://sci-hub.ee,https://sci-hub.se,https://sci-hub.st,https://sci-hub.wf,https://sci-hub.ren";
 
-/// The §11.1 primary acquisition backend: LibGen (books). The mirror list comes
-/// from `LEARNIVE_LIBGEN_URL` (comma-separated) or the built-in candidates
-/// above. The fallback (`build_fallback_source`, Sci-Hub for papers) is tried
-/// when this yields nothing.
+/// The §11.1 primary acquisition backend: LibGen (books) — currently
+/// UNPLUGGED (see the module doc above): `Source::Unconfigured` unless
+/// `LEARNIVE_LIBGEN_URL` is set. The fallback (`build_fallback_source`,
+/// Sci-Hub for papers) is tried when this yields nothing.
 pub fn build_source() -> Source {
-    let urls = std::env::var("LEARNIVE_LIBGEN_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_LIBGEN_URLS.to_string());
-    Source::LibGen(crate::source::LibGenSource::new(urls))
+    match std::env::var("LEARNIVE_LIBGEN_URL") {
+        Ok(urls) if !urls.trim().is_empty() => {
+            Source::LibGen(crate::source::LibGenSource::new(urls))
+        }
+        _ => Source::Unconfigured,
+    }
 }
 
-/// The §11.1 fallback tier: Sci-Hub (papers). Used when the primary LibGen
-/// search finds nothing. The mirror list comes from `LEARNIVE_SCIHUB_URL`
-/// (comma-separated) or the built-in candidates above.
+/// The §11.1 fallback tier: Sci-Hub (papers) — currently UNPLUGGED, same
+/// terms as `build_source` above.
 pub fn build_fallback_source() -> Source {
-    let urls = std::env::var("LEARNIVE_SCIHUB_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SCIHUB_URLS.to_string());
-    Source::SciHub(crate::source::SciHubSource::new(urls))
+    match std::env::var("LEARNIVE_SCIHUB_URL") {
+        Ok(urls) if !urls.trim().is_empty() => {
+            Source::SciHub(crate::source::SciHubSource::new(urls))
+        }
+        _ => Source::Unconfigured,
+    }
 }
 
 #[cfg(test)]
