@@ -66,13 +66,26 @@ function buildSection(nodeId) {
 // Places a section's element among the other mounted sections in OUTLINE
 // order, not load order (§S5's graph, plus §S8 lazy neighbor-loading in
 // outline.js, mean a later node can be mounted before an earlier one).
+// `state.allItems` (the full flat list), not `state.items` (top-level
+// only — bug found live 2026-09-01, see `maybeLoadNeighbor`'s comment in
+// outline.js for the full story: every nested node used to resolve to -1
+// here, which happened to be harmless AS LONG AS sections only ever got
+// appended in reading order — exactly the assumption lazy PREVIOUS-neighbor
+// loading breaks, since it needs to insert an earlier section before one
+// already on screen).
 function insertSectionInOrder(rec) {
-  const idx = state.items.findIndex((it) => it.id === rec.nodeId);
+  // Reading order (`orderIndexOf` → `state.displayOrder`, outline.js), not
+  // the raw `allItems` array: that's creation order and interleaves
+  // container rows with other chapters' nodes (live 2026-09-01: [ch1, ch2,
+  // book, ch1's nodes…]), so an index comparison on it can place a section
+  // on the wrong side of a chapter boundary once creation order and reading
+  // order diverge.
+  const idx = orderIndexOf(rec.nodeId);
   let before = null;
   let bestIdx = Infinity;
   for (const s of state.sections.values()) {
     if (s === rec || !s.el.isConnected) continue;
-    const i = state.items.findIndex((it) => it.id === s.nodeId);
+    const i = orderIndexOf(s.nodeId);
     if (i > idx && i < bestIdx) {
       bestIdx = i;
       before = s.el;
@@ -448,6 +461,18 @@ async function generateNode(id, { instant = true } = {}) {
     rec = buildSection(id);
     insertSectionInOrder(rec);
   }
+  // Bug found live 2026-09-01: this is the node's FIRST move, which can
+  // take minutes on a free-tier provider (§12.2) before even one token
+  // streams — and until now the lazy neighbor-loading observer
+  // (`armEdgeLoading`, outline.js) was only armed once the whole node
+  // reached `done`. A brand-new section is always the sole mounted one at
+  // this point, so the reader saw ONLY this node's "generating…" with no
+  // prior content above it for that entire wait, even when the immediately
+  // preceding outline item is already demonstrated and would lazy-load
+  // instantly. Arming here (idempotent — disconnects any prior observer)
+  // means the previous node pulls in as soon as this section is on screen,
+  // not after this one finishes.
+  armEdgeLoading();
   renderOutline();
   rec.prose.innerHTML = "";
   rec.exercise.innerHTML = "";
@@ -559,6 +584,17 @@ async function streamMoveRequest(rec, id) {
         // §S13: the agent is fetching grounding for this concept before
         // writing it — surfaced as status text over the existing
         // "generating…" placeholder, not as document content.
+        rec.controls.innerHTML =
+          '<p class="muted">' + escapeHtml(data) + "</p>";
+      } else if (event === "grounding_check") {
+        // Bug found live 2026-09-01: §S21's post-stream grounding gate
+        // (`movement::grounding`) always emits this status frame before its
+        // (possibly slow — up to three extra model calls) check, but until
+        // now nothing here handled the event at all — it fell through the
+        // whole if-chain silently. The stream had already finished by this
+        // point, so the reader saw the prose stop and the page just sit
+        // there with no explanation, same status-text pattern as `research`
+        // above.
         rec.controls.innerHTML =
           '<p class="muted">' + escapeHtml(data) + "</p>";
       } else if (event === "exercise") {
@@ -851,8 +887,18 @@ async function advanceAfterGrading() {
   // node can unlock a sibling prerequisite sub-node next, not just the
   // next main-line item, and `state.items` excludes every sub-node by
   // construction (`setOutlineItems`, outline.js).
-  const next = state.allItems.find(
-    (it) => it.id !== state.currentId && it.state === "available",
+  //
+  // Bug found live 2026-09-01: the scan used to run over `state.allItems`
+  // in creation order, which interleaves container rows with nodes — the
+  // pick landed on CHAPTER 1 (first row in creation order, state
+  // "available") instead of the chapter's next real node, and generation
+  // was POSTed against a container. So: reading order (`displayOrder`),
+  // strictly after the node just demonstrated, and real nodes only
+  // (`isNodeItem`, outline.js).
+  const order = state.displayOrder || state.allItems || [];
+  const fromIdx = orderIndexOf(state.currentId);
+  const next = order.find(
+    (it, i) => i > fromIdx && it.state === "available" && isNodeItem(it),
   );
   if (next) {
     await openNode(next.id, { instant: false });
@@ -952,7 +998,9 @@ function renderNextTopicPrompt(container) {
           if (!resp.ok) throw new Error(await resp.text());
           await refreshOutline();
           container.innerHTML = "";
-          const nextItem = state.allItems.find((it) => it.state === "available");
+          const nextItem = state.allItems.find(
+            (it) => it.state === "available" && isNodeItem(it),
+          );
           if (nextItem) await openNode(nextItem.id, { instant: false });
         } catch (err) {
           statusEl.innerHTML =

@@ -719,6 +719,13 @@ pub struct OutlineItemView {
     /// hand, skip the whole book, or restart cold start.
     #[serde(default)]
     pub(super) chapter_match_failed: bool,
+    /// `book`/`chapter`/`article`/`node` (S27e's storage-level field,
+    /// surfaced here 2026-09-01): the client's lazy neighbor-loading needs
+    /// to know a row has NO node file behind it — a container is a reading
+    /// boundary, not an unreached neighbor, so probing it only ever
+    /// produced a guaranteed 404 (found live: every boot fetched the book
+    /// row and logged a 404 for it).
+    pub(super) item_type: OutlineItemType,
 }
 
 #[derive(Serialize)]
@@ -861,6 +868,7 @@ pub(super) fn outline_view(
                     NodeMode::Learn => None,
                 },
                 chapter_match_failed,
+                item_type: item.item_type,
             }
         })
         .collect())

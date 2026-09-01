@@ -52,16 +52,70 @@ async function boot() {
 }
 
 // §S15: splits an `OutlineResp.items` response into the main line
-// (`state.items`, top-level only — used for edge-based neighbor
-// lazy-loading, where "how far from either end of the reading order" only
-// makes sense at that granularity) and the full tree (`state.allItems`,
+// (`state.items`, top-level only) and the full tree (`state.allItems`,
 // everything else — skip eligibility, "next available" advance, the revisit
-// hint target, and `renderOutline`'s nesting — all search the full tree
-// since a decomposed prerequisite or a question-spawned elaboration can be
-// the reachable/suggested node, not just a top-level item).
+// hint target, `renderOutline`'s nesting, and (bug found live 2026-09-01,
+// see `maybeLoadNeighbor`) edge-based neighbor lazy-loading too — all
+// search the full tree since a decomposed prerequisite or a
+// question-spawned elaboration can be the reachable/suggested node, not
+// just a top-level item). `state.items` originally backed lazy-loading as
+// well, back when "how far from either end of the reading order" only
+// needed to make sense at main-line granularity — the §6.3 pivot to
+// chapter/node granularity made that assumption stop holding: an ordinary
+// document today has ONE top-level item (its book), so `state.items` alone
+// can never have more than one entry and lazy-loading across it was
+// permanently a no-op.
 function setOutlineItems(items) {
   state.allItems = items;
   state.items = items.filter((it) => !it.parent_id);
+  state.displayOrder = linearizeOutline(items);
+}
+
+// The reading-order linearization of the outline tree: depth-first from the
+// roots, each parent's children in array order — the same ordering
+// `renderOutline` renders and `insertSectionInOrder` (node.js) relies on.
+// The raw `allItems` array is *creation* order: it preserves sibling order
+// within a parent, but a chapter's container row can sit anywhere in the
+// array relative to another chapter's nodes (live: [ch1, ch2, book, ch1's
+// nodes…]), so any index math done on it directly mis-sorts across chapter
+// boundaries. Containers are kept in place — they are real reading-flow
+// boundaries, the walk just never fetches them (`orderItemType`).
+function linearizeOutline(items) {
+  const known = new Set(items.map((it) => it.id));
+  const byParent = new Map();
+  for (const it of items) {
+    const key = it.parent_id && known.has(it.parent_id) ? it.parent_id : null;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(it);
+  }
+  const out = [];
+  const walk = (key) => {
+    for (const it of byParent.get(key) || []) {
+      out.push(it);
+      walk(it.id);
+    }
+  };
+  walk(null);
+  for (const it of items) if (!out.includes(it)) out.push(it);
+  return out;
+}
+
+// Reading-order index of an outline item, or -1. Falls back to the raw
+// array before the first `setOutlineItems` (defensive — every outline
+// refresh goes through it).
+function orderIndexOf(id) {
+  const list = state.displayOrder || state.allItems || [];
+  return list.findIndex((it) => it.id === id);
+}
+
+// A container row (book/chapter/article, S27e) is a reading boundary, not
+// content: it has no node file behind it, so "next available", "other
+// skippable item" and the next-topic continuation must never select one.
+// Found live 2026-09-01: `advanceAfterGrading` picked chapter 1 once its
+// children were demonstrated — the GET 404'd (containers have no node
+// file) and the fallback generate POST died in the server's regen guard.
+function isNodeItem(it) {
+  return (it.item_type || "node") === "node";
 }
 
 // Renders the outline as a tree (§S15, extending §S5's gate state):
@@ -255,7 +309,7 @@ function renderSkipControl(rec) {
   // prerequisite-gated document every main-line item can be locked while
   // `currentId` sits on a sub-node, which used to hide this control entirely.
   const other = state.allItems.find(
-    (it) => it.id !== state.currentId && it.state !== "locked",
+    (it) => it.id !== state.currentId && it.state !== "locked" && isNodeItem(it),
   );
   if (!other) return;
   const btn = document.createElement("button");
@@ -282,7 +336,7 @@ async function skipCurrentNode() {
     renderRevisitHint();
     // §S15: same full-tree search as renderSkipControl above.
     const next = state.allItems.find(
-      (it) => it.id !== skippedId && it.state !== "locked",
+      (it) => it.id !== skippedId && it.state !== "locked" && isNodeItem(it),
     );
     if (next) {
       openNode(next.id);
@@ -332,14 +386,35 @@ function armEdgeLoading() {
 }
 
 async function maybeLoadNeighbor(dir) {
+  // Bug found live 2026-09-01: this used to index into `state.items`, which
+  // `setOutlineItems` filters down to top-level items only (no
+  // `parent_id`) — under §6.3's chapter/node granularity almost every real
+  // node is nested two levels under a book, so it was never even present
+  // in that list. `findIndex` always came back -1, `mountedIndices` was
+  // always empty, and lazy-loading silently never fired for any ordinary
+  // document — the reader only ever saw the single node currently
+  // generating, with nothing before it, no matter how long that took.
+  // Indexing moved to `state.displayOrder` (the DFS reading order built by
+  // `setOutlineItems`): the raw `allItems` array is creation order and
+  // interleaves container rows with other chapters' nodes, so it only
+  // worked while creation happened to track reading order.
   const mountedIndices = [...state.sections.values()]
     .filter((s) => s.el.isConnected)
-    .map((s) => state.items.findIndex((it) => it.id === s.nodeId))
+    .map((s) => orderIndexOf(s.nodeId))
     .filter((i) => i >= 0);
   if (mountedIndices.length === 0) return;
   const edgeIdx =
     dir < 0 ? Math.min(...mountedIndices) : Math.max(...mountedIndices);
-  const neighbor = state.items[edgeIdx + dir];
+  const list = state.displayOrder || state.allItems || [];
+  // Walk past any container rows (book/chapter/article, S27e): they have
+  // no node file behind them, so probing one only ever ate a guaranteed
+  // 404 (found live 2026-09-01, the book row on every boot) — but stopping
+  // at the boundary entirely would strand the whole next chapter behind an
+  // unloaded wall. Skip the containers and load the first real node on the
+  // far side, which is exactly the continuous-reading behavior §9 asks for.
+  let j = edgeIdx + dir;
+  while (list[j] && (list[j].item_type || "node") !== "node") j += dir;
+  const neighbor = list[j];
   if (!neighbor || neighbor.state === "locked") return;
   if (state.sections.has(neighbor.id)) return;
   if (neighborLoadInFlight.has(neighbor.id)) return;
@@ -348,11 +423,24 @@ async function maybeLoadNeighbor(dir) {
     const resp = await api(`/api/documents/${state.docId}/nodes/${neighbor.id}`);
     if (resp.ok) {
       await mountExistingSection(neighbor.id, await resp.json());
+      // Bug found live 2026-09-01: a PREVIOUS neighbor mounts ABOVE
+      // whatever the learner is actually reading, pushing it (and the
+      // page's scroll position) further down — the reader would land
+      // scrolled deep into content they never asked to see instead of at
+      // the top of the node they opened. Re-anchor to the active section
+      // (`state.currentId`, never the neighbor that just loaded) after
+      // every prior-direction load; a no-op for `dir > 0`, where new
+      // content lands below the viewport and never moves it.
+      if (dir < 0) {
+        const activeRec = state.sections.get(state.currentId);
+        if (activeRec) scrollToSection(activeRec, true);
+      }
       scheduleReadingLine();
       armEdgeLoading();
     }
-    // A 404 here just means that neighbor hasn't been generated yet —
-    // nothing to load, lazy-loading in this direction stops.
+    // A 404 here just means that neighbor hasn't been generated yet (or
+    // is a container row, e.g. a chapter boundary) — nothing to load,
+    // lazy-loading in this direction stops.
   } catch (err) {
     // Best-effort background load; a failure just leaves that neighbor
     // unmounted for now.

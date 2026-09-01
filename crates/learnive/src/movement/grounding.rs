@@ -16,13 +16,34 @@
 //! fast-tier structured call ([`prompt::verify_grounding`]) compares the
 //! finished HTML against the exact source text the prompt saw
 //! (`MoveContext.grounding`, unchanged — not a fresh retrieval) and lists
-//! any unsupported claims. Unsupported → one corrective regeneration with
-//! those claims named (`prompt::grounding_correction_addendum`, same §8.2
-//! escalation shape as remediation: name the specific problem, don't just
-//! say "try again"). Still unsupported after the retry → the move lands
-//! anyway, NEVER dropped, but with a visible "grounding unconfirmed" banner
-//! prepended to its HTML — the same never-fail-silently principle already
-//! used for S27's existence verification and citation resolution.
+//! any unsupported claims. Unsupported → the move lands anyway, NEVER
+//! dropped, but with a visible "grounding unconfirmed" banner prepended to
+//! its HTML — the same never-fail-silently principle already used for S27's
+//! existence verification and citation resolution.
+//!
+//! **Cut down to a single check call, 2026-09-01 (live QA).** This used to
+//! also attempt one corrective regeneration plus a re-check on top of the
+//! check itself (up to 3 extra model calls total) — removed after two
+//! pieces of live evidence in the same QA pass: (1) §12.2's "recovery must
+//! cost zero tokens" corollary is a hard constraint, and a corrective
+//! regeneration is exactly the kind of extra-call recovery path it forbids;
+//! (2) it was directly caught failing live, on the very models configured
+//! in this project's own `.env` (`grounding corrective regeneration failed:
+//! provider: the model hit its token budget after 1070 characters without
+//! finishing`) — the free-tier reality this project targets (§15) makes the
+//! "recovery" call itself an extra point of failure, not a safety net. The
+//! architecture also makes this the right place to draw the line, not just
+//! the cheap one: a node is already born from one specific chapter/section
+//! (§11's structural per-node source selection), so an unsupported claim
+//! means the model drifted from prose *it was handed*, not a retrieval
+//! miss — a rare defect worth surfacing immediately, not one that earns an
+//! expensive self-healing pipeline. The corrective-regeneration call site
+//! itself is gone; `MoveContext::grounding_correction`/
+//! `prompt::grounding_correction_addendum` are left in place (still
+//! exercised by their own unit tests in `movement/prompt.rs`) rather than
+//! torn out, since a future async-after-the-fact redesign of this gate
+//! (patch the banner in without blocking the move at all — not yet built,
+//! floated live 2026-09-01) could still want the addendum shape.
 //!
 //! Scope: the six move types with locked sections that receive
 //! `CITE_CONTRACT` today — `explain`/`ask`/`confront`/`integrate`/
@@ -30,18 +51,14 @@
 //! unchanged) for any other type or when `ctx.grounding` is empty, so no
 //! other call site's behavior changes because this gate exists.
 
-use super::{
-    AgentPolicy, EngineError, GeneratedMove, MoveContext, MoveRender, MoveType, generate_move,
-    generate_move_complete, parse, prompt, repair_messages,
-};
+use super::{EngineError, GeneratedMove, MoveContext, MoveType, parse, prompt, repair_messages};
 use crate::ai::{Ai, Tier};
 use crate::engine::collect;
 use crate::locale::{Locale, pick};
 
 /// Whether the gate applies at all — the same test the caller
 /// (`api::generation::generate_node`) uses to decide whether emitting a
-/// status frame before the (possibly slow — up to three extra calls)
-/// check is worthwhile.
+/// status frame before the check is worthwhile.
 pub fn applies(move_type: MoveType, grounding: &str) -> bool {
     !grounding.trim().is_empty() && in_scope(move_type)
 }
@@ -71,9 +88,8 @@ fn in_scope(move_type: MoveType) -> bool {
 /// into the FROZEN content layer (§4.3) the moment it's returned, so there
 /// is no un-flagging it later — a transient hiccup must never leave a
 /// permanent "this may be fabricated" mark on correctly-grounded content.
-pub async fn verify_and_correct(
+pub async fn verify(
     ai: &Ai,
-    policy: AgentPolicy,
     move_type: MoveType,
     ctx: &MoveContext,
     generated: GeneratedMove,
@@ -93,41 +109,17 @@ pub async fn verify_and_correct(
         return generated;
     }
 
-    // One corrective regeneration (§8.2 escalation shape): re-run the same
-    // move's own generation path with the flagged claims named.
-    let mut retry_ctx = ctx.clone();
-    retry_ctx.grounding_correction = Some(unsupported);
-    let regenerated = match regenerate(ai, policy, move_type, &retry_ctx).await {
-        Ok(mv) => mv,
-        Err(e) => {
-            // The check itself found a real problem with `generated` above —
-            // that verdict stands even though the corrective regeneration
-            // couldn't run, so (unlike the two infrastructure-error arms)
-            // this one still flags, on the original content.
-            eprintln!("grounding corrective regeneration failed: {e}");
-            return flag_unconfirmed(generated, ctx.locale);
-        }
-    };
-
-    match check(ai, &ctx.grounding, &regenerated.html).await {
-        Ok(claims) if claims.is_empty() => regenerated,
-        Ok(_) => flag_unconfirmed(regenerated, ctx.locale),
-        Err(e) => {
-            // Re-verification itself failed to run — infrastructure, not a
-            // verdict on the regenerated content. Same principle as the
-            // first check above: don't bake a permanent mark on content that
-            // was never actually found unsupported.
-            eprintln!("grounding re-check failed: {e}");
-            regenerated
-        }
-    }
+    // No corrective regeneration (removed 2026-09-01, see module doc) — a
+    // real verdict on THIS content, flag it immediately rather than paying
+    // for a recovery call §12.2 forbids.
+    flag_unconfirmed(generated, ctx.locale)
 }
 
 /// One structured verification call, with the same JSON-repair bound
 /// `generate_move` already uses for the Move contract — a DIFFERENT concern
-/// from the semantic escalation in [`verify_and_correct`] above: this is
-/// only "did the response parse as the expected shape", never "was the
-/// verdict itself correct".
+/// from the verdict handling in [`verify`] above: this is only "did the
+/// response parse as the expected shape", never "was the verdict itself
+/// correct".
 async fn check(
     ai: &Ai,
     source_text: &str,
@@ -145,37 +137,6 @@ async fn check(
     );
     let text = collect(ai, Tier::Fast, repair).await?;
     parse::grounding_verdict(&text)
-}
-
-/// The single corrective regeneration: re-runs the SAME move type's own
-/// generation path — streamed types (`explain`/`ask`/`confront`/
-/// `integrate`/`revisit`) via [`generate_move_complete`] (still the
-/// streamed prose contract, just collected instead of pumped through SSE —
-/// this corrective attempt is never shown live token-by-token, so there is
-/// no TTFT to protect here, same reasoning `generate_move_complete`'s own
-/// doc comment already gives for `/ask`/remediation), the one structured
-/// type in scope (`plan`) via [`generate_move`] — with
-/// `ctx.grounding_correction` set so `prompt::grounding_correction_addendum`
-/// fires in `purpose()`.
-///
-/// This is a FULL regeneration, not a patch: it replaces `tactics` wholesale
-/// (empty if the model drops the `<!--tactics:-->` sentinel on the retry,
-/// which weakens that move's §7 evidence row) and, for `plan`, replaces
-/// `proposed_outline` too (a first attempt that proposed an outline change
-/// can come back from the retry with none, silently dropping the proposal
-/// before `plan_proposal` ever sees it). Both are accepted trade-offs of
-/// reusing the move's own generation path rather than a bespoke
-/// claim-by-claim patcher, not oversights.
-async fn regenerate(
-    ai: &Ai,
-    policy: AgentPolicy,
-    move_type: MoveType,
-    ctx: &MoveContext,
-) -> Result<GeneratedMove, EngineError> {
-    match move_type.render() {
-        MoveRender::Streamed => generate_move_complete(ai, move_type, ctx).await,
-        MoveRender::Structured => generate_move(ai, policy, move_type, ctx).await,
-    }
 }
 
 const UNCONFIRMED_EN: &str = "This section's grounding could not be fully confirmed against \
@@ -224,14 +185,6 @@ mod tests {
         )
     }
 
-    fn full_text(req: &ChatRequest) -> String {
-        req.messages
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     fn grounded_ctx() -> MoveContext {
         MoveContext {
             grounding: "[id: s1 | loc: p:1 | Photosynthesis — Overview]\n\
@@ -272,15 +225,13 @@ mod tests {
         let ai = scripted_ai(|_| panic!("the AI must not be called out of scope"));
         let ctx = MoveContext::default(); // empty grounding
         let generated = stub_move("<p>Ungrounded prose.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
         assert_eq!(result.html, "<p>Ungrounded prose.</p>");
 
         let ai = scripted_ai(|_| panic!("the AI must not be called out of scope"));
         let ctx = grounded_ctx();
         let generated = stub_move("<form>An exercise.</form>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Test, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Test, &ctx, generated).await;
         assert_eq!(result.html, "<form>An exercise.</form>");
     }
 
@@ -291,77 +242,39 @@ mod tests {
         let ai = mock_ai(r#"{"unsupported_claims":[]}"#);
         let ctx = grounded_ctx();
         let generated = stub_move("<p>Photosynthesis converts light into chemical energy.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
         assert_eq!(
             result.html,
             "<p>Photosynthesis converts light into chemical energy.</p>"
         );
     }
 
-    /// One unsupported claim triggers exactly one corrective regeneration,
-    /// with the addendum (and the specific flagged claim) present in that
-    /// regeneration's prompt — then a clean re-verification lands the
-    /// corrected content with no warning.
+    /// An unsupported claim flags the ORIGINAL content immediately —
+    /// exactly one AI call total (2026-09-01: no more corrective
+    /// regeneration, see the module doc for why), never a second one.
     #[tokio::test]
-    async fn one_unsupported_claim_triggers_exactly_one_corrective_regeneration() {
-        let call = AtomicUsize::new(0);
-        let ai = scripted_ai(move |req| {
-            let n = call.fetch_add(1, Ordering::SeqCst);
-            let text = full_text(req);
-            match n {
-                0 => {
-                    // First call: verifying the ORIGINAL html.
-                    assert!(!text.contains("GROUNDING CORRECTION"));
-                    r#"{"unsupported_claims":["photosystem II makes plastocyanin"]}"#.to_string()
-                }
-                1 => {
-                    // Second call: the corrective regeneration (streamed
-                    // prose contract, not JSON — `Explain` renders streamed).
-                    assert!(text.contains("GROUNDING CORRECTION"));
-                    assert!(text.contains("photosystem II makes plastocyanin"));
-                    "<p>Corrected, source-grounded prose.</p>".to_string()
-                }
-                2 => {
-                    // Third call: re-verifying the CORRECTED html — clean.
-                    assert!(text.contains("Corrected, source-grounded prose."));
-                    r#"{"unsupported_claims":[]}"#.to_string()
-                }
-                other => panic!("unexpected extra AI call #{other}"),
-            }
-        });
-
-        let ctx = grounded_ctx();
-        let generated = stub_move("<p>Photosystem II makes plastocyanin, allegedly.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
-        assert_eq!(result.html, "<p>Corrected, source-grounded prose.</p>");
-        assert!(!result.html.contains("data-grounding-unconfirmed"));
-    }
-
-    /// Still unsupported after the one retry: the move lands anyway (the
-    /// REGENERATED content, never the original AND never dropped) flagged
-    /// with the visible warning banner.
-    #[tokio::test]
-    async fn still_unsupported_after_retry_lands_flagged_and_is_never_dropped() {
+    async fn unsupported_claim_flags_immediately_with_a_single_call() {
         let call = AtomicUsize::new(0);
         let ai = scripted_ai(move |_req| {
             let n = call.fetch_add(1, Ordering::SeqCst);
             match n {
                 0 => r#"{"unsupported_claims":["a fabricated mechanism"]}"#.to_string(),
-                1 => "<p>Still not quite grounded prose.</p>".to_string(),
-                2 => r#"{"unsupported_claims":["still a fabricated mechanism"]}"#.to_string(),
-                other => panic!("unexpected extra AI call #{other}"),
+                other => {
+                    panic!("unexpected extra AI call #{other} — no more corrective regeneration")
+                }
             }
         });
 
         let ctx = grounded_ctx();
         let generated = stub_move("<p>A fabricated mechanism, stated as fact.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
         assert!(result.html.contains("data-grounding-unconfirmed"));
         assert!(result.html.contains("callout warning"));
-        assert!(result.html.contains("Still not quite grounded prose."));
+        assert!(
+            result
+                .html
+                .contains("A fabricated mechanism, stated as fact.")
+        );
     }
 
     /// The check call itself failing to produce a parseable verdict (even
@@ -379,8 +292,7 @@ mod tests {
 
         let ctx = grounded_ctx();
         let generated = stub_move("<p>Photosynthesis converts light into chemical energy.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
         assert_eq!(
             result.html,
             "<p>Photosynthesis converts light into chemical energy.</p>"
@@ -388,88 +300,17 @@ mod tests {
         assert!(!result.html.contains("data-grounding-unconfirmed"));
     }
 
-    /// The corrective regeneration itself failing (both its attempt and its
-    /// own repair round come back unparseable) still lands the ORIGINAL
-    /// content, flagged — the first check's verdict (a real unsupported
-    /// claim) stands even though the retry couldn't run, unlike the two
-    /// purely-infrastructure arms above/below which never flag at all.
+    /// A `plan` move (the one STRUCTURED type in the gate's scope) flags
+    /// through the same single-call path as the streamed types — no
+    /// render-path branching left to get wrong.
     #[tokio::test]
-    async fn failed_corrective_regeneration_flags_the_original_verdict() {
-        let call = AtomicUsize::new(0);
-        let ai = scripted_ai(move |_req| {
-            let n = call.fetch_add(1, Ordering::SeqCst);
-            match n {
-                0 => r#"{"unsupported_claims":["a fabricated outline rationale"]}"#.to_string(),
-                // Both the regeneration attempt and its own repair round
-                // come back unparseable, so `generate_move` itself errors.
-                1 | 2 => "not JSON at all".to_string(),
-                other => panic!("unexpected extra AI call #{other}"),
-            }
-        });
-
+    async fn plan_moves_flag_through_the_same_single_call_path() {
+        let ai = mock_ai(r#"{"unsupported_claims":["a fabricated outline rationale"]}"#);
         let ctx = grounded_ctx();
         let mut generated = stub_move("<p>A fabricated outline rationale.</p>");
         generated.move_type = MoveType::Plan;
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Plan, &ctx, generated).await;
+        let result = verify(&ai, MoveType::Plan, &ctx, generated).await;
         assert!(result.html.contains("data-grounding-unconfirmed"));
         assert!(result.html.contains("A fabricated outline rationale."));
-    }
-
-    /// The RE-check after a successful corrective regeneration failing to
-    /// parse (infrastructure again, not a verdict) must land the
-    /// regenerated content unflagged — the regeneration itself succeeded and
-    /// was never actually found unsupported, so no banner belongs on it.
-    #[tokio::test]
-    async fn failed_recheck_lands_regenerated_content_unflagged() {
-        let call = AtomicUsize::new(0);
-        let ai = scripted_ai(move |_req| {
-            let n = call.fetch_add(1, Ordering::SeqCst);
-            match n {
-                0 => r#"{"unsupported_claims":["photosystem II makes plastocyanin"]}"#.to_string(),
-                1 => "<p>Corrected, source-grounded prose.</p>".to_string(),
-                // Both the re-check attempt and its repair round come back
-                // unparseable.
-                2 | 3 => "not JSON at all".to_string(),
-                other => panic!("unexpected extra AI call #{other}"),
-            }
-        });
-
-        let ctx = grounded_ctx();
-        let generated = stub_move("<p>Photosystem II makes plastocyanin, allegedly.</p>");
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Explain, &ctx, generated).await;
-        assert_eq!(result.html, "<p>Corrected, source-grounded prose.</p>");
-        assert!(!result.html.contains("data-grounding-unconfirmed"));
-    }
-
-    /// A `plan` move (the one STRUCTURED type in the gate's scope) must
-    /// route its corrective regeneration through the structured path, not
-    /// the streamed one — a bare mismatch would trip `generate_move`'s own
-    /// debug assertion in a debug build.
-    #[tokio::test]
-    async fn plan_moves_regenerate_through_the_structured_path() {
-        let call = AtomicUsize::new(0);
-        let ai = scripted_ai(move |req| {
-            let n = call.fetch_add(1, Ordering::SeqCst);
-            let text = full_text(req);
-            match n {
-                0 => r#"{"unsupported_claims":["a fabricated outline rationale"]}"#.to_string(),
-                1 => {
-                    assert!(text.contains("GROUNDING CORRECTION"));
-                    r#"{"html":"<p>Corrected rationale.</p>","interactive":false,"graded":false,"tactics":[]}"#
-                        .to_string()
-                }
-                2 => r#"{"unsupported_claims":[]}"#.to_string(),
-                other => panic!("unexpected extra AI call #{other}"),
-            }
-        });
-
-        let ctx = grounded_ctx();
-        let mut generated = stub_move("<p>A fabricated outline rationale.</p>");
-        generated.move_type = MoveType::Plan;
-        let result =
-            verify_and_correct(&ai, AgentPolicy::L1, MoveType::Plan, &ctx, generated).await;
-        assert_eq!(result.html, "<p>Corrected rationale.</p>");
     }
 }

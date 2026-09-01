@@ -702,6 +702,7 @@ mod tests {
             corpus: crate::source::Corpus::open(&data_dir).unwrap(),
             retriever: None,
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
+            acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
         (dir, state)
     }

@@ -46,6 +46,54 @@ pub struct SetupStatus {
 }
 
 fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
+    let intent = match config.intent {
+        Intent::Free => "free",
+        Intent::Paid => "paid",
+    }
+    .to_string();
+
+    // Bug found live 2026-09-01: this used to always report
+    // `config.models()` — the settings-configured pairing — even when
+    // `build_ai` (this module's sibling, §12) was actually using an env
+    // override instead. CLAUDE.md is explicit that "the real environment
+    // wins", but the Settings panel kept showing the shadowed
+    // settings-derived pair regardless, so a `.env`-configured model (the
+    // ordinary dev setup, and this project's own) never showed up here at
+    // all — live-caught when a QA session's Settings panel read
+    // "nemotron-3.5-lightning-free / hy3-free" while `.env` actually named
+    // `gpt-oss-120b` for both tiers. Mirrors `build_ai`'s own precedence
+    // (env override wins over settings) so this never lies about which
+    // pair is actually in use.
+    if let Ok(base_url) = std::env::var("LEARNIVE_API_BASE_URL")
+        && !base_url.is_empty()
+    {
+        let has_key = std::env::var("LEARNIVE_API_KEY").is_ok_and(|k| !k.is_empty());
+        let models = super::provider::models_from_env();
+        return SetupStatus {
+            provider: "openai_compatible".to_string(),
+            intent,
+            base_url: Some(base_url),
+            has_key,
+            unconfigured: false,
+            model_fast: models.for_tier(Tier::Fast).to_string(),
+            model_robust: models.for_tier(Tier::Robust).to_string(),
+            needs_setup: false,
+        };
+    }
+    if std::env::var("LEARNIVE_OPENROUTER_KEY").is_ok_and(|k| !k.is_empty()) {
+        let models = super::provider::models_from_env();
+        return SetupStatus {
+            provider: "openrouter".to_string(),
+            intent,
+            base_url: None,
+            has_key: true,
+            unconfigured: false,
+            model_fast: models.for_tier(Tier::Fast).to_string(),
+            model_robust: models.for_tier(Tier::Robust).to_string(),
+            needs_setup: false,
+        };
+    }
+
     let (provider, base_url) = match &config.provider {
         ProviderKind::OpenRouter => ("openrouter".to_string(), None),
         ProviderKind::OpenAiCompatible { base_url } => {
@@ -58,11 +106,7 @@ fn status_of(config: &AppConfig, secret: &SecretStore) -> SetupStatus {
     let models = config.models();
     SetupStatus {
         provider,
-        intent: match config.intent {
-            Intent::Free => "free",
-            Intent::Paid => "paid",
-        }
-        .to_string(),
+        intent,
         base_url,
         has_key,
         unconfigured,

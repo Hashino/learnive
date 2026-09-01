@@ -378,7 +378,10 @@ pub async fn answer(
         rubric: new_move
             .rubric
             .expect("MoveType::Test always parses with graded=true and a rubric"),
-        exercise_html: new_move.html.clone(),
+        // Nothing downstream of the sidecar renders math (the frame, the
+        // frozen attempts, the grade prompt all take it verbatim), so the
+        // one pass happens here — same as `finalize`.
+        exercise_html: render_math(&new_move.html),
         reference_solution: new_move.reference_solution.clone(),
         title: sidecar.title.clone(),
         topic: sidecar.topic.clone(),
@@ -511,7 +514,7 @@ pub async fn practice_node(
         rubric: new_move
             .rubric
             .expect("MoveType::Test always parses with graded=true and a rubric"),
-        exercise_html: new_move.html,
+        exercise_html: render_math(&new_move.html),
         reference_solution: new_move.reference_solution,
         title,
         topic,

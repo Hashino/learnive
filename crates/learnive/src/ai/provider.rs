@@ -306,6 +306,15 @@ impl OpenAiCompat {
             max_tokens: Option<u32>,
         }
 
+        // Diagnostic logging only (added 2026-09-01, live QA): this retry
+        // loop used to be completely silent — a multi-minute stall and a
+        // clean single call were indistinguishable from the outside, which
+        // made "why is generation slow" impossible to answer without
+        // instrumenting it on the spot. Kept minimal (stderr, one line per
+        // retryable event) rather than wired into any UI-facing telemetry —
+        // §16 tracks real evaluator-failure telemetry as a separate,
+        // unbuilt, larger concern.
+        let started = std::time::Instant::now();
         let mut last_err: Option<ProviderError> = None;
         let mut sent = None;
         for attempt in 0..=TRANSIENT_RETRIES {
@@ -324,6 +333,13 @@ impl OpenAiCompat {
             }
             match builder.send().await {
                 Ok(resp) if resp.status().is_success() => {
+                    if attempt > 0 {
+                        eprintln!(
+                            "ai stream[{}]: connected on attempt {attempt} after {:?}",
+                            req.model,
+                            started.elapsed()
+                        );
+                    }
                     sent = Some(resp);
                     break;
                 }
@@ -350,6 +366,11 @@ impl OpenAiCompat {
                         let backoff = retry_after
                             .map(|d| d.min(MAX_RETRY_AFTER))
                             .unwrap_or(RETRY_BACKOFF);
+                        eprintln!(
+                            "ai stream[{}]: attempt {attempt} got {status} \
+                             (retry_after={retry_after:?}), sleeping {backoff:?}",
+                            req.model
+                        );
                         last_err = Some(err);
                         tokio::time::sleep(backoff).await;
                     } else {
@@ -357,6 +378,10 @@ impl OpenAiCompat {
                     }
                 }
                 Err(e) => {
+                    eprintln!(
+                        "ai stream[{}]: attempt {attempt} transport error: {e}",
+                        req.model
+                    );
                     last_err = Some(ProviderError::Http(e.to_string()));
                     if attempt < TRANSIENT_RETRIES {
                         tokio::time::sleep(RETRY_BACKOFF).await;
@@ -369,9 +394,11 @@ impl OpenAiCompat {
         })?;
 
         let byte_stream = resp.bytes_stream();
+        let model = req.model.clone();
         let stream = async_stream::stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buf = String::new();
+            let mut first_chunk = true;
             loop {
                 let next = match tokio::time::timeout(BODY_READ_TIMEOUT, byte_stream.next()).await {
                     Ok(next) => next,
@@ -382,6 +409,17 @@ impl OpenAiCompat {
                         return;
                     }
                 };
+                if first_chunk && next.is_some() {
+                    first_chunk = false;
+                    // Headers/connect can return fast (200 OK) while the
+                    // provider is still generating — this is the real
+                    // "how long until the first token" number, distinct
+                    // from the connect-retry logging above.
+                    eprintln!(
+                        "ai stream[{model}]: first body chunk after {:?}",
+                        started.elapsed()
+                    );
+                }
                 let Some(chunk) = next else { break };
                 let chunk = match chunk {
                     Ok(c) => c,
@@ -421,10 +459,20 @@ impl OpenAiCompat {
     }
 
     async fn complete_retrying(&self, req: &ChatRequest) -> Result<String, ProviderError> {
+        // Diagnostic logging only (added 2026-09-01, live QA) — same
+        // reasoning as `stream`'s copy of this comment above.
+        let started = std::time::Instant::now();
         let mut last_err = None;
         for attempt in 0..=TRANSIENT_RETRIES {
             match self.complete_once(req).await {
-                Ok(text) => return Ok(text),
+                Ok(text) => {
+                    eprintln!(
+                        "ai complete[{}]: succeeded on attempt {attempt} after {:?}",
+                        req.model,
+                        started.elapsed()
+                    );
+                    return Ok(text);
+                }
                 // Most Api errors carry a real status the provider chose to
                 // return (auth, bad request, ...) — repeating the exact same
                 // request won't change that. But 5xx/429 are the provider
@@ -454,6 +502,10 @@ impl OpenAiCompat {
                     } else {
                         RETRY_BACKOFF
                     };
+                    eprintln!(
+                        "ai complete[{}]: attempt {attempt} failed ({e}), sleeping {backoff:?}",
+                        req.model
+                    );
                     last_err = Some(e);
                     if attempt < TRANSIENT_RETRIES {
                         tokio::time::sleep(backoff).await;

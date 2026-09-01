@@ -73,6 +73,15 @@ pub struct AppState {
     /// integration test that creates a document never makes a real network
     /// call just because it skipped the outline-confirmation screen.
     pub bibliography_client: Arc<crate::source::BibliographyClient>,
+    /// Memoized acervo-gate passes: doc_id -> the filesystem fingerprint the
+    /// gate last validated OK for. `validate_acervo` re-parses EVERY library
+    /// PDF (pdf-extract + lopdf, CPU-bound), and `ensure_document_grounded`
+    /// ran that on every `/generate` — found live 2026-09-01 as minutes of
+    /// dead TTFT before the first model call (whose own first chunk took
+    /// ~0.5s). A pass is remembered under the fingerprint it validated; any
+    /// library/manual-match/TOC/outline change misses and forces the full
+    /// validation again.
+    pub acervo_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
 }
 
 impl AppState {
@@ -161,6 +170,7 @@ impl AppState {
             corpus,
             retriever,
             bibliography_client: Arc::new(crate::source::BibliographyClient::new()),
+            acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }

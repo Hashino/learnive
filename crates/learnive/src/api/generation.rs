@@ -298,13 +298,15 @@ pub async fn generate_node(
             // streamed ones) — right after the move's content is fully
             // settled and before it's used any further (event log, §S6
             // progressive persistence below). `applies` is the same
-            // cheap grounded/in-scope check `verify_and_correct` makes
-            // internally; checked again here only to gate the status
-            // frame, so a plain ungrounded/out-of-scope move never emits
-            // one. `verify_and_correct` itself never errors this request —
-            // a verification failure degrades to the visible "grounding
-            // unconfirmed" banner (never a silent drop, same principle as
-            // S27's existence verification) rather than propagating.
+            // cheap grounded/in-scope check `verify` makes internally;
+            // checked again here only to gate the status frame, so a plain
+            // ungrounded/out-of-scope move never emits one. `verify` itself
+            // never errors this request — a verification failure degrades
+            // to the visible "grounding unconfirmed" banner (never a silent
+            // drop, same principle as S27's existence verification) rather
+            // than propagating. One check call only (2026-09-01, no more
+            // corrective regeneration — see `movement::grounding`'s module
+            // doc), so `policy` is no longer needed here.
             let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
                 let checking_en = "Checking grounding…";
                 let checking_pt = "Verificando fundamentação…";
@@ -312,8 +314,7 @@ pub async fn generate_node(
                     "grounding_check",
                     crate::locale::pick(locale, checking_en, checking_pt),
                 ));
-                movement::grounding::verify_and_correct(&ai, policy, move_type, &ctx, generated)
-                    .await
+                movement::grounding::verify(&ai, move_type, &ctx, generated).await
             } else {
                 generated
             };

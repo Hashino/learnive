@@ -1017,6 +1017,21 @@ pub(super) async fn prepare(
         .position(|i| i.id == item_id)
         .ok_or_else(|| "unknown outline item".to_string())?;
     let item = outline.items[idx].clone();
+    // Read before the first redirect (hoisted 2026-09-01): the redirect
+    // needs to know which children were already generated — found live as
+    // a chapter click after its first children were done, where the
+    // redirect resolved to an already-generated child and the regen guard
+    // below refused with "already generated".
+    let event_log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
+    let generated_ids: std::collections::HashSet<String> = event_log
+        .iter()
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| match e.kind {
+            EventKind::NodeGenerated { .. } => e.node_id.clone(),
+            _ => None,
+        })
+        .collect();
+    let is_generated = |id: &str| generated_ids.contains(id);
     // S27g item 2: a `Chapter` that already gained real `Node` children on
     // an EARLIER visit is a container by the time this request even
     // starts — redirect before the refusal below ever sees it. This must
@@ -1026,7 +1041,7 @@ pub(super) async fn prepare(
     // multi-move generation, long after `expansion` has already flipped to
     // `Expanded` and the split-attempt block stops running. See
     // `redirect_into_chapter_child`'s doc for the full account.
-    let item = redirect_into_chapter_child(&outline, item);
+    let item = redirect_into_chapter_child(&outline, item, &is_generated);
     // S27g (2026-08-29): a `Book`/`Article` item whose children are
     // topic-scoped `Chapter` proposals is a container, not content — see
     // `engine::is_generable`'s doc comment. Checked here, not just in the
@@ -1054,7 +1069,8 @@ pub(super) async fn prepare(
         );
     }
 
-    let event_log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
+    // `event_log` was created at the top of this function (the redirect's
+    // generated-children check needs it) — reused here, same binding.
     // §S15b step 3: a prerequisite can itself be a REFERENCE's real id
     // (`materialize_outline_node`'s `Skip` arm returns `known.node_id` as
     // the chain's exit gate) — its `Demonstrated` state lives in the
@@ -1171,7 +1187,7 @@ pub(super) async fn prepare(
     // The split attempt above may have JUST turned `item` into a
     // container this very call — redirect again for that case (the
     // top-of-function redirect only caught an EARLIER visit's split).
-    let item = redirect_into_chapter_child(&outline, item);
+    let item = redirect_into_chapter_child(&outline, item, &is_generated);
     // Mirrors the container-refusal check near the top of this function —
     // reached now only by a `Book`/`Article` container (never a split
     // `Chapter`, redirected above) or the defensive case where a `Chapter`
@@ -1585,6 +1601,22 @@ pub(super) async fn ensure_document_grounded(
         return Ok(());
     }
 
+    // FAST PATH (2026-09-01): `validate_acervo` re-parses every PDF in the
+    // library (see the spawn_blocking comment below), and this gate runs on
+    // EVERY `/generate` — found live as minutes of dead TTFT before the
+    // first model call (whose own first chunk took ~0.5s; the stall was
+    // entirely this gate, pinned at 100% CPU). The gate's verdict is a
+    // pure function of the filesystem fingerprint below, so a pass is
+    // memoized per document and re-checked by ~a dozen stats; any change
+    // to the library, manual matches, TOC confirmations, or this
+    // document's outline misses the fingerprint and forces the full
+    // validation again. Failures are never cached.
+    let signature = acervo_signature(state, doc_id).await?;
+    if state.acervo_cache.lock().await.get(doc_id) == Some(&signature) {
+        return Ok(());
+    }
+    let gate_started = std::time::Instant::now();
+
     let library = source::LocalPdfSource::open(state.data_dir.as_ref())
         .map_err(|e| format!("could not open local library: {e}"))?;
     let manual = source::ManualMatchStore::open(state.data_dir.as_ref())
@@ -1820,6 +1852,15 @@ pub(super) async fn ensure_document_grounded(
         .map(|r| &r.expected)
         .collect();
     if missing_index.is_empty() {
+        eprintln!(
+            "acervo gate: full validation passed in {:.1}s (memoized until the library, manual matches, TOC, or outline changes)",
+            gate_started.elapsed().as_secs_f32()
+        );
+        state
+            .acervo_cache
+            .lock()
+            .await
+            .insert(doc_id.to_string(), signature);
         return Ok(());
     }
 
@@ -1830,7 +1871,7 @@ pub(super) async fn ensure_document_grounded(
         return Err("no embedding model is loaded — cannot index the library".to_string());
     };
 
-    for item in missing_index {
+    for item in &missing_index {
         // An ambiguous match (more than one plausible candidate file) is
         // already surfaced by the S27f matching screen; `report.all_pass()`
         // above only proves a candidate was FOUND for presence purposes,
@@ -1851,7 +1892,73 @@ pub(super) async fn ensure_document_grounded(
             .map_err(|e| format!("could not index {filename}: {e}"))?;
     }
 
+    eprintln!(
+        "acervo gate: validation + {} index build(s) took {:.1}s (memoized until the library, manual matches, TOC, or outline changes)",
+        missing_index.len(),
+        gate_started.elapsed().as_secs_f32()
+    );
+    state
+        .acervo_cache
+        .lock()
+        .await
+        .insert(doc_id.to_string(), signature);
     Ok(())
+}
+
+/// Cheap filesystem fingerprint of everything [`ensure_document_grounded`]
+/// reads: library PDFs, manual matches, TOC confirmations (each hashed by
+/// entry name/len/mtime), and this document's own `outline.json` (whose
+/// edits — chapter splits, TOC-confirmed `resolved_page`s, `plan`
+/// reorders — are exactly what can change the gate's expected items). A
+/// stat-walk, not a content hash: the expensive content identity lives
+/// inside `validate_acervo`, which this fingerprint only decides whether
+/// to run.
+async fn acervo_signature(state: &AppState, doc_id: &str) -> Result<u64, String> {
+    let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
+    let doc_id = doc_id.to_string();
+    spawn_blocking(move || {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut fold_dir = |dir: &std::path::Path| {
+            let mut entries: Vec<(std::ffi::OsString, std::fs::Metadata)> = std::fs::read_dir(dir)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter_map(|e| e.metadata().ok().map(|m| (e.file_name(), m)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, m) in entries {
+                hasher.write(dir.to_string_lossy().as_bytes());
+                hasher.write(name.to_string_lossy().as_bytes());
+                hasher.write(&m.len().to_le_bytes());
+                let nanos = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                hasher.write(&nanos.to_le_bytes());
+            }
+        };
+        fold_dir(&data_dir.join("library"));
+        fold_dir(&data_dir.join("index").join("manual_matches"));
+        fold_dir(&data_dir.join("index").join("toc"));
+        if let Ok(m) = std::fs::metadata(data_dir.join(&doc_id).join("outline.json")) {
+            hasher.write(b"outline.json");
+            hasher.write(&m.len().to_le_bytes());
+            let nanos = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            hasher.write(&nanos.to_le_bytes());
+        }
+        Ok(hasher.finish())
+    })
+    .await
+    .map_err(|e| format!("acervo signature join failed: {e}"))?
 }
 
 /// A `Chapter` that has real `Node` children (S27g item 2 — split just now,
@@ -1871,20 +1978,32 @@ pub(super) async fn ensure_document_grounded(
 ///
 /// Children are materialized in prerequisite-chained order
 /// (`materialize_split_children`), so "first child" is well-defined and,
-/// in practice, is always the one currently being generated —
-/// `outline_view` never shows a container as directly available, so there
-/// is no route back to this chapter's own id once its first child is
-/// `Demonstrated` and the client moves on to the next one directly.
-/// `Book`/`Article` containers are untouched (the `item_type` guard) —
-/// that refusal predates this slice and stays a hard error for them.
-fn redirect_into_chapter_child(outline: &Outline, item: OutlineItem) -> OutlineItem {
+/// in practice, is always the one currently being generated.
+///
+/// `already_generated` (backed by the caller's event log) skips children
+/// that are done — found live 2026-09-01: `advanceAfterGrading` could hand
+/// this function an already-split chapter after its first children were
+/// generated, and the blind "first child" then resolved to a finished
+/// node, which the regen guard refused with "already generated" instead of
+/// resuming the chapter's next child. Mid-generation the in-flight child
+/// has no `NodeGenerated` event yet (that lands at `finalize`), so it
+/// still resolves correctly across the §S18 continue loop. All children
+/// generated → no redirect, and the caller's container-refusal names the
+/// real situation ("read one of its children instead"). `Book`/`Article`
+/// containers are untouched (the `item_type` guard) — that refusal
+/// predates this slice and stays a hard error for them.
+fn redirect_into_chapter_child(
+    outline: &Outline,
+    item: OutlineItem,
+    already_generated: &dyn Fn(&str) -> bool,
+) -> OutlineItem {
     if item.item_type != OutlineItemType::Chapter || engine::is_generable(outline, &item) {
         return item;
     }
     outline
         .items
         .iter()
-        .find(|i| i.parent_id.as_deref() == Some(item.id.as_str()))
+        .find(|i| i.parent_id.as_deref() == Some(item.id.as_str()) && !already_generated(&i.id))
         .cloned()
         .unwrap_or(item)
 }
@@ -2348,13 +2467,23 @@ pub(super) async fn finalize(
         .clone()
         .ok_or_else(|| "graded move carried no rubric".to_string())?;
 
+    // Rendered here, not at assembly: the graded move never passes through
+    // `tag_move_html` (only the streamed loop's ungraded moves do — see
+    // `generation::generate_node`'s comment), so this is the exercise's ONLY
+    // math pass, exactly once, before the same string lands in the node's
+    // content layer (`finalize_node`) and the rubric sidecar (`exercise_frame`
+    // and every frozen attempt serve it verbatim). Found live 2026-09-01 as
+    // raw LaTeX in the settled exercise iframe. Same reasoning as the
+    // remediation explanation in `grading::answer`.
+    let exercise_html = render_math(&graded.html);
+
     let exercise_id = format!("{}-ex", prep.node_id);
     let rubric_id = format!("{}-ru", prep.node_id);
     let node = engine::finalize_node(
         doc_id,
         &prep.node_id,
         content_html,
-        &graded.html,
+        &exercise_html,
         &exercise_id,
         &rubric_id,
     )
@@ -2373,7 +2502,7 @@ pub(super) async fn finalize(
     let sidecar = RubricSidecar {
         move_id: move_id.to_string(),
         rubric,
-        exercise_html: graded.html.clone(),
+        exercise_html,
         reference_solution: graded.reference_solution.clone(),
         title: prep.title.clone(),
         topic: prep.topic.clone(),

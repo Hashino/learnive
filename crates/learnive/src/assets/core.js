@@ -212,6 +212,14 @@ const ALLOWED_CLASSES = new Set([
 ]);
 
 function sanitizeHtml(html) {
+  // Pre-strip `style="..."` before the DOM ever parses the string: assigning
+  // markup carrying inline style attributes to a template trips the page's
+  // `style-src 'self'` CSP once per attribute (9 violations on every boot,
+  // live 2026-09-01) even though the attribute walk below removes them
+  // afterward — the violation fires at parse, before any of this code runs.
+  // NOT a security filter (the walk below stays authoritative for that);
+  // the regex only exists so the browser never sees an inline style at all.
+  html = html.replace(/\sstyle\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "");
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
   const BLOCKED = new Set([

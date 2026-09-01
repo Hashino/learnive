@@ -110,7 +110,11 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
 
 /// Reads the fast/robust model pair from the environment (§12.1). Defaults are
 /// OpenRouter model ids; for other providers set both explicitly (e.g. `mercury-2`).
-fn models_from_env() -> Models {
+/// `pub(super)`: `api::setup::status_of` also needs this, to report the
+/// pair that's ACTUALLY active when an env override shadows the
+/// settings-configured provider (bug found live 2026-09-01 — see its call
+/// site for the full story).
+pub(super) fn models_from_env() -> Models {
     let fast = std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_else(|_| "openai/gpt-4o-mini".into());
     let robust = std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_else(|_| "openai/gpt-4o".into());
     Models::new(fast, robust)
