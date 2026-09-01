@@ -815,39 +815,35 @@ pub(super) fn outline_view(
         // (`parent_id.is_none()`); they filter explicitly at their own call
         // sites now that this view doesn't pre-filter for them.
         .map(|item| {
-            // S27g (2026-08-29): a non-generable `Book`/`Article` container
-            // (see `engine::is_generable`) never gets its own `Demonstrated`
-            // event — nothing ever generates it — so its view state is
-            // derived from its chapter children via `engine::effective_state`
-            // instead of looked up directly. It never shows `"available"`:
-            // there is nothing to click through to generate, only
-            // `"locked"` (chapters still in progress) or `"demonstrated"`
-            // (all of them done/skipped) — see that function's doc comment
-            // for why a container that never satisfies this would otherwise
-            // permanently lock everything after it in the reading list.
-            let view_state = if !engine::is_generable(outline, item) {
-                match engine::effective_state(outline, &states, &item.id) {
-                    Some(NodeState::Demonstrated) => "demonstrated",
-                    _ => "locked",
-                }
-            } else {
-                match states.get(&item.id) {
-                    Some(NodeState::Demonstrated) => "demonstrated",
-                    Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
-                    None => {
-                        // §S15: a `Skipped` prerequisite satisfies the gate
-                        // too — see `api::reading::prepare`'s matching
-                        // check. `effective_state` (not a plain `states.get`)
-                        // so a prerequisite that is itself a container
-                        // resolves through its own children.
-                        let unlocked = item.prerequisites.iter().all(|p| {
-                            matches!(
-                                engine::effective_state(outline, &states, p),
-                                Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
-                            )
-                        });
-                        if unlocked { "available" } else { "locked" }
-                    }
+            // General rule (user's stated wording, 2026-09-01): an item
+            // with children reads "demonstrated" once all of them are
+            // done/skipped, no type-based exception — `engine::effective_state`
+            // handles that recursively for any item type, not just the
+            // non-generable `Book`/`Chapter` containers this used to be
+            // scoped to (see that function's doc comment). Below that:
+            // `"available"` once the item has its own direct progress OR
+            // any started descendant (`engine::subtree_started` — bug
+            // reported live 2026-09-01: a container used to read "locked"
+            // the whole time it was in progress, wrong on its own terms —
+            // the learner had already opened it — and, via CSS's opacity
+            // cascade on the container's `<li>`, faded its own
+            // already-unlocked children too); otherwise gated on its own
+            // prerequisites, same as any leaf node (a §S15 `Skipped`
+            // prerequisite satisfies the gate too, and `effective_state`
+            // — not a plain `states.get` — resolves a prerequisite that is
+            // itself a container/parent through its own children).
+            let view_state = match engine::effective_state(outline, &states, &item.id) {
+                Some(NodeState::Demonstrated) => "demonstrated",
+                Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
+                _ if engine::subtree_started(outline, &states, &item.id) => "available",
+                _ => {
+                    let unlocked = item.prerequisites.iter().all(|p| {
+                        matches!(
+                            engine::effective_state(outline, &states, p),
+                            Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
+                        )
+                    });
+                    if unlocked { "available" } else { "locked" }
                 }
             };
             // Promoted to `engine::chapter_match_failed` (bug reported live

@@ -362,23 +362,32 @@ pub fn chapter_match_failed(items: &[OutlineItem], item: &OutlineItem) -> bool {
 
 /// A node/container's gate-relevant state, synthesizing a container's from
 /// its children when it has none of its own (S27g, 2026-08-29; generalized
-/// to `Chapter` 2026-08-30 for item 2). A non-generable container (see
-/// [`is_generable`] — `Book`/`Article`/`Chapter` alike once it has real
-/// children) never receives a `Demonstrated` event directly — nothing ever
-/// generates it — so without this, whatever comes after it in the reading
-/// list would stay locked forever the moment its children finish (the same
-/// "container never satisfies its own gate" trap a fully-skipped book would
-/// also fall into). A container counts as `Demonstrated` once every one of
-/// its direct children (by `parent_id`) is itself `Demonstrated` or
-/// `Skipped`, recursively — which is what makes a `Book → Chapter → Node`
-/// chain work with no extra case: a mid-chain `Chapter` that split (item 2)
-/// recurses one level deeper into its own `Node` children before reporting
-/// up to the `Book`. A container with no children at all (shouldn't happen
-/// once [`is_generable`] agrees it isn't one, but checked defensively, and
-/// the ordinary case for a `Chapter` that never split) reports no state
-/// rather than vacuously "done" — falling through to `states.get` above on
-/// the next call up the chain would be wrong (a leaf `Chapter` genuinely has
-/// no state of its own until it either generates directly or splits).
+/// to `Chapter` 2026-08-30 for item 2; generalized again 2026-09-01 to ANY
+/// item type with children, not just `Book`/`Chapter` — user's stated rule:
+/// "if a node has children and all of its children are complete, mark it
+/// with a checkmark", not just a chapter/book special case). A non-generable
+/// container (see [`is_generable`] — `Book`/`Article`/`Chapter` alike once
+/// it has real children) never receives a `Demonstrated` event directly —
+/// nothing ever generates it — so without this, whatever comes after it in
+/// the reading list would stay locked forever the moment its children finish
+/// (the same "container never satisfies its own gate" trap a fully-skipped
+/// book would also fall into). This also now covers a plain `Node` that
+/// gained children some other way (a decomposed §S15 prerequisite, or a
+/// tutor-question-spawned §S8 sub-node) without ever generating a
+/// `Demonstrated` event of its own for the grouping node itself — same trap,
+/// same fix, no type-based exception left. Any item counts as `Demonstrated`
+/// once every one of its direct children (by `parent_id`) is itself
+/// `Demonstrated` or `Skipped`, recursively — which is what makes a
+/// `Book → Chapter → Node` chain work with no extra case: a mid-chain
+/// `Chapter` that split (item 2) recurses one level deeper into its own
+/// `Node` children before reporting up to the `Book`. An item with its own
+/// direct state ALWAYS reports that state, children or not (the early
+/// return above) — a `Node` that both generated its own content and also
+/// spawned children is judged on its own completion, not its children's. An
+/// item with no children at all reports no state rather than vacuously
+/// "done" — falling through to `states.get` above on the next call up the
+/// chain would be wrong (a leaf item genuinely has no state of its own until
+/// it either generates directly or gains children).
 pub fn effective_state(
     outline: &Outline,
     states: &std::collections::HashMap<String, crate::events::aggregate::NodeState>,
@@ -388,10 +397,7 @@ pub fn effective_state(
     if let Some(s) = states.get(item_id) {
         return Some(*s);
     }
-    let item = outline.items.iter().find(|i| i.id == item_id)?;
-    if item.item_type == OutlineItemType::Node {
-        return None;
-    }
+    outline.items.iter().find(|i| i.id == item_id)?;
     let children: Vec<&OutlineItem> = outline
         .items
         .iter()
@@ -407,6 +413,34 @@ pub fn effective_state(
         )
     });
     all_satisfied.then_some(NodeState::Demonstrated)
+}
+
+/// True if any node in `item_id`'s subtree has ever produced a state
+/// (attempted, demonstrated, or skipped) — i.e. the chapter/book has
+/// genuinely been started, even though not every child is done yet (bug
+/// reported live 2026-09-01: a container read `"locked"` in the sidebar
+/// the whole time it was in progress, which — besides being wrong on its
+/// own terms, since the user had already opened it — also faded its own
+/// already-unlocked children through CSS's opacity cascade, since they're
+/// nested inside the container's `<li>`). `cold_start::outline_view` uses
+/// this to show `"available"` instead of `"locked"` for a started-but-
+/// unfinished container; `"locked"` stays reserved for a container
+/// nothing has touched yet. A container never receives a state event of
+/// its own (see [`effective_state`]'s doc comment), so this recurses the
+/// same way that function does rather than checking `item_id` alone.
+pub fn subtree_started(
+    outline: &Outline,
+    states: &std::collections::HashMap<String, crate::events::aggregate::NodeState>,
+    item_id: &str,
+) -> bool {
+    if states.contains_key(item_id) {
+        return true;
+    }
+    outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(item_id))
+        .any(|c| subtree_started(outline, states, &c.id))
 }
 
 /// Most-recently-generated **leaf** reachable from an outline item, walking

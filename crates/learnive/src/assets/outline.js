@@ -93,13 +93,14 @@ function renderOutline() {
     ]
       .filter(Boolean)
       .join(" ");
+    // No lock badge for "locked" (removed 2026-09-01, user request — no
+    // emojis in the front end, CLAUDE.md): the row's own non-clickability
+    // and CSS dimming already say "locked" without needing a glyph for it.
     const badge = it.chapter_match_failed
       ? " ⚠"
-      : it.state === "locked"
-        ? " 🔒"
-        : it.state === "demonstrated"
-          ? " ✓"
-          : "";
+      : it.state === "demonstrated"
+        ? " ✓"
+        : "";
     const reviewBadge = it.mode === "review" ? " " + t("prereq.reviewBadge") : "";
     const children = renderLevel(it.id);
     return (

@@ -3333,10 +3333,19 @@ async fn chapter_split_redirects_generation_into_its_new_children() {
         "available",
         "second split child must become reachable once the first is demonstrated"
     );
+    // Generalized 2026-09-01 (user's stated rule: a started-but-unfinished
+    // parent must not read "locked" — it's misleading on its own terms,
+    // and it used to fade its own already-unlocked children through CSS's
+    // opacity cascade, since they're nested inside the same `<li>`). The
+    // chapter container is still never directly generable again (that part
+    // is unchanged, see the redirect above) — but with one child already
+    // demonstrated, `engine::subtree_started` reports it as begun, so the
+    // sidebar now shows it "available", not "locked", until the second
+    // child finishes too and it becomes "demonstrated".
     assert_eq!(
         find_state("c1"),
-        "locked",
-        "the chapter container itself is never directly generable again"
+        "available",
+        "a chapter with a demonstrated first child has genuinely been started"
     );
 }
 

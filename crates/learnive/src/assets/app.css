@@ -732,8 +732,15 @@ body.source-resizing #askBar {
   color: var(--accent);
 }
 /* §S5 gate state: locked items are visible (so the graph shape reads)
-   but not reachable; available/demonstrated items are clickable. */
-#outline li.state-locked {
+   but not reachable; available/demonstrated items are clickable. Dims only
+   the item's own row (`.outline-row`), not `#outline li.state-locked`
+   itself — that would also dim a nested `<ul>` of children, since they sit
+   INSIDE the same `<li>` (bug reported live 2026-09-01: an unlocked child
+   under a still-"locked" parent read as faded and hard to read, purely
+   from this rule reaching down through the DOM tree it didn't mean to
+   cover; each child already carries its own `.state-*` class and dims
+   itself if it's genuinely locked too). */
+#outline li.state-locked > .outline-row {
   opacity: 0.5;
 }
 #outline li.state-available,
@@ -748,12 +755,15 @@ body.source-resizing #askBar {
    resolved_page) but not stuck — it opens the remediation modal
    (remediate.js), so it stays full-opacity and clickable despite the
    generic .state-locked dimming above, and gets its own warning color
-   instead of the neutral lock badge. */
+   instead of the neutral lock badge. Both the `<li>` (belt) and its
+   `.outline-row` (the element the dimming rule above actually targets,
+   since 2026-09-01) are pinned to full opacity here. */
 #outline li.match-failed {
   opacity: 1;
   cursor: pointer;
 }
 #outline li.match-failed > .outline-row {
+  opacity: 1;
   color: var(--nord11);
 }
 #outline li.match-failed:hover > .outline-row {
