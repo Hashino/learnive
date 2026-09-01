@@ -562,6 +562,21 @@ async function streamMoveRequest(rec, id) {
         rec.controls.innerHTML =
           '<p class="muted">' + escapeHtml(data) + "</p>";
       } else if (event === "exercise") {
+        // Bug reported live 2026-09-01: `data` here is the REAL generated
+        // node id (`prep.node_id`, `api::generation`'s `sse_frame("exercise",
+        // &prep.node_id)`) — which differs from `rec.nodeId` (fixed at
+        // `buildSection` time to whatever outline item id the learner
+        // clicked) whenever `prepare`'s chapter->child-node redirect fired
+        // (`redirect_into_chapter_child`, S27g item 2 — the ordinary case,
+        // since almost every chapter splits into nodes). `renderExerciseInto`
+        // already used `data` correctly for the iframe's own URL, so the
+        // exercise loaded and displayed fine — but `submitAnswer` (below)
+        // reads `rec.nodeId`, which was never updated, and POSTs the
+        // ANSWER against the wrong (chapter) id — a 404, since no rubric
+        // sidecar or node file exists under that id. Updating `rec.nodeId`
+        // here, the first point the real id is known, is what makes the
+        // submit target match what was actually generated.
+        rec.nodeId = data;
         renderExerciseInto(rec, data);
       } else if (event === "plan_proposal") {
         // A `plan` move proposed a structural outline change (§5) —
