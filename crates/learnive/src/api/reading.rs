@@ -1601,18 +1601,29 @@ pub(super) async fn ensure_document_grounded(
         return Ok(());
     }
 
-    // FAST PATH (2026-09-01): `validate_acervo` re-parses every PDF in the
-    // library (see the spawn_blocking comment below), and this gate runs on
-    // EVERY `/generate` — found live as minutes of dead TTFT before the
-    // first model call (whose own first chunk took ~0.5s; the stall was
-    // entirely this gate, pinned at 100% CPU). The gate's verdict is a
-    // pure function of the filesystem fingerprint below, so a pass is
-    // memoized per document and re-checked by ~a dozen stats; any change
-    // to the library, manual matches, TOC confirmations, or this
-    // document's outline misses the fingerprint and forces the full
-    // validation again. Failures are never cached.
-    let signature = acervo_signature(state, doc_id).await?;
-    if state.acervo_cache.lock().await.get(doc_id) == Some(&signature) {
+    // FAST PATH (2026-09-01; reshaped 2026-09-02, see `acervo_cache`): the
+    // validation below re-reads every library PDF (hash + metadata + TOC/text
+    // checks) and this gate runs on EVERY `/generate` — found live as minutes
+    // of dead TTFT. The report is a pure function of (library files,
+    // manual matches, TOC confirmations, expected items), so it's memoized
+    // under exactly that pair; the gate's own outline writes (chapter
+    // resolution, splits) do NOT invalidate it, which S29's doc-fingerprint
+    // design got wrong — every resolution re-validated the whole library.
+    let signature = acervo_signature(state).await?;
+    let items: Vec<source::ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
+    let expected_fp = expected_items_fingerprint(&items);
+    let cached_report = state
+        .acervo_cache
+        .lock()
+        .await
+        .get(&(signature, expected_fp))
+        .cloned();
+    if let Some(report) = cached_report {
+        // Cache hit — but S27n's `LibraryFileIndex` write lives inside the
+        // (skipped) validation, and citation deep-links need it. Filling it
+        // is nearly free when it's already complete (a scan of tiny record
+        // files) and only touches genuinely new files otherwise.
+        ensure_library_file_index(state, &report).await?;
         return Ok(());
     }
     let gate_started = std::time::Instant::now();
@@ -1628,7 +1639,6 @@ pub(super) async fn ensure_document_grounded(
         .join("index")
         .join("toc");
 
-    let items: Vec<source::ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
     // `validate_acervo` re-parses every PDF in the library (`pdf-extract` +
     // a `lopdf` metadata pass, per `api::acervo`'s own module doc) — real,
     // synchronous, CPU-bound work, run here in `spawn_blocking` for the same
@@ -1657,6 +1667,16 @@ pub(super) async fn ensure_document_grounded(
     })
     .await
     .map_err(|e| format!("acervo validation task panicked: {e}"))??;
+
+    // Verdict cached (pass OR fail — both are pure functions of the key;
+    // fixing the library changes the fingerprint and misses, so a stale
+    // verdict can't outlive its inputs): later `/generate`s AND report-panel
+    // opens skip the whole re-read. I/O errors above never reach an insert.
+    state
+        .acervo_cache
+        .lock()
+        .await
+        .insert((signature, expected_fp), report.clone());
 
     if !report.all_pass() {
         let failing: Vec<String> = report
@@ -1853,14 +1873,9 @@ pub(super) async fn ensure_document_grounded(
         .collect();
     if missing_index.is_empty() {
         eprintln!(
-            "acervo gate: full validation passed in {:.1}s (memoized until the library, manual matches, TOC, or outline changes)",
+            "acervo gate: full validation passed in {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
             gate_started.elapsed().as_secs_f32()
         );
-        state
-            .acervo_cache
-            .lock()
-            .await
-            .insert(doc_id.to_string(), signature);
         return Ok(());
     }
 
@@ -1893,29 +1908,27 @@ pub(super) async fn ensure_document_grounded(
     }
 
     eprintln!(
-        "acervo gate: validation + {} index build(s) took {:.1}s (memoized until the library, manual matches, TOC, or outline changes)",
+        "acervo gate: validation + {} index build(s) took {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
         missing_index.len(),
         gate_started.elapsed().as_secs_f32()
     );
-    state
-        .acervo_cache
-        .lock()
-        .await
-        .insert(doc_id.to_string(), signature);
     Ok(())
 }
 
-/// Cheap filesystem fingerprint of everything [`ensure_document_grounded`]
-/// reads: library PDFs, manual matches, TOC confirmations (each hashed by
-/// entry name/len/mtime), and this document's own `outline.json` (whose
-/// edits — chapter splits, TOC-confirmed `resolved_page`s, `plan`
-/// reorders — are exactly what can change the gate's expected items). A
-/// stat-walk, not a content hash: the expensive content identity lives
-/// inside `validate_acervo`, which this fingerprint only decides whether
-/// to run.
-async fn acervo_signature(state: &AppState, doc_id: &str) -> Result<u64, String> {
+/// Cheap filesystem fingerprint of every LIBRARY-side input
+/// [`ensure_document_grounded`] (and the report endpoint) validate against:
+/// library PDFs, manual matches, TOC confirmations — each hashed by entry
+/// name/len/mtime. Deliberately NOT this document's `outline.json` (S29's
+/// version folded it in, which made the gate re-validate the whole library
+/// after its own chapter-resolution/split writes bumped the file — observed
+/// live as a 133s re-validation on the generate right after a chapter
+/// resolved): the outline's influence on the report flows entirely through
+/// the expected items, hashed separately by
+/// [`expected_items_fingerprint`]. A stat-walk, not a content hash: the
+/// expensive content identity lives inside `validate_acervo`, which this
+/// fingerprint only decides whether to run.
+pub(super) async fn acervo_signature(state: &AppState) -> Result<u64, String> {
     let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
-    let doc_id = doc_id.to_string();
     spawn_blocking(move || {
         use std::hash::Hasher;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1944,21 +1957,87 @@ async fn acervo_signature(state: &AppState, doc_id: &str) -> Result<u64, String>
         fold_dir(&data_dir.join("library"));
         fold_dir(&data_dir.join("index").join("manual_matches"));
         fold_dir(&data_dir.join("index").join("toc"));
-        if let Ok(m) = std::fs::metadata(data_dir.join(&doc_id).join("outline.json")) {
-            hasher.write(b"outline.json");
-            hasher.write(&m.len().to_le_bytes());
-            let nanos = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
-            hasher.write(&nanos.to_le_bytes());
-        }
         Ok(hasher.finish())
     })
     .await
     .map_err(|e| format!("acervo signature join failed: {e}"))?
+}
+
+/// Folds the expected items (title, authors, kind — in order, order is the
+/// report's own shape) into the cache key alongside
+/// [`acervo_signature`]. Two documents citing the same books share one
+/// cached report; a `plan`-move that adds a book changes this and misses.
+pub(super) fn expected_items_fingerprint(items: &[source::ExpectedItem]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for item in items {
+        item.title.hash(&mut hasher);
+        for a in &item.authors {
+            a.hash(&mut hasher);
+        }
+        std::mem::discriminant(&item.kind).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Cache-hit counterpart of the validation's S27n `LibraryFileIndex` write
+/// (which lives inside the skipped `validate_acervo` call): makes sure every
+/// library file the cached report FOUND has a record, so citation deep-links
+/// (`GET /api/library/{hash}`, `.../pdf`) resolve even when the gate never
+/// re-runs the full validation. Cheap by construction: scans the record
+/// directory (tiny JSONs) for filenames already covered and only reads +
+/// hashes + metadata-parses a file that's genuinely missing a record — on
+/// the steady state that loop body never runs.
+async fn ensure_library_file_index(
+    state: &AppState,
+    report: &source::acervo::AcervoReport,
+) -> Result<(), String> {
+    let found: Vec<String> = report
+        .items
+        .iter()
+        .filter_map(|r| match &r.presence {
+            source::PresenceCheck::Found { filename } => Some(filename.clone()),
+            _ => None,
+        })
+        .collect();
+    if found.is_empty() {
+        return Ok(());
+    }
+    let index_root = std::path::PathBuf::from(state.data_dir.as_ref()).join("index");
+    let library_root = std::path::PathBuf::from(state.data_dir.as_ref()).join("library");
+    spawn_blocking(move || -> Result<(), String> {
+        use std::collections::HashSet;
+        let file_index = source::acervo::LibraryFileIndex::open(&index_root)
+            .map_err(|e| format!("could not open library file index: {e}"))?;
+        let mut covered: HashSet<String> = HashSet::new();
+        for entry in std::fs::read_dir(file_index.dir()).map_err(|e| e.to_string())? {
+            let Ok(entry) = entry else { continue };
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            if let Ok(record) = serde_json::from_slice::<source::acervo::LibraryFileRecord>(&bytes)
+            {
+                covered.insert(record.filename);
+            }
+        }
+        for filename in found {
+            if covered.contains(&filename) {
+                continue;
+            }
+            let path = library_root.join(&filename);
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let hash = source::acervo::content_hash(&bytes);
+            let (title, authors) = source::acervo::read_info_metadata(&path);
+            if let Err(e) = file_index.set(&hash, &filename, title.as_deref(), authors.as_deref()) {
+                eprintln!("library file index ensure failed for {filename}: {e}");
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("library file index ensure task failed: {e}"))?
 }
 
 /// A `Chapter` that has real `Node` children (S27g item 2 — split just now,

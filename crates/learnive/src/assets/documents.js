@@ -254,7 +254,9 @@ function renderDocList() {
       trash.className = "doc-trash";
       trash.title = t("delete.title");
       trash.setAttribute("aria-label", t("delete.title"));
-      trash.textContent = "🗑";
+      // "✕", not an emoji glyph (2026-09-01 no-emoji rule) — the title/
+      // aria-label carry the "delete" meaning; matches acervo.js's remove.
+      trash.textContent = "✕";
       trash.addEventListener("click", (e) => {
         // The row itself opens the document — a delete must not do both.
         e.stopPropagation();

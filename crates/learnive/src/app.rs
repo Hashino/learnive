@@ -73,15 +73,24 @@ pub struct AppState {
     /// integration test that creates a document never makes a real network
     /// call just because it skipped the outline-confirmation screen.
     pub bibliography_client: Arc<crate::source::BibliographyClient>,
-    /// Memoized acervo-gate passes: doc_id -> the filesystem fingerprint the
-    /// gate last validated OK for. `validate_acervo` re-parses EVERY library
-    /// PDF (pdf-extract + lopdf, CPU-bound), and `ensure_document_grounded`
-    /// ran that on every `/generate` — found live 2026-09-01 as minutes of
-    /// dead TTFT before the first model call (whose own first chunk took
-    /// ~0.5s). A pass is remembered under the fingerprint it validated; any
-    /// library/manual-match/TOC/outline change misses and forces the full
-    /// validation again.
-    pub acervo_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Memoized acervo validations, shared by BOTH consumers of
+    /// `validate_acervo` (S31, live QA 2026-09-02): `ensure_document_grounded`
+    /// (the `/generate` gate) and `api::acervo`'s read-only report SSE —
+    /// which the client auto-opens on every document load and which, unlike
+    /// the gate, had NO memoization at all: a new document paid two full
+    /// validations back-to-back (~60s report + ~133s gate, measured live).
+    /// Keyed by `(library_fingerprint, expected_items_fingerprint)` — the
+    /// report is a pure function of those, so the cache is global (two
+    /// documents citing the same books share an entry) and, crucially,
+    /// does NOT include `outline.json`: the gate's own chapter-resolution and
+    /// split writes bump the outline constantly, and folding it into the key
+    /// (S29's design) made every resolution re-validate the whole library.
+    /// Validation verdicts are cached; I/O errors are not (nothing to cache).
+    pub acervo_cache: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<(u64, u64), crate::source::acervo::AcervoReport>,
+        >,
+    >,
 }
 
 impl AppState {

@@ -988,6 +988,13 @@ impl LibraryFileIndex {
     fn path_for(&self, hash: &str) -> PathBuf {
         self.dir.join(format!("{hash}.json"))
     }
+
+    /// The directory records live in — `ensure_library_file_index`
+    /// (api::reading's cache-hit counterpart of the validation's own index
+    /// write) scans it by filename before deciding anything needs re-hashing.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
 }
 
 /// SHA-256 hex digest of a PDF's bytes — the content-addressed key both the
@@ -1008,8 +1015,10 @@ pub(crate) fn content_hash(bytes: &[u8]) -> String {
 /// fields — keeps `pdf.rs`'s existing shape (text/outline/pages, all it
 /// promises today) untouched, at the cost of parsing the PDF a second time.
 /// Fine for a validation pass that runs once per library item, not a hot
-/// path.
-fn read_info_metadata(path: &Path) -> (Option<String>, Option<String>) {
+/// path. `pub(crate)`: also the ensure-pass writer in `api::reading`, which
+/// fills genuinely-new `LibraryFileRecord`s on the memoized gate's cache
+/// hits.
+pub(crate) fn read_info_metadata(path: &Path) -> (Option<String>, Option<String>) {
     let Ok(doc) = lopdf::Document::load(path) else {
         return (None, None);
     };

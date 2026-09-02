@@ -228,6 +228,25 @@ pub async fn get_acervo_report(
     let ids: Vec<String> = expected.iter().map(|(id, _)| id.clone()).collect();
     let items_only: Vec<ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
 
+    // S31 (live QA 2026-09-02): this panel auto-opens on every document load,
+    // and it used to pay the FULL validation every single time — unmemoized,
+    // unlogged (the gate's S29 memoization never covered it), so a new
+    // document paid two full library re-reads back-to-back (~60s here + the
+    // gate's ~133s, measured live). Same cache the gate uses: same
+    // (library, expected items) key, same pure-function report, so a hit is
+    // not a staleness risk. On a hit the progress events are skipped
+    // entirely — there is nothing to make progress ON.
+    let library_fingerprint = super::reading::acervo_signature(&state)
+        .await
+        .map_err(ApiError::Internal)?;
+    let expected_fp = super::reading::expected_items_fingerprint(&items_only);
+    let cached = state
+        .acervo_cache
+        .lock()
+        .await
+        .get(&(library_fingerprint, expected_fp))
+        .cloned();
+
     let stream = async_stream::stream! {
         let list: Vec<AcervoListItemResp> = ids
             .iter()
@@ -241,6 +260,19 @@ pub async fn get_acervo_report(
             "items",
             &serde_json::json!({ "items": list, "library_path": library_path }).to_string(),
         ));
+
+        if let Some(report) = cached {
+            let items: Vec<AcervoItemResp> = ids
+                .into_iter()
+                .zip(report.items)
+                .map(|(item_id, r)| acervo_item_resp(item_id, r))
+                .collect();
+            let all_pass = items.iter().all(|i| i.passes);
+            let resp = AcervoReportResp { items, all_pass, library_path };
+            yield Ok(sse_frame("report", &serde_json::to_string(&resp).unwrap_or_default()));
+            yield Ok(sse_frame("done", ""));
+            return;
+        }
 
         if items_only.is_empty() {
             let resp = AcervoReportResp { items: Vec::new(), all_pass: true, library_path };
@@ -280,7 +312,18 @@ pub async fn get_acervo_report(
                 }
                 joined = &mut task => {
                     match joined {
-                        Ok(Ok(report)) => break report,
+                        Ok(Ok(report)) => {
+                            // Cache the fresh verdict so the gate's next
+                            // `/generate` (and any panel re-open) skips the
+                            // re-read — the read-only GET still never writes
+                            // DISK (§3.1, S27n), this memo is memory-only.
+                            state
+                                .acervo_cache
+                                .lock()
+                                .await
+                                .insert((library_fingerprint, expected_fp), report.clone());
+                            break report;
+                        }
                         Ok(Err(e)) => {
                             yield Ok(sse_frame("error", &format!("acervo validation failed: {e}")));
                             return;
@@ -311,61 +354,7 @@ pub async fn get_acervo_report(
         let items: Vec<AcervoItemResp> = ids
             .into_iter()
             .zip(report.items)
-            .map(|(item_id, r)| {
-                let (filename, presence) = match &r.presence {
-                    source::PresenceCheck::Found { filename } => (Some(filename.clone()), "found"),
-                    source::PresenceCheck::Missing => (None, "missing"),
-                };
-                let (identity, identity_reason) = match &r.identity {
-                    source::IdentityCheck::Match => ("match", None),
-                    source::IdentityCheck::Mismatch { reason } => ("mismatch", Some(reason.clone())),
-                    source::IdentityCheck::Skipped => ("skipped", None),
-                };
-                let text_layer = match &r.text_layer {
-                    source::TextLayerCheck::Extractable { .. } => "extractable",
-                    source::TextLayerCheck::NoText => "no_text",
-                    // Deliberately its own wire value, not folded into
-                    // `no_text` — the UI copy has to say "we couldn't read
-                    // this file", never "this book has no text", or it sends
-                    // the user off to re-acquire a book that is already fine.
-                    source::TextLayerCheck::ExtractorFailed => "extractor_failed",
-                    source::TextLayerCheck::Skipped => "skipped",
-                };
-                let needs_toc_confirmation = r.toc.needs_user_confirmation();
-                let toc = match &r.toc {
-                    source::TocCheck::Embedded { .. } => "embedded",
-                    source::TocCheck::Deduced { .. } => "deduced",
-                    source::TocCheck::Heuristic { .. } => "heuristic",
-                    source::TocCheck::Unavailable => "unavailable",
-                    source::TocCheck::Skipped => "skipped",
-                };
-                let page_map = match &r.page_map {
-                    source::PageMapCheck::Labeled { .. } => "labeled",
-                    source::PageMapCheck::PhysicalOnly { .. } => "physical_only",
-                    source::PageMapCheck::Skipped => "skipped",
-                };
-                let index = match &r.index {
-                    source::IndexCheck::Cached { .. } => "cached",
-                    source::IndexCheck::Missing => "missing",
-                    source::IndexCheck::Skipped => "skipped",
-                };
-                AcervoItemResp {
-                    item_id,
-                    title: r.expected.title.clone(),
-                    authors: r.expected.authors.clone(),
-                    kind: r.expected.kind,
-                    filename,
-                    presence,
-                    identity,
-                    identity_reason,
-                    text_layer,
-                    toc,
-                    needs_toc_confirmation,
-                    page_map,
-                    index,
-                    passes: r.passes(),
-                }
-            })
+            .map(|(item_id, r)| acervo_item_resp(item_id, r))
             .collect();
 
         let all_pass = items.iter().all(|i| i.passes);
@@ -379,6 +368,65 @@ pub async fn get_acervo_report(
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
         .expect("valid stream response"))
+}
+
+/// One report item → its wire shape. Extracted from the report endpoint's
+/// original inline closure so the S31 cache-hit path (which never runs the
+/// validation stream) emits byte-identical items.
+fn acervo_item_resp(item_id: String, r: source::acervo::ItemReport) -> AcervoItemResp {
+    let (filename, presence) = match &r.presence {
+        source::PresenceCheck::Found { filename } => (Some(filename.clone()), "found"),
+        source::PresenceCheck::Missing => (None, "missing"),
+    };
+    let (identity, identity_reason) = match &r.identity {
+        source::IdentityCheck::Match => ("match", None),
+        source::IdentityCheck::Mismatch { reason } => ("mismatch", Some(reason.clone())),
+        source::IdentityCheck::Skipped => ("skipped", None),
+    };
+    let text_layer = match &r.text_layer {
+        source::TextLayerCheck::Extractable { .. } => "extractable",
+        source::TextLayerCheck::NoText => "no_text",
+        // Deliberately its own wire value, not folded into
+        // `no_text` — the UI copy has to say "we couldn't read
+        // this file", never "this book has no text", or it sends
+        // the user off to re-acquire a book that is already fine.
+        source::TextLayerCheck::ExtractorFailed => "extractor_failed",
+        source::TextLayerCheck::Skipped => "skipped",
+    };
+    let needs_toc_confirmation = r.toc.needs_user_confirmation();
+    let toc = match &r.toc {
+        source::TocCheck::Embedded { .. } => "embedded",
+        source::TocCheck::Deduced { .. } => "deduced",
+        source::TocCheck::Heuristic { .. } => "heuristic",
+        source::TocCheck::Unavailable => "unavailable",
+        source::TocCheck::Skipped => "skipped",
+    };
+    let page_map = match &r.page_map {
+        source::PageMapCheck::Labeled { .. } => "labeled",
+        source::PageMapCheck::PhysicalOnly { .. } => "physical_only",
+        source::PageMapCheck::Skipped => "skipped",
+    };
+    let index = match &r.index {
+        source::IndexCheck::Cached { .. } => "cached",
+        source::IndexCheck::Missing => "missing",
+        source::IndexCheck::Skipped => "skipped",
+    };
+    AcervoItemResp {
+        item_id,
+        title: r.expected.title.clone(),
+        authors: r.expected.authors.clone(),
+        kind: r.expected.kind,
+        filename,
+        presence,
+        identity,
+        identity_reason,
+        text_layer,
+        toc,
+        needs_toc_confirmation,
+        page_map,
+        index,
+        passes: r.passes(),
+    }
 }
 
 // -- GET/POST /api/documents/{doc}/acervo/matches -- PDF<->item matching --

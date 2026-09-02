@@ -455,6 +455,21 @@ async function startPractice(rec, id, btn) {
 // (§9 — content flowing in while the learner is already reading, not a
 // jump cut).
 async function generateNode(id, { instant = true } = {}) {
+  // A chapter the S27g matching pass could not place is refused server-side
+  // (prepare's `chapter_match_failed` check) — found live 2026-09-02 when the
+  // post-creation auto-generate hit the refusal and dead-ended in a bare
+  // "generation error" paragraph: the remediation modal was only wired to
+  // outline-row clicks (outline.js), not to any programmatic generate caller
+  // (this auto-start, advanceAfterGrading, the acervo continue). Route ALL of
+  // them into the modal here, before the doomed POST — same rule the
+  // row-click handler applies. Also re-checked in `streamMoveRequest`'s catch
+  // for a flag that flipped since the outline was loaded.
+  const item = (state.allItems || []).find((it) => it.id === id);
+  if (item && item.chapter_match_failed) {
+    state.currentId = id;
+    openChapterRemediate(id);
+    return;
+  }
   state.currentId = id;
   let rec = state.sections.get(id);
   if (!rec) {
@@ -673,6 +688,17 @@ async function streamMoveRequest(rec, id) {
     });
   } catch (err) {
     rec.generationPaused = false;
+    // Stale-flag backstop for the pre-check in `generateNode`: the server
+    // refused THIS node for chapter-match failure (its outline_view flag only
+    // reached us after the outline load). The modal is the designed way past
+    // it — a raw error paragraph is a dead end (§S27g's remediation arms).
+    const refused = (state.allItems || []).find(
+      (it) => it.id === id && it.chapter_match_failed,
+    );
+    if (refused) {
+      openChapterRemediate(id);
+      return;
+    }
     rec.controls.innerHTML =
       '<p class="error">' +
       t("gen.error") +
