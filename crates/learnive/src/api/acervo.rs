@@ -1159,4 +1159,64 @@ mod tests {
         doc.trailer.set("Info", info_id);
         doc.save(path).expect("save fixture pdf");
     }
+
+    /// S31 regression, reported live 2026-09-03: the gate's cache-hit path
+    /// returned `Ok(())` for a CACHED FAILING report — after one refused
+    /// `/generate` (which cached the fail), every later one sailed past the
+    /// gate and died one layer down in `ground_node`, whose "passed the
+    /// document acervo gate but has no resolved file" internal error is both
+    /// a lie in that moment and useless to the learner. A memoized verdict
+    /// must refuse exactly like a fresh one.
+    #[tokio::test]
+    async fn a_cached_failing_report_refuses_generation_like_a_fresh_one() {
+        let (_dir, state) = test_state();
+        seed_document(
+            &state,
+            "doc1",
+            vec![book_item("b1", "A Book Nobody Has", &["Nobody"])],
+        );
+        let outline_json = state
+            .store
+            .read_doc_file("doc1", "outline.json")
+            .expect("seeded outline");
+        let outline: Outline = serde_json::from_str(&outline_json).unwrap();
+        let expected: Vec<ExpectedItem> = engine::expected_items(&outline)
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect();
+        assert!(!expected.is_empty());
+
+        // Prime the memo with exactly what a first refused generate would
+        // have cached: the real six-check validation over an empty library
+        // (presence Missing for the book, all_pass false).
+        let signature = super::reading::acervo_signature(&state).await.unwrap();
+        let fp = super::reading::expected_items_fingerprint(&expected);
+        let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
+        let report = source::validate_acervo(
+            &source::LocalPdfSource::open(&data_dir).unwrap(),
+            &expected,
+            data_dir.join("index").join("library"),
+            data_dir.join("index").join("toc"),
+            None,
+        )
+        .unwrap();
+        assert!(!report.all_pass(), "fixture: empty library must fail");
+        state
+            .acervo_cache
+            .lock()
+            .await
+            .insert((signature, fp), report);
+
+        let err = super::reading::ensure_document_grounded(&state, "doc1", &outline)
+            .await
+            .expect_err("a cached failing verdict must refuse, not pass");
+        assert!(
+            err.contains("the acervo gate isn't clear yet"),
+            "the refusal must be the honest acervo one, not a downstream internal error: {err}"
+        );
+        assert!(
+            err.contains("A Book Nobody Has"),
+            "the refusal must name the failing item: {err}"
+        );
+    }
 }

@@ -592,6 +592,12 @@ async function streamMoveRequest(rec, id) {
         // here: clear the "generating…" status and arm the sentinel so
         // crossing it (reading to the end of what's here) is what reopens
         // `/generate` for the next move, not a timer or an immediate loop.
+        // `data` is the server's real generated node id (`prep.node_id`,
+        // same as the `exercise` branch below) — a chapter→child redirect
+        // makes it differ from the clicked outline item's id, and every
+        // later `/continue`/read-to-end/answer of this section must target
+        // the id that actually has the node file.
+        if (data) rec.nodeId = data;
         rec.controls.innerHTML = "";
         rec.generationPaused = true;
         armReadToEndWatcher(rec);

@@ -1591,6 +1591,28 @@ fn flatten_embedded_outline(
     }
 }
 
+/// The generation-refusal text for a report that failed any hard-blocking
+/// check — identical for a freshly computed report and a memoized one, since
+/// both must refuse exactly the same way (the message is what the event log
+/// records and the library-check panel explains).
+fn acervo_refusal(report: &source::acervo::AcervoReport) -> String {
+    let failing: Vec<String> = report
+        .failing_items()
+        .iter()
+        .map(|r| {
+            format!(
+                "\"{}\" ({})",
+                r.expected.title,
+                r.blocking_failures().join(", ")
+            )
+        })
+        .collect();
+    format!(
+        "the acervo gate isn't clear yet — check it before this document can generate: {}",
+        failing.join("; ")
+    )
+}
+
 pub(super) async fn ensure_document_grounded(
     state: &AppState,
     doc_id: &str,
@@ -1619,10 +1641,22 @@ pub(super) async fn ensure_document_grounded(
         .get(&(signature, expected_fp))
         .cloned();
     if let Some(report) = cached_report {
-        // Cache hit — but S27n's `LibraryFileIndex` write lives inside the
-        // (skipped) validation, and citation deep-links need it. Filling it
-        // is nearly free when it's already complete (a scan of tiny record
-        // files) and only touches genuinely new files otherwise.
+        // Cache hit — but a hit is a memoized VERDICT, not a pass: a failing
+        // report is cached just like a passing one (both are pure functions of
+        // the key), and this path must refuse exactly like the fresh path
+        // below. Found live 2026-09-03: after one refused `/generate`, every
+        // later one hit this path, sailed past the failing verdict, and died
+        // one layer down in `ground_node` — which reads a resolve failure
+        // after "the gate passed" as an internal inconsistency and shows the
+        // learner "this should not happen" instead of the honest acervo
+        // refusal.
+        if !report.all_pass() {
+            return Err(acervo_refusal(&report));
+        }
+        // S27n's `LibraryFileIndex` write lives inside the (skipped)
+        // validation, and citation deep-links need it. Filling it is nearly
+        // free when it's already complete (a scan of tiny record files) and
+        // only touches genuinely new files otherwise.
         ensure_library_file_index(state, &report).await?;
         return Ok(());
     }
@@ -1679,21 +1713,7 @@ pub(super) async fn ensure_document_grounded(
         .insert((signature, expected_fp), report.clone());
 
     if !report.all_pass() {
-        let failing: Vec<String> = report
-            .failing_items()
-            .iter()
-            .map(|r| {
-                format!(
-                    "\"{}\" ({})",
-                    r.expected.title,
-                    r.blocking_failures().join(", ")
-                )
-            })
-            .collect();
-        return Err(format!(
-            "the acervo gate isn't clear yet — check it before this document can generate: {}",
-            failing.join("; ")
-        ));
+        return Err(acervo_refusal(&report));
     }
 
     // S27k: the printed-contents-page deduction pass. Runs here — right
@@ -1957,6 +1977,14 @@ pub(super) async fn acervo_signature(state: &AppState) -> Result<u64, String> {
         fold_dir(&data_dir.join("library"));
         fold_dir(&data_dir.join("index").join("manual_matches"));
         fold_dir(&data_dir.join("index").join("toc"));
+        // S32 (2026-09-03): the validation's parses are served from the
+        // pdftext cache, so the report is a function of those entries too —
+        // `read_pdf_cached`'s one-time /Info backfill of legacy entries
+        // rewrites them (flipping presence/identity from Missing to Found
+        // for books whose title lives only in /Info metadata), and a memo
+        // keyed without this directory would keep serving the pre-backfill
+        // verdict until restart. Cheap: one readdir of small JSON files.
+        fold_dir(&data_dir.join("index").join("pdftext"));
         Ok(hasher.finish())
     })
     .await

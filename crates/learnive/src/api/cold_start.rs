@@ -1248,6 +1248,37 @@ pub struct DocumentSummary {
     resume_node_id: Option<String>,
 }
 
+/// The document's resume target: the newest main-line item whose subtree has
+/// an actual node file on disk, walking main-line items newest first (§S15 —
+/// main-line only, so a resume can't land on an unrelated sub-node), then
+/// descending each item's own subtree via [`engine::resume_leaf`].
+///
+/// A generated-but-now-**locked** leaf is not a resume target (bug reported
+/// live 2026-09-03): its prerequisites no longer hold, so `prepare` refuses
+/// (or redirects into a child the client then mounts above the reader's
+/// actual position) — the worst possible "welcome back". Locked leaves are
+/// skipped and the walk keeps going backwards; if every main-line leaf is
+/// locked, `None` sends the client to its own fallback (the first
+/// `available` item across the whole tree), which is where a document whose
+/// frontier moved into a prerequisite tree actually lives.
+fn resume_target(
+    items: &[OutlineItemView],
+    outline: &Outline,
+    generated: &std::collections::HashSet<String>,
+) -> Option<String> {
+    items
+        .iter()
+        .filter(|i| i.parent_id.is_none())
+        .rev()
+        .find_map(|i| {
+            engine::resume_leaf(outline, generated, &i.id).filter(|leaf| {
+                items
+                    .iter()
+                    .any(|it| &it.id == leaf && it.state != "locked")
+            })
+        })
+}
+
 /// Lists the living documents, most-recently-touched first (§4, §S12).
 ///
 /// This is what makes the app reopen where the last session ended: documents
@@ -1315,11 +1346,12 @@ pub async fn list_documents(
             // item's own subtree, so this can't land on an unrelated
             // sub-node the way removing the `parent_id.is_none()` filter
             // entirely would.
-            resume_node_id: items
-                .iter()
-                .filter(|i| i.parent_id.is_none())
-                .rev()
-                .find_map(|i| engine::resume_leaf(&outline, &generated, &i.id)),
+            // A generated-but-now-LOCKED leaf is not a resume target (bug
+            // reported live 2026-09-03): its prerequisites no longer hold,
+            // so `prepare` refuses (or redirects into a child the client
+            // then mounts above the reader's actual position) — the worst
+            // possible "welcome back". See `resume_target`.
+            resume_node_id: resume_target(&items, &outline, &generated),
         });
     }
     // Most recently touched first — the resume order.
@@ -2089,5 +2121,63 @@ mod tests {
         assert_eq!(confirmed[0].title, "Foundational Work");
         assert_eq!(confirmed[1].title, "Objective Work");
         assert!(confirmed.iter().all(|n| n.action == PrereqAction::Learn));
+    }
+
+    // -- resume_target (S32, bug reported live 2026-09-03) ------------------
+
+    fn view(id: &str, parent: Option<&str>, state: &'static str) -> OutlineItemView {
+        OutlineItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            state,
+            parent_id: parent.map(str::to_string),
+            mode: None,
+            chapter_match_failed: false,
+            item_type: OutlineItemType::Node,
+        }
+    }
+
+    fn empty_outline() -> Outline {
+        Outline {
+            topic: "t".to_string(),
+            items: Vec::new(),
+        }
+    }
+
+    /// A generated-but-now-locked main-line leaf must not become the resume
+    /// target: its prerequisites no longer hold, `prepare` refuses it, and
+    /// the client's page-load auto-generate then mounts a doomed "generating"
+    /// section above the reader's actual position (reported live: a node
+    /// generating above an already generated node).
+    #[test]
+    fn resume_skips_a_generated_but_locked_main_line_leaf() {
+        let items = vec![view("n02", None, "locked")];
+        let generated: std::collections::HashSet<String> = ["n02".to_string()].into();
+        assert_eq!(resume_target(&items, &empty_outline(), &generated), None);
+    }
+
+    /// The walk keeps going backwards past a locked leaf: an older main-line
+    /// leaf that is actually reachable still resumes.
+    #[test]
+    fn resume_walks_back_past_a_locked_leaf_to_an_unlocked_one() {
+        let items = vec![view("n01", None, "available"), view("n02", None, "locked")];
+        let generated: std::collections::HashSet<String> =
+            ["n01".to_string(), "n02".to_string()].into();
+        assert_eq!(
+            resume_target(&items, &empty_outline(), &generated),
+            Some("n01".to_string())
+        );
+    }
+
+    /// A reachable (unlocked) generated leaf resumes as before — the filter
+    /// must not regress the normal "continue where you left off" case.
+    #[test]
+    fn resume_still_picks_an_unlocked_generated_leaf() {
+        let items = vec![view("n01", None, "available")];
+        let generated: std::collections::HashSet<String> = ["n01".to_string()].into();
+        assert_eq!(
+            resume_target(&items, &empty_outline(), &generated),
+            Some("n01".to_string())
+        );
     }
 }

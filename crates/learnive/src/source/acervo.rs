@@ -329,15 +329,23 @@ pub fn validate_acervo(
     )
 }
 
-/// Which of the six checks is currently running for one item — surfaced so a
+/// Which stage of the validation an item is waiting on — surfaced so a
 /// caller (S27f's report screen, live-reported 2026-08-29: "a tela de
 /// checando acervo deveria reportar progresso") can show the user something
 /// other than a blank wait while every PDF in a real library gets parsed.
-/// Presence isn't its own phase here — finding (or failing to find) a
+/// Presence isn't its own check phase here — finding (or failing to find) a
 /// candidate is the precondition for every other check, reported once as
 /// part of starting an item, not as a phase transition of its own.
+/// `Scanning` is likewise not one of the six checks: it covers the shared
+/// `load_candidates` pass (read + hash + parse of every PDF in the library,
+/// once, before any per-item check runs), which on a real library is the
+/// longest single stretch of the whole validation — reported against every
+/// item at once, since they all wait on it (bug reported live 2026-09-03:
+/// that stretch used to emit nothing, so the report screen sat every row on
+/// its initial "Queued…" label for its whole duration).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcervoPhase {
+    Scanning,
     Presence,
     Identity,
     TextLayer,
@@ -352,6 +360,7 @@ impl AcervoPhase {
     /// reuses one vocabulary for "in progress" and "done".
     pub fn as_str(self) -> &'static str {
         match self {
+            AcervoPhase::Scanning => "scanning",
             AcervoPhase::Presence => "presence",
             AcervoPhase::Identity => "identity",
             AcervoPhase::TextLayer => "text_layer",
@@ -375,9 +384,11 @@ pub struct AcervoProgress {
 /// so this module stays free of any async/tokio dependency (mirrors the
 /// rest of `source`); a caller that needs to stream progress across an
 /// `.await` point (S27f's SSE report endpoint) sends from inside the
-/// callback into whatever channel it owns. Ordering is deterministic: items
-/// in `expected` order, phases in the same presence→identity→text_layer→
-/// toc→page_map→index order the six checks are documented in above.
+/// callback into whatever channel it owns. Ordering is deterministic: one
+/// `Scanning` tick per item first (in `expected` order — the shared library
+/// scan they all wait on), then per item in `expected` order, phases in the
+/// same presence→identity→text_layer→toc→page_map→index order the six
+/// checks are documented in above.
 pub fn validate_acervo_with_progress(
     library: &LocalPdfSource,
     expected: &[ExpectedItem],
@@ -386,6 +397,20 @@ pub fn validate_acervo_with_progress(
     file_index: Option<&LibraryFileIndex>,
     mut on_progress: impl FnMut(AcervoProgress),
 ) -> std::io::Result<AcervoReport> {
+    // One `Scanning` tick per item up front, before the shared library scan
+    // below: `load_candidates` reads, hashes, and parses EVERY PDF once,
+    // before any per-item check runs, and on a real library that is the
+    // longest single stretch of the whole pass — silent until now, so the
+    // report screen spent it with every row on "Queued…" (bug reported live
+    // 2026-09-03). Every item genuinely is waiting on this scan, so the
+    // label is true for all rows at once; the per-item `Presence` tick
+    // follows as soon as the scan finishes.
+    for item in expected {
+        on_progress(AcervoProgress {
+            title: item.title.clone(),
+            phase: AcervoPhase::Scanning,
+        });
+    }
     let candidates = load_candidates(library)?;
     let index_cache_dir = index_cache_dir.as_ref();
     // S27n: every candidate's hash is already computed above (`load_candidates`)
@@ -456,7 +481,11 @@ fn load_candidates(library: &LocalPdfSource) -> std::io::Result<Vec<LibraryCandi
             // the module's "one bad file must not sink the batch" stance.
             continue;
         };
-        let (meta_title, meta_author) = read_info_metadata(&path);
+        // From the (possibly cached) document itself, NOT from a second
+        // `lopdf::Document::load` — S32, bug reported live 2026-09-03: the
+        // metadata reparse kept a warm, fully-indexed library paying a full
+        // structural parse of every book on every validation pass.
+        let (meta_title, meta_author) = (pdf.meta_title.clone(), pdf.meta_author.clone());
         out.push(LibraryCandidate {
             entry,
             hash,
@@ -1010,32 +1039,17 @@ pub(crate) fn content_hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Reads `/Info` dictionary `Title`/`Author` strings, when present. Loads its
-/// own `lopdf::Document` rather than extending [`PdfDocument`] with metadata
-/// fields — keeps `pdf.rs`'s existing shape (text/outline/pages, all it
-/// promises today) untouched, at the cost of parsing the PDF a second time.
-/// Fine for a validation pass that runs once per library item, not a hot
-/// path. `pub(crate)`: also the ensure-pass writer in `api::reading`, which
-/// fills genuinely-new `LibraryFileRecord`s on the memoized gate's cache
-/// hits.
+/// Reads `/Info` dictionary `Title`/`Author` strings, when present. A thin
+/// alias for `pdf::read_info_metadata` (the one implementation since S32,
+/// 2026-09-03 — the trailer walk used to be duplicated here). A full
+/// `lopdf` parse, so NOT for validation passes: `load_candidates` reads
+/// metadata off the (cached) [`PdfDocument`] itself, and this remains only
+/// for callers with no parsed document in hand — the S31
+/// `ensure_library_file_index` backfill in `api::reading` and
+/// `pdf::read_pdf_cached`'s one-time probe of legacy entries (see
+/// `pdf::PdfDocument::meta_probed`).
 pub(crate) fn read_info_metadata(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(doc) = lopdf::Document::load(path) else {
-        return (None, None);
-    };
-    let info_dict = doc
-        .trailer
-        .get(b"Info")
-        .ok()
-        .and_then(|o| o.as_reference().ok())
-        .and_then(|id| doc.get_object(id).ok())
-        .and_then(|o| o.as_dict().ok());
-    let field = |name: &[u8]| {
-        info_dict
-            .and_then(|d| d.get(name).ok())
-            .and_then(|o| o.as_str().ok())
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-    };
-    (field(b"Title"), field(b"Author"))
+    super::pdf::read_info_metadata(path)
 }
 
 /// How strongly one library candidate matches an expected item, for the
@@ -2007,5 +2021,59 @@ mod tests {
             }]]
         );
         assert_eq!(unmatched, vec!["baking.pdf".to_string()]);
+    }
+
+    /// The report screen's per-item phase text is driven by these ticks.
+    /// The shared library scan (`load_candidates` — read + hash + parse of
+    /// every PDF, before any per-item check runs) is the longest single
+    /// stretch of a real validation and used to emit nothing, so the screen
+    /// spent its whole duration with every row on the initial "Queued…"
+    /// label (bug reported live 2026-09-03). Every item must get a
+    /// `Scanning` tick first, in expected order, before any check phase.
+    #[test]
+    fn progress_starts_with_one_scanning_tick_per_item_before_any_check() {
+        let (mut doc, _pages) = build_document(
+            &["A textbook by Michael Sipser."],
+            Some("Introduction to the Theory of Computation"),
+            Some("Michael Sipser"),
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "sipser.pdf");
+
+        let expected = vec![
+            ExpectedItem {
+                title: "Introduction to the Theory of Computation".into(),
+                authors: vec!["Michael Sipser".into()],
+                kind: SourceKind::Book,
+            },
+            // Deliberately present only as an expected item — its row still
+            // needs a Scanning tick (it waits on the same shared scan), and
+            // its checks end at Presence since nothing matches it.
+            ExpectedItem {
+                title: "A Book Nobody Has".into(),
+                authors: vec![],
+                kind: SourceKind::Book,
+            },
+        ];
+
+        let mut ticks = Vec::new();
+        validate_acervo_with_progress(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, |p| {
+            ticks.push(p)
+        })
+        .expect("validate");
+
+        assert_eq!(ticks[0].phase, AcervoPhase::Scanning);
+        assert_eq!(ticks[0].title, "Introduction to the Theory of Computation");
+        assert_eq!(ticks[1].phase, AcervoPhase::Scanning);
+        assert_eq!(ticks[1].title, "A Book Nobody Has");
+        // The scan's ticks come first, and the first per-item check phase
+        // belongs to the first item, not a second burst of Scanning.
+        assert_eq!(ticks[2].phase, AcervoPhase::Presence);
+        assert_eq!(ticks[2].title, "Introduction to the Theory of Computation");
+        assert!(
+            ticks
+                .iter()
+                .skip(2)
+                .all(|t| t.phase != AcervoPhase::Scanning)
+        );
     }
 }

@@ -162,6 +162,33 @@ pub struct PdfDocument {
     /// Only computed when extraction produced nothing, so a healthy book
     /// never pays for the scan.
     pub text_layer_unreadable: bool,
+    /// `/Info` `Title`, read in the same `lopdf` pass that produces the
+    /// outline and page map. Carried here so the content-hash cache below
+    /// carries it too (S32, bug reported live 2026-09-03): `load_candidates`
+    /// used to call `read_info_metadata` — a SECOND full `lopdf::Document::
+    /// load` per file, per validation — even when everything else came from
+    /// this cache, so a warm, fully-indexed library still paid a full
+    /// structural reparse of every book on every pass. `#[serde(default)]`
+    /// because entries written before this field existed must keep loading.
+    #[serde(default)]
+    pub meta_title: Option<String>,
+    /// `/Info` `Author` — same rationale as [`Self::meta_title`].
+    #[serde(default)]
+    pub meta_author: Option<String>,
+    /// Whether [`Self::meta_title`]/[`Self::meta_author`] were actually read
+    /// from the file's `/Info` dictionary — `true` for every entry
+    /// [`read_pdf`] produced (the same `lopdf` pass that parses the document
+    /// reads `/Info`), and `false` only for entries written before the
+    /// metadata fields existed. That distinction is load-bearing: `None`
+    /// alone can't distinguish "the PDF has no `/Info` title" from "this
+    /// entry predates the field", and the difference matters — a scanned
+    /// book whose first page extracts with per-glyph spacing ("C ALCULUS",
+    /// Stewart, reported live 2026-09-03) has NO clean title in its text, so
+    /// `/Info` is the only signal the acervo matching layers have. An
+    /// unprobed entry gets exactly one probe-and-rewrite in
+    /// [`read_pdf_cached`], never a reparse per validation.
+    #[serde(default)]
+    pub meta_probed: bool,
 }
 
 /// A genuinely unreadable/corrupt PDF — the only failure mode this module
@@ -205,6 +232,7 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
     let page_count = doc.get_pages().len();
     let outline = read_outline(&doc);
     let labels = read_page_labels(&doc);
+    let (meta_title, meta_author) = read_info(&doc);
     // `pdf_extract::extract_text{,_by_pages}` doesn't just return `Err` on a
     // malformed content stream — a real library PDF (reported live,
     // 2026-08-29) hit a content operator (`w`, set line width) with zero
@@ -239,7 +267,50 @@ pub fn read_pdf(path: impl AsRef<Path>) -> Result<PdfDocument, PdfReadError> {
         outline,
         pages: PageMap { page_count, labels },
         text_layer_unreadable,
+        // Read from the same already-loaded document — no extra parse (see
+        // `meta_probed` for why recording that fact matters).
+        meta_title,
+        meta_author,
+        meta_probed: true,
     })
+}
+
+/// `/Info` `Title`/`Author` from an already-loaded document — the part of
+/// `read_pdf`'s single `lopdf` pass that used to be paid for a second time
+/// per validation by `read_info_metadata`'s own `Document::load` (see
+/// [`PdfDocument::meta_title`]). Mirrors `source::acervo`'s path-based
+/// version, which remains only for callers that have no parsed document in
+/// hand (the rare `ensure_library_file_index` backfill).
+fn read_info(doc: &lopdf::Document) -> (Option<String>, Option<String>) {
+    let info_dict = doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok())
+        .and_then(|id| doc.get_object(id).ok())
+        .and_then(|o| o.as_dict().ok());
+    let field = |name: &[u8]| {
+        info_dict
+            .and_then(|d| d.get(name).ok())
+            .and_then(|o| o.as_str().ok())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+    };
+    (field(b"Title"), field(b"Author"))
+}
+
+/// Path-based variant of [`read_info`] for callers holding only a file path:
+/// one `lopdf` load, then the same trailer walk. A full structural parse, so
+/// NOT for validation passes — those get metadata from the (cached)
+/// [`PdfDocument`] itself. Its two remaining callers are one-shot backfills:
+/// `api::reading`'s `ensure_library_file_index` (S31) and
+/// [`read_pdf_cached`]'s one-time probe of entries written before the
+/// metadata fields existed (S32, 2026-09-03 — see
+/// [`PdfDocument::meta_probed`]).
+pub(crate) fn read_info_metadata(path: &Path) -> (Option<String>, Option<String>) {
+    match lopdf::Document::load(path) {
+        Ok(doc) => read_info(&doc),
+        Err(_) => (None, None),
+    }
 }
 
 /// Sibling of the acervo gate's other content-hash-keyed caches
@@ -283,8 +354,33 @@ pub fn read_pdf_cached(
     let cache_path = cache_dir.join(format!("{hash}.json"));
 
     if let Ok(cached_bytes) = fs::read(&cache_path)
-        && let Ok(cached) = serde_json::from_slice::<PdfDocument>(&cached_bytes)
+        && let Ok(mut cached) = serde_json::from_slice::<PdfDocument>(&cached_bytes)
     {
+        // S32 follow-up (bug reported live 2026-09-03): entries written
+        // before `meta_title`/`meta_author` existed load with both `None`,
+        // and for a book whose first page extracts with per-glyph spacing
+        // (Stewart's cover: "C ALCULUS") that metadata was the ONLY clean
+        // title/author signal the acervo matching layers had — losing it
+        // flipped a working library to "Missing" and the grounding gate to
+        // "no resolved file". Recovering it costs one `lopdf` metadata parse
+        // per legacy entry, paid ONCE: the entry is rewritten right after
+        // (with `meta_probed: true`), so no later validation reparses.
+        // A PDF with no `/Info` at all probes once, records `meta_probed`
+        // with `None`s, and never probes again.
+        if !cached.meta_probed {
+            let (title, author) = read_info_metadata(path);
+            cached.meta_title = title;
+            cached.meta_author = author;
+            cached.meta_probed = true;
+            if fs::create_dir_all(cache_dir).is_ok()
+                && let Ok(json) = serde_json::to_vec(&cached)
+            {
+                let tmp = cache_path.with_extension("json.tmp");
+                if fs::write(&tmp, &json).is_ok() {
+                    let _ = fs::rename(&tmp, &cache_path);
+                }
+            }
+        }
         return Ok((hash, cached));
     }
 
@@ -1023,6 +1119,9 @@ mod tests {
                 labels: Vec::new(),
             },
             text_layer_unreadable: false,
+            meta_title: Some("Planted Title".to_string()),
+            meta_author: None,
+            meta_probed: true,
         };
         std::fs::write(&cache_path, serde_json::to_vec(&planted).unwrap())
             .expect("plant a fake cache entry");
@@ -1081,5 +1180,99 @@ mod tests {
         let (_, pdf) =
             read_pdf_cached(&path, cache_dir.path()).expect("must reparse, not error out");
         assert!(pdf.text.contains("still readable"));
+    }
+
+    /// A cache entry written BEFORE `meta_title`/`meta_author` existed (the
+    /// shape on disk across the S31→S32 boundary) must keep loading —
+    /// `#[serde(default)]` on the new fields, not a full reparse of every
+    /// book, is what a field addition to a persistent cache costs.
+    #[test]
+    fn read_pdf_cached_still_loads_entries_written_before_the_metadata_fields() {
+        let (mut doc, _) = build_test_document(&["pre-metadata entry"]);
+        let (_dir, path) = save_to_temp(&mut doc, "old-shape-cache.pdf");
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+        let (hash, first) = read_pdf_cached(&path, cache_dir.path()).expect("first read");
+        let cache_path = cache_dir.path().join(format!("{hash}.json"));
+        // Rewrite the entry as the old shape: valid PdfDocument JSON with the
+        // two new fields stripped.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&cache_path).expect("read cache entry"))
+                .expect("entry is valid json");
+        let removed = value
+            .as_object_mut()
+            .expect("entry is an object")
+            .remove("meta_title")
+            .is_some()
+            && value
+                .as_object_mut()
+                .expect("entry is an object")
+                .remove("meta_author")
+                .is_some();
+        assert!(removed, "fixture must actually strip the new fields");
+        std::fs::write(&cache_path, serde_json::to_vec(&value).expect("serialize")).unwrap();
+
+        let (_, second) = read_pdf_cached(&path, cache_dir.path())
+            .expect("an old-shape entry must load, not force a full reparse");
+        assert_eq!(second, first);
+        assert_eq!(second.meta_title, None, "absent field degrades to default");
+    }
+
+    /// S32 follow-up (reported live 2026-09-03): an entry written BEFORE the
+    /// metadata fields existed must be probed exactly once — `/Info`
+    /// recovered into the meta fields, `meta_probed` set — and rewritten, so
+    /// no later validation reparses. Stewart's real cover extracts as
+    /// "C ALCULUS" (per-glyph spacing), so `/Info` was the only clean
+    /// title/author signal the acervo matching layers had; losing it on the
+    /// legacy entries flipped a working library to "Missing" and the
+    /// grounding gate to "no resolved file".
+    #[test]
+    fn read_pdf_cached_probes_and_backfills_the_info_metadata_of_a_legacy_entry() {
+        let (mut doc, _) = build_test_document(&["legacy entry"]);
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Stewart - Calculus - Early Transcedentals 6e"),
+            "Author" => Object::string_literal("James Stewart"),
+        });
+        doc.trailer.set("Info", info_id);
+        let (_dir, path) = save_to_temp(&mut doc, "legacy-meta.pdf");
+        let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+        // Write a modern entry, then downgrade it to the pre-S32 shape: no
+        // meta fields at all (the exact bytes an S31-era binary left on
+        // disk).
+        let (hash, _) = read_pdf_cached(&path, cache_dir.path()).expect("first read");
+        let cache_path = cache_dir.path().join(format!("{hash}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).expect("read cache entry"))
+                .expect("entry is valid json");
+        let obj = value.as_object_mut().expect("entry is an object");
+        let stripped = obj.remove("meta_title").is_some()
+            && obj.remove("meta_author").is_some()
+            && obj.remove("meta_probed").is_some();
+        assert!(stripped, "fixture must actually strip the metadata fields");
+        fs::write(&cache_path, serde_json::to_vec(&value).expect("serialize")).unwrap();
+
+        let (_, backfilled) = read_pdf_cached(&path, cache_dir.path()).expect("second read");
+        assert_eq!(
+            backfilled.meta_title.as_deref(),
+            Some("Stewart - Calculus - Early Transcedentals 6e")
+        );
+        assert_eq!(backfilled.meta_author.as_deref(), Some("James Stewart"));
+        assert!(
+            backfilled.meta_probed,
+            "the probe must mark the entry probed"
+        );
+
+        // The backfill is PERSISTED: the on-disk entry now carries the
+        // recovered metadata and the probed marker, so every later read is a
+        // plain hit — the one-time probe stays one-time.
+        let on_disk: PdfDocument =
+            serde_json::from_slice(&fs::read(&cache_path).expect("re-read cache entry"))
+                .expect("rewritten entry is valid json");
+        assert!(on_disk.meta_probed);
+        assert_eq!(
+            on_disk.meta_title.as_deref(),
+            Some("Stewart - Calculus - Early Transcedentals 6e")
+        );
     }
 }

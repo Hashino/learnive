@@ -1,9 +1,10 @@
-reloading mid acervo checking breaks app
-agent prefer owned books
-validate chapter expasion
-post generation grounding checking
-prefer local library on outline generation
-creating note scrolls to top
+prefer exercises extracted from source
+mechanical moves explain->test->(schedule spaced repetition)->loop
+better annotation: google docs style
+does initial "generating..." mean checking chapter?
+manual opening of split view pdf viewer
+prefer owned books for reading list generation
+bug: creating note scrolls to top
 reload mid generation restarts generation
 close reader button appearing when closed
 determistic citations at top of node
@@ -12,11 +13,5 @@ configurable data dir
 fix 18 failing tests
 console error: thread 'tokio-rt-worker' (1733803) panicked at /home/hashino/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pdf-extract-0.12.0/src/lib.rs:1801:81: index out of bounds: the len is 0 but the index is 0
 change default data dir to sensible (OS specific) appdata dir
-persistent mentions of a programming methodology study
-outline didn't break book into chapters and chapters into nodes
-latex doesn't render immediately
-check again button should only appear after checking fails
+reloading mid acervo checking breaks app
 closing app mid cold start starts generating without grounding
-remove lock emoji from locked nodes in outline
-citations+sources
-improve split view for sources

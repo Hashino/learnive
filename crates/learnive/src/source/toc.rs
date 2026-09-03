@@ -425,6 +425,9 @@ mod tests {
             page_texts,
             outline: Vec::new(),
             pages: PageMap::default(),
+            meta_title: None,
+            meta_author: None,
+            meta_probed: true,
         }
     }
 
