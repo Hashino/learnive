@@ -1097,6 +1097,21 @@ body.source-resizing #askBar {
 .prose cite:hover {
   color: var(--link-hover);
 }
+/* The model emits `<cite>` EMPTY — the locator lives in `data-locator`
+   only (CITE_CONTRACT, `engine::prompt`), and an empty inline element has
+   zero width: without this pseudo-content the citation renders as
+   nothing at all, invisible AND unclickable (S34-B, live 2026-09-03 —
+   eight correct cites in a generated node, none visible). Surfacing the
+   locator itself ("p:147") is the honest minimal fix: it tells the
+   learner where the claim lives, gives the element real width and a
+   real click target, and needs no sanitizer or contract change. */
+.prose cite::before {
+  content: attr(data-locator);
+  font-size: 0.72em;
+  vertical-align: super;
+  letter-spacing: 0.02em;
+  margin: 0 0.1em;
+}
 /* A spawned sub-node (§S8), spliced permanently into the reading flow
    right after the paragraph that prompted it — not a toggle, always
    rendered. The left border marks it as a distinct section without

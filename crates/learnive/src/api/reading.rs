@@ -1658,6 +1658,50 @@ pub(super) async fn ensure_document_grounded(
         // free when it's already complete (a scan of tiny record files) and
         // only touches genuinely new files otherwise.
         ensure_library_file_index(state, &report).await?;
+        // S34-A (2026-09-03, doc rmklzfy56r): a memo hit used to return
+        // here — before the S27k/S27g structural passes ever ran on THIS
+        // document, and if the first validation had been memoized by the
+        // report panel's auto-open, no later `/generate` ever ran them at
+        // all: every chapter stayed `resolved_page: None` forever, the
+        // split never fired, and grounding fell back to whole-book
+        // retrieval. The passes are functions of the OUTLINE, not of the
+        // validation — run them on the memoized report's needs list,
+        // exactly as the fresh path does below.
+        let needs_toc_deduction: Vec<source::ExpectedItem> = report
+            .items
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.toc,
+                    source::TocCheck::Heuristic { .. } | source::TocCheck::Unavailable
+                )
+            })
+            .map(|r| r.expected.clone())
+            .collect();
+        let has_outline_work = !needs_toc_deduction.is_empty()
+            || outline
+                .items
+                .iter()
+                .any(|i| matches!(i.expansion, ExpansionState::ChaptersProposed));
+        if has_outline_work {
+            let library = source::LocalPdfSource::open(state.data_dir.as_ref())
+                .map_err(|e| format!("could not open local library: {e}"))?;
+            let manual = source::ManualMatchStore::open(state.data_dir.as_ref())
+                .map_err(|e| format!("could not open manual-match store: {e}"))?;
+            let toc_confirm_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+                .join("index")
+                .join("toc");
+            resolve_outline_structure(
+                state,
+                doc_id,
+                outline,
+                &library,
+                &manual,
+                &toc_confirm_dir,
+                &needs_toc_deduction,
+            )
+            .await?;
+        }
         return Ok(());
     }
     let gate_started = std::time::Instant::now();
@@ -1716,22 +1760,12 @@ pub(super) async fn ensure_document_grounded(
         return Err(acervo_refusal(&report));
     }
 
-    // S27k: the printed-contents-page deduction pass. Runs here — right
-    // after the gate's pass/fail check and BEFORE the index-cache-build
-    // early-returns below — because it has no dependency on embeddings or
-    // on any cache being missing. Putting it after those returns (as an
-    // earlier revision of this function did) made it dead code on every
-    // run after the first: once every item's retrieval-index cache exists,
-    // `missing_index.is_empty()` returns `Ok(())` before this ever ran.
-    // Lives here, not inside `source::acervo::check_toc` (that module
-    // stays free of `Ai`/tokio) — this is the one call site in the whole
-    // gate that already has both an `Ai` provider and blocking file I/O
-    // available. Never gates anything (`TocCheck` is never in
-    // `blocking_failures`, per SPEC's "nenhum PDF é rejeitado por não ter
-    // bookmarks") and never hard-fails the document: a missing/unconfigured
-    // provider, an unreadable contents page, or a resolution below
-    // `is_resolution_acceptable`'s floor all degrade silently to the
-    // existing heading-heuristic/user-confirmation net.
+    // S34-A (bug reported live 2026-09-03, doc rmklzfy56r): BOTH structural
+    // passes below (S27k TOC deduction + S27g chapter-name resolution) are
+    // functions of the OUTLINE and of per-book TOC state — not of the
+    // validation verdict — so they must run on the memo-hit path too, not
+    // only here. They live in `resolve_outline_structure`; this fresh path
+    // hands it the needs list the fresh report just computed.
     let needs_toc_deduction: Vec<source::ExpectedItem> = report
         .items
         .iter()
@@ -1743,147 +1777,16 @@ pub(super) async fn ensure_document_grounded(
         })
         .map(|r| r.expected.clone())
         .collect();
-    if !needs_toc_deduction.is_empty() {
-        let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir)
-            .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
-        let ai = state.ai.load_full();
-        for item in &needs_toc_deduction {
-            let Ok(Some(filename)) = source::resolve_matched_filename(&library, &manual, item)
-            else {
-                continue;
-            };
-            let path = library.root().join(&filename);
-            let Ok((hash, pdf)) =
-                source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
-            else {
-                continue;
-            };
-            let Some(range) = source::toc::find_contents_pages(&pdf) else {
-                continue;
-            };
-            let contents_pages = source::toc::contents_page_chunks(&pdf, range);
-            let Ok(llm_entries) = engine::propose_toc(&ai, &contents_pages).await else {
-                continue;
-            };
-            let resolution = source::toc::resolve_toc(&pdf, &llm_entries, range.1);
-            if source::toc::is_resolution_acceptable(&resolution) {
-                let _ = toc_confirm.put_deduced(&hash, &resolution);
-            }
-        }
-    }
-
-    // S27g (2026-08-30): chapter-name resolution — for every Book/Article
-    // item whose `propose_outline`-time `Chapter` children haven't been
-    // matched against this book's real table of contents yet
-    // (`ExpansionState::ChaptersProposed`), resolve each proposed chapter's
-    // number/name against the book's confirmed TOC (S27k — which the
-    // deduction pass right above may have just populated) and record the
-    // resolved physical page on the child item. Degrades silently, the same
-    // convention as the rest of this cascade: a book whose TOC isn't
-    // confirmed yet (no embedded outline, deduction not yet acceptable,
-    // nobody's answered the S27f confirmation screen) is left untouched and
-    // retried on a later call; a chapter that matches nothing keeps
-    // generating unnarrowed (its proposed title stands in, `resolved_page:
-    // None`) rather than being blocked — this step is citation quality, not
-    // gating (scope was already fixed at cold start, PLAN.md's 2026-08-29
-    // revision: "a SELEÇÃO de escopo acontece na lista de leitura").
-    let needs_chapter_match: Vec<&OutlineItem> = outline
-        .items
-        .iter()
-        .filter(|i| matches!(i.expansion, ExpansionState::ChaptersProposed))
-        .collect();
-    if !needs_chapter_match.is_empty() {
-        let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir)
-            .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
-        // (book id, [(chapter id, resolved physical page)]) — computed here,
-        // outside the outline-mutating closure below, since resolution needs
-        // blocking file reads this closure (locked, synchronous) must not do.
-        type ChapterResolutions = Vec<(String, Vec<(String, Option<usize>)>)>;
-        let mut resolutions: ChapterResolutions = Vec::new();
-        for book in &needs_chapter_match {
-            let Some(ptr) = &book.source else { continue };
-            let expected = source::ExpectedItem {
-                title: ptr.item.title.clone(),
-                authors: ptr.item.authors.clone(),
-                kind: ptr.item.kind,
-            };
-            let Ok(Some(filename)) = source::resolve_matched_filename(&library, &manual, &expected)
-            else {
-                continue;
-            };
-            let path = library.root().join(&filename);
-            let Ok((hash, pdf)) =
-                source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
-            else {
-                continue;
-            };
-            // S27o follow-up (bug reported live 2026-08-31): a book with
-            // real embedded PDF bookmarks (`TocCheck::Embedded` — most
-            // well-formed textbooks, including Stewart/K&R/SICP per
-            // `toc_bench`'s own measurements) never gets its hash into
-            // `toc_confirm` — only the S27k deduction path
-            // (`Heuristic`/`Unavailable`) ever calls `put`/`put_deduced`.
-            // Falling straight to `continue` here left every embedded-TOC
-            // book's chapters permanently unresolved (`resolved_page` stuck
-            // at `None` forever) AND, because `resolutions` never gained an
-            // entry for the book, `expansion` never left `ChaptersProposed`
-            // — so this whole block re-ran, uselessly, on EVERY `/generate`
-            // request for the document's entire lifetime (the reported
-            // "grounding starts empty, Research fires every time" bug).
-            // Prefer the PDF's own embedded bookmarks when present; only
-            // fall back to the confirmed-deduction store when there are
-            // none to flatten.
-            let entries: Vec<source::ConfirmedTocEntry> = if !pdf.outline.is_empty() {
-                let mut flat = Vec::new();
-                flatten_embedded_outline(&pdf.outline, &mut flat);
-                flat
-            } else {
-                let Some(confirmed) = toc_confirm.get(&hash) else {
-                    continue;
-                };
-                confirmed.entries
-            };
-            let chapters: Vec<(String, Option<usize>)> = outline
-                .items
-                .iter()
-                .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
-                .map(|chapter| {
-                    let page = source::match_chapter(
-                        &entries,
-                        chapter.chapter_number.as_deref(),
-                        &chapter.title,
-                    )
-                    .and_then(|hit| hit.page);
-                    (chapter.id.clone(), page)
-                })
-                .collect();
-            resolutions.push((book.id.clone(), chapters));
-        }
-        if !resolutions.is_empty() {
-            state
-                .store
-                .update_outline_file(doc_id, |json| {
-                    let mut outline: Outline =
-                        serde_json::from_str(json).map_err(|e| e.to_string())?;
-                    for (book_id, chapters) in &resolutions {
-                        if let Some(book_item) = outline.items.iter_mut().find(|i| &i.id == book_id)
-                        {
-                            book_item.expansion = ExpansionState::Expanded;
-                        }
-                        for (chapter_id, page) in chapters {
-                            let Some(page) = page else { continue };
-                            if let Some(chapter_item) =
-                                outline.items.iter_mut().find(|i| &i.id == chapter_id)
-                            {
-                                chapter_item.resolved_page = Some(*page);
-                            }
-                        }
-                    }
-                    serde_json::to_string(&outline).map_err(|e| e.to_string())
-                })
-                .map_err(|e| format!("could not persist chapter resolution: {e}"))?;
-        }
-    }
+    resolve_outline_structure(
+        state,
+        doc_id,
+        outline,
+        &library,
+        &manual,
+        &toc_confirm_dir,
+        &needs_toc_deduction,
+    )
+    .await?;
 
     let missing_index: Vec<&source::ExpectedItem> = report
         .items
@@ -1932,6 +1835,182 @@ pub(super) async fn ensure_document_grounded(
         missing_index.len(),
         gate_started.elapsed().as_secs_f32()
     );
+    Ok(())
+}
+
+/// The gate's two STRUCTURAL passes — the parts whose input is the outline
+/// and per-book TOC state, not the validation verdict — so they run
+/// identically on the fresh path and the memo-hit path of
+/// [`ensure_document_grounded`]. Found live 2026-09-03 (S34-A, doc
+/// rmklzfy56r): both used to live only after the fresh validation, and the
+/// memo-hit early return skipped them forever — a document whose FIRST
+/// validation was memoized (the report panel's auto-open does exactly that,
+/// moments after creation) never resolved any chapter's page, so the
+/// chapter split (`resolved_page.is_some()` gate) never fired, the
+/// chapter-match refusal never applied (the book never reached
+/// `Expanded`), and `ground_node` fell back to whole-book retrieval with
+/// thin, banner-flagged grounding.
+///
+/// Pass 1 — S27k: the printed-contents-page deduction, for every expected
+/// item whose `TocCheck` came back `Heuristic`/`Unavailable` (`needs`
+/// comes from the caller, derived from whichever report is authoritative
+/// on THIS call — fresh or memoized). Lives here, not inside
+/// `source::acervo::check_toc` (that module stays free of `Ai`/tokio).
+/// Never gates anything (`TocCheck` is never in `blocking_failures`, per
+/// SPEC's "nenhum PDF é rejeitado por não ter bookmarks") and never
+/// hard-fails the document: a missing/unconfigured provider, an unreadable
+/// contents page, or a resolution below `is_resolution_acceptable`'s floor
+/// all degrade silently to the existing heading-heuristic/user-
+/// confirmation net.
+///
+/// Pass 2 — S27g (2026-08-30): chapter-name resolution — for every
+/// Book/Article item whose `propose_outline`-time `Chapter` children
+/// haven't been matched against this book's real table of contents yet
+/// (`ExpansionState::ChaptersProposed`), resolve each proposed chapter's
+/// number/name against the book's confirmed TOC (S27k — which pass 1 may
+/// have just populated) and record the resolved physical page on the child
+/// item. Degrades silently, the same convention as the rest of this
+/// cascade: a book whose TOC isn't confirmed yet (no embedded outline,
+/// deduction not yet acceptable, nobody's answered the S27f confirmation
+/// screen) is left untouched and retried on a later call; a chapter that
+/// matches nothing keeps generating unnarrowed (its proposed title stands
+/// in, `resolved_page: None`) rather than being blocked — this step is
+/// citation quality, not gating (scope was already fixed at cold start,
+/// PLAN.md's 2026-08-29 revision: "a SELEÇÃO de escopo acontece na lista
+/// de leitura").
+async fn resolve_outline_structure(
+    state: &AppState,
+    doc_id: &str,
+    outline: &Outline,
+    library: &source::LocalPdfSource,
+    manual: &source::ManualMatchStore,
+    toc_confirm_dir: &std::path::Path,
+    needs_toc_deduction: &[source::ExpectedItem],
+) -> Result<(), String> {
+    if !needs_toc_deduction.is_empty() {
+        let toc_confirm = source::TocConfirmStore::open_at(toc_confirm_dir)
+            .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
+        let ai = state.ai.load_full();
+        for item in needs_toc_deduction {
+            let Ok(Some(filename)) = source::resolve_matched_filename(library, manual, item) else {
+                continue;
+            };
+            let path = library.root().join(&filename);
+            let Ok((hash, pdf)) =
+                source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+            else {
+                continue;
+            };
+            let Some(range) = source::toc::find_contents_pages(&pdf) else {
+                continue;
+            };
+            let contents_pages = source::toc::contents_page_chunks(&pdf, range);
+            let Ok(llm_entries) = engine::propose_toc(&ai, &contents_pages).await else {
+                continue;
+            };
+            let resolution = source::toc::resolve_toc(&pdf, &llm_entries, range.1);
+            if source::toc::is_resolution_acceptable(&resolution) {
+                let _ = toc_confirm.put_deduced(&hash, &resolution);
+            }
+        }
+    }
+
+    let needs_chapter_match: Vec<&OutlineItem> = outline
+        .items
+        .iter()
+        .filter(|i| matches!(i.expansion, ExpansionState::ChaptersProposed))
+        .collect();
+    if needs_chapter_match.is_empty() {
+        return Ok(());
+    }
+    let toc_confirm = source::TocConfirmStore::open_at(toc_confirm_dir)
+        .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
+    // (book id, [(chapter id, resolved physical page)]) — computed here,
+    // outside the outline-mutating closure below, since resolution needs
+    // blocking file reads this closure (locked, synchronous) must not do.
+    type ChapterResolutions = Vec<(String, Vec<(String, Option<usize>)>)>;
+    let mut resolutions: ChapterResolutions = Vec::new();
+    for book in &needs_chapter_match {
+        let Some(ptr) = &book.source else { continue };
+        let expected = source::ExpectedItem {
+            title: ptr.item.title.clone(),
+            authors: ptr.item.authors.clone(),
+            kind: ptr.item.kind,
+        };
+        let Ok(Some(filename)) = source::resolve_matched_filename(library, manual, &expected)
+        else {
+            continue;
+        };
+        let path = library.root().join(&filename);
+        let Ok((hash, pdf)) =
+            source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
+        else {
+            continue;
+        };
+        // S27o follow-up (bug reported live 2026-08-31): a book with
+        // real embedded PDF bookmarks (`TocCheck::Embedded` — most
+        // well-formed textbooks, including Stewart/K&R/SICP per
+        // `toc_bench`'s own measurements) never gets its hash into
+        // `toc_confirm` — only the S27k deduction path
+        // (`Heuristic`/`Unavailable`) ever calls `put`/`put_deduced`.
+        // Falling straight to `continue` here left every embedded-TOC
+        // book's chapters permanently unresolved (`resolved_page` stuck
+        // at `None` forever) AND, because `resolutions` never gained an
+        // entry for the book, `expansion` never left `ChaptersProposed`
+        // — so this whole block re-ran, uselessly, on EVERY `/generate`
+        // request for the document's entire lifetime (the reported
+        // "grounding starts empty, Research fires every time" bug).
+        // Prefer the PDF's own embedded bookmarks when present; only
+        // fall back to the confirmed-deduction store when there are
+        // none to flatten.
+        let entries: Vec<source::ConfirmedTocEntry> = if !pdf.outline.is_empty() {
+            let mut flat = Vec::new();
+            flatten_embedded_outline(&pdf.outline, &mut flat);
+            flat
+        } else {
+            let Some(confirmed) = toc_confirm.get(&hash) else {
+                continue;
+            };
+            confirmed.entries
+        };
+        let chapters: Vec<(String, Option<usize>)> = outline
+            .items
+            .iter()
+            .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
+            .map(|chapter| {
+                let page = source::match_chapter(
+                    &entries,
+                    chapter.chapter_number.as_deref(),
+                    &chapter.title,
+                )
+                .and_then(|hit| hit.page);
+                (chapter.id.clone(), page)
+            })
+            .collect();
+        resolutions.push((book.id.clone(), chapters));
+    }
+    if !resolutions.is_empty() {
+        state
+            .store
+            .update_outline_file(doc_id, |json| {
+                let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
+                for (book_id, chapters) in &resolutions {
+                    if let Some(book_item) = outline.items.iter_mut().find(|i| &i.id == book_id) {
+                        book_item.expansion = ExpansionState::Expanded;
+                    }
+                    for (chapter_id, page) in chapters {
+                        let Some(page) = page else { continue };
+                        if let Some(chapter_item) =
+                            outline.items.iter_mut().find(|i| &i.id == chapter_id)
+                        {
+                            chapter_item.resolved_page = Some(*page);
+                        }
+                    }
+                }
+                serde_json::to_string(&outline).map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("could not persist chapter resolution: {e}"))?;
+    }
     Ok(())
 }
 

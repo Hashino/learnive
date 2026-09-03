@@ -1219,4 +1219,187 @@ mod tests {
             "the refusal must name the failing item: {err}"
         );
     }
+
+    /// S34-A regression, reported live 2026-09-03 (doc rmklzfy56r): the
+    /// memo-hit path used to return BEFORE the S27g chapter-resolution
+    /// pass. A document whose first validation was memoized (the report
+    /// panel's auto-open does exactly that, moments after creation) never
+    /// resolved its chapters' pages on any later `/generate` — the split
+    /// never fired (`resolved_page.is_some()` is its trigger) and
+    /// grounding fell back to whole-book retrieval. A PASSING memoized
+    /// verdict must still run resolution: chapters gain `resolved_page`
+    /// and the book leaves `ChaptersProposed`.
+    #[tokio::test]
+    async fn a_memoized_passing_report_still_resolves_chapter_pages() {
+        let (_dir, state) = test_state();
+        let mut book = book_item("book1", "Structures Book", &["Ada Author"]);
+        book.expansion = ExpansionState::ChaptersProposed;
+        let mut ch1 = book_item("ch1", "First Ideas", &["Ada Author"]);
+        ch1.item_type = OutlineItemType::Chapter;
+        ch1.parent_id = Some("book1".to_string());
+        ch1.chapter_number = Some("1".to_string());
+        let mut ch2 = book_item("ch2", "Later Ideas", &["Ada Author"]);
+        ch2.item_type = OutlineItemType::Chapter;
+        ch2.parent_id = Some("book1".to_string());
+        ch2.chapter_number = Some("2".to_string());
+        seed_document(&state, "doc1", vec![book, ch1, ch2]);
+
+        // Fixture: 8 pages (Book-kind plausibility floor), title/author in
+        // both /Info and page 1, and an embedded outline whose numbered
+        // bookmarks name both chapters — "1 First Ideas" on page 2, "2
+        // Later Ideas" on page 4.
+        let lib = LocalPdfSource::open(state.data_dir.as_ref()).unwrap();
+        write_book_pdf_with_outline(&lib.root().join("structures.pdf"));
+
+        // Prime the memo exactly as the report panel's auto-open would:
+        // one real fresh validation over the seeded library, cached under
+        // the (signature, expected fingerprint) key the gate reads.
+        let outline_json = state
+            .store
+            .read_doc_file("doc1", "outline.json")
+            .expect("seeded outline");
+        let outline: Outline = serde_json::from_str(&outline_json).unwrap();
+        let expected: Vec<ExpectedItem> = engine::expected_items(&outline)
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect();
+        let data_dir = std::path::PathBuf::from(state.data_dir.as_ref());
+        let report = source::validate_acervo(
+            &source::LocalPdfSource::open(&data_dir).unwrap(),
+            &expected,
+            data_dir.join("index").join("library"),
+            data_dir.join("index").join("toc"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            report.all_pass(),
+            "fixture library must pass: {:?}",
+            report
+                .items
+                .iter()
+                .map(|r| (r.expected.title.clone(), r.blocking_failures()))
+                .collect::<Vec<_>>()
+        );
+        // Key the memo under the signature AS THE GATE WILL SEE IT: the
+        // priming validation above just wrote the fixture's pdftext entry
+        // (its first parse), and `acervo_signature` folds that directory —
+        // computing it before the validation would key the verdict under a
+        // pre-write signature the gate can never hit.
+        let signature = super::reading::acervo_signature(&state).await.unwrap();
+        let fp = super::reading::expected_items_fingerprint(&expected);
+        state
+            .acervo_cache
+            .lock()
+            .await
+            .insert((signature, fp), report);
+        super::reading::ensure_document_grounded(&state, "doc1", &outline)
+            .await
+            .expect("a memo hit must not fail — and must not skip resolution");
+        let outline_json = state
+            .store
+            .read_doc_file("doc1", "outline.json")
+            .expect("outline after the gate");
+        let outline: Outline = serde_json::from_str(&outline_json).unwrap();
+        let book = outline.items.iter().find(|i| i.id == "book1").unwrap();
+        assert_eq!(
+            book.expansion,
+            ExpansionState::Expanded,
+            "the book must leave ChaptersProposed once its chapters are matched"
+        );
+        let ch1 = outline.items.iter().find(|i| i.id == "ch1").unwrap();
+        assert_eq!(
+            ch1.resolved_page,
+            Some(2),
+            "bookmark '1 First Ideas' → page 2"
+        );
+        let ch2 = outline.items.iter().find(|i| i.id == "ch2").unwrap();
+        assert_eq!(
+            ch2.resolved_page,
+            Some(4),
+            "bookmark '2 Later Ideas' → page 4"
+        );
+    }
+
+    /// Eight-page PDF fixture with /Info metadata and a numbered embedded
+    /// outline (the shape a real textbook carries, and the shape the
+    /// resolution pass prefers over the deduction store).
+    fn write_book_pdf_with_outline(path: &std::path::Path) {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Bookmark, Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Courier",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let mut page_ids = Vec::new();
+        for text in [
+            "Structures Book, by Ada Author.",
+            "1 First Ideas",
+            "First Ideas body.",
+            "2 Later Ideas",
+            "Later Ideas body.",
+            "More body.",
+            "Even more body.",
+            "Final body.",
+        ] {
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                    Operation::new("Td", vec![72.into(), 700.into()]),
+                    Operation::new("Tj", vec![Object::string_literal(text)]),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        let count = page_ids.len() as i64;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().map(|&id| id.into()).collect::<Vec<Object>>(),
+                "Count" => count,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let b1 = doc.add_bookmark(
+            Bookmark::new("1 First Ideas".to_string(), [0.0, 0.0, 0.0], 0, page_ids[1]),
+            None,
+        );
+        doc.add_bookmark(
+            Bookmark::new("2 Later Ideas".to_string(), [0.0, 0.0, 0.0], 0, page_ids[3]),
+            None,
+        );
+        let _ = b1;
+        let outlines_id = doc.build_outline().expect("bookmarks were added");
+        doc.catalog_mut()
+            .expect("catalog exists")
+            .set("Outlines", outlines_id);
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Structures Book"),
+            "Author" => Object::string_literal("Ada Author"),
+        });
+        doc.trailer.set("Info", info_id);
+        doc.save(path).expect("save fixture pdf");
+    }
 }
