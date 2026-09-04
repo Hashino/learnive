@@ -125,6 +125,11 @@ NOT add a second button.\n\
 parent.postMessage({type:'learnive-answer', answer: JSON.stringify(ARTIFACT)}, '*'), \
 where ARTIFACT is a structured JSON the rubric can grade.\n\
 Never write the grading criteria inside the exercise_html (they are server-only).\n\
+Math: write it in LaTeX and ALWAYS delimit it — $$…$$ or \\[…\\] for a formula \
+on its own line, \\(…\\) or $…$ inline. The server typesets it before the iframe \
+serves this HTML. Undelimited LaTeX (a bare \\frac{1}{2} in a sentence) cannot be \
+typeset and reaches the student as raw source, so never write one. Prefer plain \
+text or Unicode for anything that is not really math (H₂O, 25 °C, 3 × 4).\n\
 CRITICAL: never reveal the answer. Inputs start empty/unselected; do NOT \
 pre-check, pre-fill, highlight, mark, or hint which option is correct, and do NOT \
 include the solution anywhere in the exercise_html. The student must produce it.\n\
