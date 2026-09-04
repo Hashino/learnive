@@ -1157,9 +1157,11 @@ pub(super) async fn prepare(
     // exactly the speculative spend §14 killed prefetch over. Scoping it to
     // this one already-resolved `item`, gated on `NotExpanded`, is what
     // keeps it to "one call per chapter, at that chapter's own arrival" —
-    // `try_split_chapter` always leaves `expansion` at `Expanded` (with or
-    // without children) once it genuinely attempts, so this branch can
-    // never fire twice for the same chapter.
+    // `try_split_chapter` leaves `expansion` at `Expanded` whenever the
+    // attempt genuinely concluded (split or genuinely single-topic), so a
+    // concluded chapter never re-attempts. S33-2: a FAILED attempt (provider
+    // error) now also stays `NotExpanded` — the refusal further down refuses
+    // whole-chapter generation, and the next visit retries the split.
     let (outline, item) = if item.item_type == OutlineItemType::Chapter
         && item.expansion == ExpansionState::NotExpanded
         && item.resolved_page.is_some()
@@ -1216,6 +1218,47 @@ pub(super) async fn prepare(
     // silent degraded generation.
     if engine::chapter_match_failed(&outline.items, &item) {
         let reason = "this chapter could not be matched against its book's table of contents; resolve it from the library check before it can generate".to_string();
+        if let Err(e) = event_log.append(
+            Some(&item.id),
+            EventKind::GenerationBlocked {
+                reason: reason.clone(),
+            },
+        ) {
+            eprintln!("event log append failed: {e}");
+        }
+        return Err(reason);
+    }
+    // S33-2: the chapter/section split is a MANDATORY structural step, not
+    // best-effort — a chapter that is still a whole-chapter generation
+    // target at this point is refused instead of generating the entire
+    // chapter as one node. Two ways to still be here, both terminal for
+    // THIS request (both retry later, zero tokens):
+    //
+    // - the chapter's page never resolved (`chapter_match_failed` above was
+    //   false only because the parent book hasn't finished its own TOC
+    //   matching pass yet — the same remediation paths that fix a match
+    //   failure fix this, they just haven't run to completion);
+    // - the split attempt ran (this very call, or a prior one) and deferred
+    //   — the library file, its hash, or the split model call itself failed.
+    //   `expansion` stays `NotExpanded` exactly so this branch (or the
+    //   split attempt, which re-runs first on every visit) sees it again.
+    //
+    // `NoSplit` (genuinely single-topic) and `Split` (children materialized,
+    // redirected above) both mark `Expanded` and pass.
+    if item.item_type == OutlineItemType::Chapter && item.resolved_page.is_none() {
+        let reason = "this chapter has not been placed in its book's table of contents yet; it generates only after that matching pass resolves it".to_string();
+        if let Err(e) = event_log.append(
+            Some(&item.id),
+            EventKind::GenerationBlocked {
+                reason: reason.clone(),
+            },
+        ) {
+            eprintln!("event log append failed: {e}");
+        }
+        return Err(reason);
+    }
+    if item.item_type == OutlineItemType::Chapter && item.expansion == ExpansionState::NotExpanded {
+        let reason = "this chapter has not been split into nodes yet; the split is retried on the next visit".to_string();
         if let Err(e) = event_log.append(
             Some(&item.id),
             EventKind::GenerationBlocked {
@@ -2127,12 +2170,15 @@ enum ChapterSplitOutcome {
     /// cost — the same degrade-and-retry convention item 1's own
     /// chapter-matching pass already uses.
     Deferred,
-    /// A real attempt ran (the TOC shortcut, or one model call) and ended
-    /// with no split — a genuinely single-topic chapter, an unparseable/
-    /// empty model response, or a provider error (`429` included). Caller
-    /// must set `expansion = Expanded` regardless: this IS the "already
-    /// tried, it's one node" outcome PLAN.md specifies, not a failure to
-    /// recover from.
+    /// A real attempt ran and legitimately ended with no split — the TOC
+    /// has no sub-entries under this chapter and the model (parsed, no
+    /// provider error) returned no subsections: a genuinely single-topic
+    /// chapter. Caller sets `expansion = Expanded`: this IS the "already
+    /// tried, it's one node" outcome. (S33-2: provider ERRORS no longer
+    /// land here — see the `Deferred` doc; an unparseable model response
+    /// does, because it still cost the attempt and retrying it on every
+    /// visit would burn a call per visit on a chapter that may simply not
+    /// have sub-structure to find.)
     NoSplit,
     /// A real attempt produced children, already persisted with
     /// `expansion = Expanded`. The caller doesn't need the new ids from
@@ -2232,12 +2278,22 @@ async fn try_split_chapter(
         let ai = state.ai.load_full();
         match engine::propose_chapter_split(&ai, &chapter.title, &signal).await {
             Ok(titles) => titles,
+            // S33-2: the split is a structural PREREQUISITE for generating
+            // this chapter, so a failed attempt (free-tier 429 included —
+            // §12.2's "recovery costs zero tokens" means the retry happens
+            // on a later visit, not with an extra call now) must NOT be
+            // read as "nothing to split" and must not let the chapter fall
+            // through to whole-chapter generation. Deferred keeps
+            // `expansion` at `NotExpanded`; the caller refuses generation
+            // and the next visit retries — the zero-token TOC shortcut
+            // runs first every time, so a chapter the TOC can split never
+            // re-pays the model call at all.
             Err(e) => {
                 eprintln!(
                     "chapter split attempt failed for \"{}\": {e}",
                     chapter.title
                 );
-                Vec::new()
+                return ChapterSplitOutcome::Deferred;
             }
         }
     };

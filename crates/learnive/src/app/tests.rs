@@ -2564,7 +2564,8 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
         r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
             {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
                 {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
-                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"n1","title":"pointers in C","action":"learn","children":[]}
             ]},
             {"id":"after","title":"After the book","action":"learn","children":[]}
         ]}"#,
@@ -2609,18 +2610,20 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
     assert!(body.contains("container"));
     assert!(!body.contains("event: done"));
 
-    // Settle both chapters — one demonstrated via full generation, one
-    // skipped, exactly like an ordinary prerequisite chain.
-    generate_to_completion(&call, &doc_id, "c1").await;
-    let (status, body) = call(authed(
+    // Settle the children. S33-2: a chapter with no resolvable book content
+    // no longer generates as one node — c1/c2 have no library PDF behind
+    // them, so generation is refused for them (pinned by
+    // `a_chapter_that_cannot_be_split_or_placed_is_never_generated` below)
+    // and skip is the only settle this fixture can produce for them. The
+    // plain `Node` child demonstrates for real, so the synthesis under test
+    // still sees a mixed Demonstrated/Skipped set.
+    let (status, _) = call(authed(
         "POST",
-        &format!("/api/documents/{doc_id}/nodes/c1/answer"),
-        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+        &format!("/api/documents/{doc_id}/nodes/c1/skip"),
+        "",
     ))
     .await;
     assert_eq!(status, StatusCode::OK);
-    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(ans["advance"], serde_json::json!(true));
 
     let (status, _) = call(authed(
         "POST",
@@ -2629,6 +2632,17 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
     ))
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    generate_to_completion(&call, &doc_id, "n1").await;
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/n1/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
 
     let (_, body) = call(authed(
         "GET",
@@ -2664,11 +2678,14 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
     assert!(body.contains("container"));
 
     // Bugfix regression (2026-08-30, advisor-flagged): `resume_node_id`
-    // must find `c1`'s node file, not silently stay `None` forever. `book1`
-    // itself has no node file — nothing ever generates a container — so a
-    // plain main-line-only `generated.contains(id)` lookup finds nothing,
-    // which is exactly the bug this pins: it must fall back to the last
-    // generated CHAPTER under the container.
+    // must find a generated node UNDER a container, not silently stay
+    // `None` forever. `book1` itself has no node file — nothing ever
+    // generates a container — so a plain main-line-only
+    // `generated.contains(id)` lookup finds nothing, which is exactly the
+    // bug this pins: it must fall back into the container's children. (The
+    // generated leaf is the plain `Node` child `n1`; S33-2 — chapters
+    // generate only through their book's real content, so a fixture
+    // chapter can no longer be the generated leaf here.)
     let (_, body) = call(authed("GET", "/api/documents", "")).await;
     let docs: serde_json::Value = serde_json::from_str(&body).unwrap();
     let doc = docs
@@ -2677,7 +2694,101 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
         .iter()
         .find(|d| d["doc_id"] == serde_json::json!(doc_id))
         .unwrap();
-    assert_eq!(doc["resume_node_id"], serde_json::json!("c1"));
+    assert_eq!(doc["resume_node_id"], serde_json::json!("n1"));
+}
+
+#[tokio::test]
+async fn a_chapter_that_cannot_be_split_or_placed_is_never_generated() {
+    // S33-2: the chapter split is a MANDATORY structural step, not
+    // best-effort. Two refusals, both terminal for the request and both
+    // retryable later at zero tokens:
+    // - a chapter whose page never resolved (its book's TOC matching pass
+    //   hasn't placed it) is refused instead of generating the whole
+    //   chapter as one node — the pre-S33 best-effort fall-through;
+    // - a page-resolved chapter whose split attempt deferred (no library
+    //   file behind it, as in this fixture) stays `NotExpanded` and is
+    //   refused the same way, retried on the next visit.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
+            {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
+                {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]}
+            ]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    // (1) No resolved page: refused with the placement reason — never a
+    // `done`, never node content for the whole chapter.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/c1/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "SSE responses are always 200");
+    assert!(body.contains("event: error"));
+    assert!(body.contains("table of contents"));
+    assert!(!body.contains("event: done"));
+
+    // (2) With a page resolved by hand (the manual-page remediation arm),
+    // the split attempt still defers — this fixture has no library PDF
+    // behind the book — and the chapter is refused again, now with the
+    // split-pending reason. `expansion` must still be `NotExpanded` (the
+    // deferred outcome), so the NEXT visit re-attempts the split.
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            let chapter = outline
+                .items
+                .iter_mut()
+                .find(|i| i.id == "c1")
+                .ok_or("no c1")?;
+            chapter.resolved_page = Some(12);
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/c1/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: error"));
+    assert!(body.contains("has not been split into nodes yet"));
+    assert!(!body.contains("event: done"));
+
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json").unwrap();
+    let outline: crate::engine::Outline = serde_json::from_str(&outline_json).unwrap();
+    let chapter = outline.items.iter().find(|i| i.id == "c1").unwrap();
+    assert_eq!(
+        chapter.expansion,
+        crate::engine::ExpansionState::NotExpanded,
+        "a deferred split must stay retryable, never silently NoSplit"
+    );
+    // The refusal is on the record (S27m's GenerationBlocked convention).
+    let event_log = state.store.event_log(&doc_id).unwrap();
+    assert!(event_log.iter().unwrap().any(|e| matches!(&e.kind,
+            crate::events::EventKind::GenerationBlocked { reason }
+                if reason.contains("split into nodes"))));
 }
 
 #[tokio::test]
@@ -2712,7 +2823,8 @@ async fn chapter_match_failure_offers_manual_page_or_whole_book_skip() {
         r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
             {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
                 {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
-                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"n1","title":"pointers in C","action":"learn","children":[]}
             ]},
             {"id":"after","title":"After the book","action":"learn","children":[]}
         ]}"#,
@@ -2808,7 +2920,8 @@ async fn chapter_match_failure_offers_manual_page_or_whole_book_skip() {
         r#"{"topic":"recursion in C","objective_text":"Understand recursion in C","nodes":[
             {"id":"book1","title":"The C Programming Language","action":"learn","item_type":"book","children":[
                 {"id":"c1","title":"functions in C","action":"learn","item_type":"chapter","children":[]},
-                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]}
+                {"id":"c2","title":"recursion in C","action":"learn","item_type":"chapter","children":[]},
+                {"id":"n1","title":"pointers in C","action":"learn","children":[]}
             ]},
             {"id":"after","title":"After the book","action":"learn","children":[]}
         ]}"#,
