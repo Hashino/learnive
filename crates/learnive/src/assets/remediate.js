@@ -158,7 +158,7 @@
       if (!resp.ok) throw new Error(await resp.text());
       const data = await resp.json();
       setOutlineItems(data.items);
-      state.suggestedRevisit = data.suggested_revisit || null;
+      state.dueReview = data.due_review || null;
       renderOutline();
       renderRevisitHint();
       closeRemediate();

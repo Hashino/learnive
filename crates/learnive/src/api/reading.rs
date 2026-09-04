@@ -958,6 +958,206 @@ fn resumed_move_index(events: impl Iterator<Item = crate::events::Event>, node_i
         .count()
 }
 
+// ---------------------------------------------------------------------------
+// S33-3 spaced review (n·2ᵏ) — outline plumbing. The schedule itself is pure
+// zero-token arithmetic over the event log (`events::aggregate::due_review`);
+// this side turns chapters into scheduler input, a due (chapter, level) into
+// a review item id, and materializes that item on the GENERATE path (never
+// on a GET — §3.1 forbids state-changing GETs, so the outline response only
+// *suggests*, and the client's openNode → generate POST is what makes the
+// review node real).
+// ---------------------------------------------------------------------------
+
+/// A review node's id: `{chapter_id}_review{level}`. An underscore, not
+/// `::`, because node ids must pass `store::ensure_safe_id` (alphanumeric
+/// plus `-`/`_`) on their way to node files. The chapter is identified by
+/// exact match against the outline's known chapter ids — never by string
+/// splitting — so a chapter id that happened to contain `_review` can't
+/// produce a collision.
+pub(super) fn parse_review_id(outline: &Outline, id: &str) -> Option<(String, u32)> {
+    crate::events::aggregate::parse_review_node_id(&review_chapters(outline), id)
+}
+
+/// Scheduler input for every `Chapter` in the outline: its non-review
+/// direct children (a decomposed chapter), or the chapter item's own id
+/// when it has none (a genuine `NoSplit` chapter generated as a single
+/// node carries its own grades). Review children are excluded on purpose —
+/// they are the scheduler's own output, not curriculum progress, and their
+/// completion must neither satisfy a close nor advance the counter
+/// (a completed review must not push the next review further out).
+pub(super) fn review_chapters(outline: &Outline) -> Vec<crate::events::aggregate::ReviewChapter> {
+    use crate::events::aggregate::ReviewChapter;
+    outline
+        .items
+        .iter()
+        .filter(|i| i.item_type == OutlineItemType::Chapter)
+        .map(|ch| {
+            let members: Vec<String> = outline
+                .items
+                .iter()
+                .filter(|i| {
+                    i.parent_id.as_deref() == Some(ch.id.as_str()) && i.mode != NodeMode::Review
+                })
+                .map(|i| i.id.clone())
+                .collect();
+            ReviewChapter {
+                id: ch.id.clone(),
+                members: if members.is_empty() {
+                    vec![ch.id.clone()]
+                } else {
+                    members
+                },
+            }
+        })
+        .collect()
+}
+
+/// The due-review view for the current outline/log — every `OutlineResp`
+/// carries it (the GET side of the scheduler; see `OutlineResp::due_review`).
+pub(super) fn due_review_view(
+    state: &AppState,
+    doc_id: &str,
+    outline: &Outline,
+) -> Result<Option<super::cold_start::DueReviewView>, ApiError> {
+    let chapters = review_chapters(outline);
+    if chapters.is_empty() {
+        return Ok(None);
+    }
+    let log = state
+        .store
+        .event_log(doc_id)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let due = crate::events::aggregate::due_review(
+        log.iter().map_err(|e| ApiError::Internal(e.to_string()))?,
+        &chapters,
+    );
+    let Some(due) = due else {
+        return Ok(None);
+    };
+    let Some(chapter) = outline.items.iter().find(|i| i.id == due.chapter_id) else {
+        return Ok(None);
+    };
+    Ok(Some(super::cold_start::DueReviewView {
+        item_id: crate::events::aggregate::review_node_id(&due.chapter_id, due.level),
+        chapter_id: due.chapter_id,
+        level: due.level,
+        title: chapter.title.clone(),
+    }))
+}
+
+/// The generate-path half of the scheduler: a request to generate
+/// `{chapter}_review{level}` whose item isn't materialized yet appends it to
+/// the outline — but ONLY if the scheduler agrees this exact review is due
+/// (a stale or hand-typed id is refused, not silently generated). The
+/// materialized item is a `Node` child of its chapter in `NodeMode::Review`
+/// with no prerequisites: nothing gates a scheduled review, and every bit of
+/// downstream grounding machinery (`resolve_grounding_source` walking to the
+/// chapter's book, `chapter_page_range` finding the chapter,
+/// `interleave_titles` picking up the chapter's demonstrated nodes as
+/// siblings) works through the parent link unchanged.
+async fn maybe_materialize_review(
+    state: &AppState,
+    doc_id: &str,
+    outline: &mut Outline,
+    item_id: &str,
+) -> Result<(), String> {
+    let Some((chapter_id, level)) = parse_review_id(outline, item_id) else {
+        return Ok(());
+    };
+    if outline.items.iter().any(|i| i.id == item_id) {
+        return Ok(());
+    }
+    let chapters = review_chapters(outline);
+    let log = state.store.event_log(doc_id).map_err(|e| e.to_string())?;
+    let due =
+        crate::events::aggregate::due_review(log.iter().map_err(|e| e.to_string())?, &chapters);
+    let due_now = matches!(&due, Some(d) if d.chapter_id == chapter_id && d.level == level);
+    if !due_now {
+        let hint = match due {
+            Some(d) => {
+                let title = outline
+                    .items
+                    .iter()
+                    .find(|i| i.id == d.chapter_id)
+                    .map(|i| i.title.as_str())
+                    .unwrap_or("");
+                format!("the review due now is \"{title}\" (level {})", d.level)
+            }
+            None => "no chapter review is due".to_string(),
+        };
+        return Err(format!("this review is not due yet ({hint})"));
+    }
+    let chapter = outline
+        .items
+        .iter()
+        .find(|i| i.id == chapter_id)
+        .cloned()
+        .ok_or_else(|| "unknown review chapter".to_string())?;
+    let item = OutlineItem {
+        id: item_id.to_string(),
+        title: chapter.title.clone(),
+        prerequisites: Vec::new(),
+        parent_id: Some(chapter_id.clone()),
+        mode: NodeMode::Review,
+        source_doc_id: None,
+        item_type: OutlineItemType::Node,
+        expansion: ExpansionState::default(),
+        source: None,
+        chapter_number: None,
+        resolved_page: None,
+    };
+    let persisted = item.clone();
+    state
+        .store
+        .update_outline_file(doc_id, |json| {
+            // Read-modify-write under the store's outline lock; if another
+            // request materialized the same review first, keep theirs.
+            let mut o: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
+            if o.items.iter().any(|i| i.id == item_id) {
+                return Ok(json.to_string());
+            }
+            o.items.push(persisted);
+            serde_json::to_string(&o).map_err(|e| e.to_string())
+        })
+        .map_err(|e| e.to_string())?;
+    outline.items.push(item);
+    Ok(())
+}
+
+/// The context for a chapter-scoped review node: the chapter's covered
+/// nodes as material to REACTIVATE. The framing is deliberately the inverse
+/// of `prior_content_context`'s "already covered — do NOT repeat this": a
+/// review exists to re-cover exactly this ground, and that instruction
+/// would make the model dodge the chapter's own material. Per-node
+/// excerpts, oldest first, each budgeted so a wide chapter can't blow the
+/// prompt (§14).
+const REVIEW_NODE_BUDGET: usize = 700;
+
+fn review_context(state: &AppState, doc_id: &str, outline: &Outline, item: &OutlineItem) -> String {
+    let Some(chapter_id) = item.parent_id.as_deref() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for child in outline
+        .items
+        .iter()
+        .filter(|i| i.parent_id.as_deref() == Some(chapter_id) && i.id != item.id)
+    {
+        let owner = child.source_doc_id.as_deref().unwrap_or(doc_id);
+        let Ok(node) = state.store.read_node(owner, &child.id) else {
+            continue;
+        };
+        out.push_str("\n## ");
+        out.push_str(&child.title);
+        out.push('\n');
+        out.push_str(&tail_chars(node.content.html.trim(), REVIEW_NODE_BUDGET));
+        out.push('\n');
+    }
+    format!(
+        "This node reviews a chapter the learner already completed. Its nodes          covered the material below — reactivate and test it, don't avoid it as          already-said:\n{out}"
+    )
+}
+
 /// Loads the outline, resolves the requested item by its stable id, and
 /// enforces the §S5 availability gate (fallible work, no `yield`). Locked —
 /// some prerequisite isn't yet `Demonstrated` — is refused outright: this is
@@ -1002,7 +1202,16 @@ pub(super) async fn prepare(
         .store
         .read_doc_file(doc_id, "outline.json")
         .map_err(|e| e.to_string())?;
-    let outline: Outline = serde_json::from_str(&outline_json).map_err(|e| e.to_string())?;
+    let mut outline: Outline = serde_json::from_str(&outline_json).map_err(|e| e.to_string())?;
+    // S33-3: a review id whose item isn't materialized yet materializes here,
+    // on the POST path, gated on the scheduler agreeing it's due — see
+    // `maybe_materialize_review`. Runs before the `idx` lookup, which would
+    // otherwise refuse the id as "unknown outline item".
+    if parse_review_id(&outline, item_id).is_some()
+        && !outline.items.iter().any(|i| i.id == item_id)
+    {
+        maybe_materialize_review(state, doc_id, &mut outline, item_id).await?;
+    }
     // §S15: this is also what refuses a confirmed prereq-tree `skip` — its
     // id was never materialized into `outline.items` at all
     // (`cold_start::materialize_prereq_node`), so it can only ever land
@@ -1301,6 +1510,28 @@ pub(super) async fn prepare(
         .map(|i| i.title.clone())
         .collect();
     let review_mode = item.mode == NodeMode::Review;
+    // S33-3: a review scoped to a chapter gets the chapter's covered nodes
+    // as material to reactivate — NOT `prior_content_context`'s
+    // "already covered, do NOT repeat" framing, which would make the model
+    // dodge exactly the ground the review exists to re-cover. A §S15
+    // learner-chosen review sub-node (parent is a plain Node, not a
+    // chapter) keeps the ordinary context.
+    let context = if review_mode {
+        let parent_is_chapter = item.parent_id.as_deref().is_some_and(|pid| {
+            outline
+                .items
+                .iter()
+                .find(|i| i.id == pid)
+                .is_some_and(|p| p.item_type == OutlineItemType::Chapter)
+        });
+        if parent_is_chapter {
+            review_context(state, doc_id, &outline, &item)
+        } else {
+            context
+        }
+    } else {
+        context
+    };
     let parent_title = item.parent_id.as_deref().and_then(|pid| {
         outline
             .items

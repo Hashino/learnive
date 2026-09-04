@@ -1,4 +1,3 @@
-use super::cold_start::suggested_revisit;
 use super::reading::{escape_html, grounding_for, objective_for, topic_and_title};
 use super::*;
 
@@ -225,16 +224,17 @@ pub async fn answer(
         }));
     }
 
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
+    let outline: Outline =
+        serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     // §S15 item 4: a failed transfer/synthesis objective is a cheap signal
     // that a PRIOR concept (a child node folded into this integration
     // exercise) may be the real gap, not this node's own explanation —
-    // surface the document's existing revisit suggestion explicitly inside
-    // THIS remediation thread, instead of only in the sidebar. Deliberately
-    // does NOT try to identify which specific child implicated the failure
-    // (PLAN.md marks full cross-node diagnosis out of scope, unproven
-    // without live failure-rate data) — it only links two mechanisms that
-    // already exist (`suggested_revisit`, the remediation thread), no new
-    // grading, no new call.
+    // surface the chapter review that happens to be due right now
+    // (S33-3's scheduler) inside THIS remediation thread, instead of only
+    // in the sidebar. Usually none is due (reviews fire nodes after a
+    // chapter closes), and then the hint is simply absent — the hint is a
+    // link between two mechanisms that already exist, never a new call.
     let structural_failure = assessment.unmet().iter().any(|g| {
         sidecar
             .rubric
@@ -244,21 +244,20 @@ pub async fn answer(
             .is_some_and(|o| o.transfer || o.kind == ObjectiveType::Synthesis)
     });
     let revisit_hint = if structural_failure {
-        suggested_revisit(&state, &doc_id)
+        super::reading::due_review_view(&state, &doc_id, &outline)
             .ok()
             .flatten()
-            .filter(|id| id != &node_id)
-            .and_then(|id| topic_and_title(&state, &doc_id, &id).ok())
-            .filter(|(_, title)| !title.is_empty())
-            .map(|(_, title)| {
+            .filter(|d| d.item_id != node_id)
+            .filter(|d| !d.title.is_empty())
+            .map(|d| {
                 format!(
                     "<p class=\"revisit-hint\">{} <strong>{}</strong>.</p>",
                     crate::locale::pick(
                         locale,
-                        "↺ This might help: revisiting",
-                        "↺ Isto pode ajudar: revisitar"
+                        "↺ This might help: the review due now covers",
+                        "↺ Isto pode ajudar: a revisão pendente cobre"
                     ),
-                    escape_html(&title)
+                    escape_html(&d.title)
                 )
             })
     } else {

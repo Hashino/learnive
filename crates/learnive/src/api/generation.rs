@@ -1,5 +1,6 @@
-use super::cold_start::{acquire, outline_view, suggested_revisit};
+use super::cold_start::{acquire, outline_view};
 use super::grading::sse_frame;
+use super::reading::due_review_view;
 use super::reading::{finalize, grounding_for, prepare, tail_chars, topic_and_title};
 use super::*;
 
@@ -399,11 +400,8 @@ pub async fn get_outline(
     let outline: Outline =
         serde_json::from_str(&outline_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let items = outline_view(&state, &doc_id, &outline)?;
-    let suggested_revisit = suggested_revisit(&state, &doc_id)?;
-    Ok(Json(OutlineResp {
-        items,
-        suggested_revisit,
-    }))
+    let due_review = due_review_view(&state, &doc_id, &outline)?;
+    Ok(Json(OutlineResp { items, due_review }))
 }
 
 /// Skips the given node (§S5, "botão pular"): the node stays open (not
@@ -443,11 +441,8 @@ pub async fn skip_node(
         eprintln!("event log append failed: {e}");
     }
     let items = outline_view(&state, &doc_id, &outline)?;
-    let suggested_revisit = suggested_revisit(&state, &doc_id)?;
-    Ok(Json(OutlineResp {
-        items,
-        suggested_revisit,
-    }))
+    let due_review = due_review_view(&state, &doc_id, &outline)?;
+    Ok(Json(OutlineResp { items, due_review }))
 }
 
 /// Terminal remediation for a chapter `source::match_chapter` could not
@@ -510,11 +505,8 @@ pub async fn skip_book(
         }
     }
     let items = outline_view(&state, &doc_id, &outline)?;
-    let suggested_revisit = suggested_revisit(&state, &doc_id)?;
-    Ok(Json(OutlineResp {
-        items,
-        suggested_revisit,
-    }))
+    let due_review = due_review_view(&state, &doc_id, &outline)?;
+    Ok(Json(OutlineResp { items, due_review }))
 }
 
 #[derive(Deserialize)]

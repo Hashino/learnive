@@ -58,7 +58,7 @@ const state = {
   allItems: [],
   currentId: null,
   nodeId: null,
-  suggestedRevisit: null,
+  dueReview: null,
   // One entry per mounted `.node-section` (nodeId -> {el, prose, exercise,
   // sentinel, interactions, result, controls, exerciseFrame, ...}) — the
   // continuous document is however many of these are currently in

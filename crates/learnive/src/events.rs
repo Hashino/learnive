@@ -353,45 +353,4 @@ mod tests {
         let states = aggregate::node_states(log.iter().unwrap());
         assert_eq!(states.get("n0"), Some(&NodeState::Demonstrated));
     }
-
-    #[test]
-    fn revisit_suggestion_picks_the_oldest_still_skipped_node() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = EventLog::new(dir.path().join("events.jsonl"));
-
-        log.append(Some("n0"), EventKind::NodeSkipped).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        log.append(Some("n1"), EventKind::NodeSkipped).unwrap();
-
-        // n0 was skipped first, so it's the more-overdue suggestion.
-        assert_eq!(
-            aggregate::revisit_suggestion(log.iter().unwrap()),
-            Some("n0".to_string())
-        );
-    }
-
-    #[test]
-    fn revisit_suggestion_drops_a_node_once_it_is_graded() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = EventLog::new(dir.path().join("events.jsonl"));
-
-        log.append(Some("n0"), EventKind::NodeSkipped).unwrap();
-        log.append(
-            Some("n0"),
-            EventKind::MoveGraded {
-                move_id: "m1".into(),
-                grade: Grade::Partial,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(aggregate::revisit_suggestion(log.iter().unwrap()), None);
-    }
-
-    #[test]
-    fn revisit_suggestion_is_none_when_nothing_is_skipped() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = EventLog::new(dir.path().join("events.jsonl"));
-        assert_eq!(aggregate::revisit_suggestion(log.iter().unwrap()), None);
-    }
 }

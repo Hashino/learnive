@@ -37,7 +37,7 @@ use crate::engine::{
     OutlineItemType, Rubric, SourcePointer,
 };
 use crate::events::EventKind;
-use crate::events::aggregate::{NodeState, node_generated, node_states, revisit_suggestion};
+use crate::events::aggregate::{NodeState, node_generated, node_states};
 use crate::movement::{self, GeneratedMove, MoveContext, MoveRecord, MoveRender, MoveType};
 use crate::objective::{ObjectiveLog, ObjectiveSource};
 use crate::secret::SecretStore;

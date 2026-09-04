@@ -875,6 +875,13 @@ async function advanceAfterGrading() {
   // was POSTed against a container. So: reading order (`displayOrder`),
   // strictly after the node just demonstrated, and real nodes only
   // (`isNodeItem`, outline.js).
+  // S33-3: a due chapter review cuts the line — it generates before the
+  // next regular node (active recovery, spaced n*2^k nodes past the
+  // chapter's close; the server computes it, the client only obeys).
+  if (state.dueReview) {
+    await openNode(state.dueReview.item_id, { instant: false });
+    return;
+  }
   const order = state.displayOrder || state.allItems || [];
   const fromIdx = orderIndexOf(state.currentId);
   const next = order.find(

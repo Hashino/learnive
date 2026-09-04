@@ -63,7 +63,7 @@ const I18N = {
     "delete.failed": "delete failed: ",
     "delete.close": "Close",
     // Outline / navigation
-    "revisit.hint": "↺ Consider revisiting: {0}",
+    "revisit.hint": "↺ Review due now: {0}",
     "open.failed": "could not open node: ",
     "skip.button": "Skip for now →",
     "skip.none": "Nothing else available yet.",
@@ -246,7 +246,7 @@ const I18N = {
     "delete.cancel": "Cancelar",
     "delete.failed": "falha ao excluir: ",
     "delete.close": "Fechar",
-    "revisit.hint": "↺ Considere revisitar: {0}",
+    "revisit.hint": "↺ Revisão pendente: {0}",
     "open.failed": "não foi possível abrir o nó: ",
     "skip.button": "Pular por ora →",
     "skip.none": "Nada mais disponível por enquanto.",

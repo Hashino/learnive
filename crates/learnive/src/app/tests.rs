@@ -634,7 +634,10 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
         "the exercise form must be split out of the prose"
     );
 
-    // Skip it — the revisit scheduler should now suggest it.
+    // Skip it — S33-3 removed the skip-based revisit suggestion: the only
+    // suggestion an outline carries now is a DUE CHAPTER REVIEW
+    // (`due_review`), and this flat document has no chapters, so a skip
+    // must not fabricate one.
     call(authed(
         "POST",
         &format!("/api/documents/{doc_id}/nodes/{node0}/skip"),
@@ -648,10 +651,7 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     ))
     .await;
     let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(
-        outline["suggested_revisit"],
-        serde_json::json!(node0.clone())
-    );
+    assert_eq!(outline["due_review"], serde_json::Value::Null);
 
     // Answer it (demo grades as demonstrated) — the suggestion clears,
     // and the read view now shows no active exercise.
@@ -668,7 +668,7 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     ))
     .await;
     let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(outline["suggested_revisit"], serde_json::Value::Null);
+    assert_eq!(outline["due_review"], serde_json::Value::Null);
 
     let (_, body) = call(authed(
         "GET",
@@ -695,17 +695,16 @@ async fn revisiting_a_generated_node_reads_instead_of_regenerating() {
     assert!(body.contains("already generated"));
 }
 
-/// §S15 item 4: a remediation failure on a `transfer`/synthesis objective
-/// should surface the document's existing revisit suggestion explicitly
-/// inside the remediation thread — the cheapest diagnostic that already
-/// exists (`suggested_revisit`), linked into a place that never referenced
-/// it before. Exercised through the real router + demo_responder: the
-/// demo `test`-move contract always sets `transfer: true` on its one
-/// objective and a blank answer always grades `not_demonstrated`
-/// (`api/provider.rs::demo_responder`), so this reaches the real
-/// structural-failure branch without any custom mock wiring.
+/// §S15 item 4 through the S33-3 scheduler: a remediation failure on a
+/// `transfer`/synthesis objective links the chapter review that happens to
+/// be DUE right now into the remediation thread — the skip-based suggestion
+/// this replaced had no schedule at all. Exercised through the real router
+/// + demo_responder (the demo `test`-move contract always sets
+/// `transfer: true`, a blank answer always grades `not_demonstrated`), with
+/// the schedule state arriving as real `MoveGraded` events against a
+/// rewritten outline — the scheduler only ever reads the event log.
 #[tokio::test]
-async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node() {
+async fn a_structural_failure_hints_the_chapter_review_due_now() {
     let state = test_state();
     let call = |req: Request<Body>| {
         let state = state.clone();
@@ -721,12 +720,69 @@ async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node(
     let created: serde_json::Value = serde_json::from_str(&body).unwrap();
     let doc_id = created["doc_id"].as_str().unwrap().to_string();
     let intro = created["items"][0]["id"].as_str().unwrap().to_string();
-    let intro_title = created["items"][0]["title"].as_str().unwrap().to_string();
     let core = created["items"][1]["id"].as_str().unwrap().to_string();
 
-    // Skip the prerequisite — it becomes the document's revisit
-    // suggestion (same mechanism `outline_gates_and_skip`-style tests
-    // already pin), and unlocks `core`.
+    // A decomposed chapter (ch1 with nodes n1, n2) plus five plain fillers,
+    // so the schedule arithmetic has something to count. Nothing here is
+    // ever generated — only their grades are appended, which is exactly the
+    // log the scheduler folds.
+    use crate::engine::Grade;
+    use crate::engine::{NodeMode, OutlineItem, OutlineItemType};
+    use crate::events::EventKind;
+    state
+        .store
+        .update_outline_file(&doc_id, |json| {
+            let mut outline: crate::engine::Outline =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            let plain =
+                |id: &str, title: &str, parent: Option<&str>, prereqs: &[&str]| OutlineItem {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    prerequisites: prereqs.iter().map(|p| p.to_string()).collect(),
+                    parent_id: parent.map(|p| p.to_string()),
+                    mode: NodeMode::Learn,
+                    source_doc_id: None,
+                    item_type: OutlineItemType::Node,
+                    expansion: Default::default(),
+                    source: None,
+                    chapter_number: None,
+                    resolved_page: None,
+                };
+            let mut chapter = plain("ch1", "Limits", None, &[]);
+            chapter.item_type = OutlineItemType::Chapter;
+            outline.items.push(chapter);
+            outline
+                .items
+                .push(plain("n1", "rate of change", Some("ch1"), &[]));
+            outline
+                .items
+                .push(plain("n2", "the derivative", Some("ch1"), &["n1"]));
+            for i in 1..=5 {
+                outline
+                    .items
+                    .push(plain(&format!("x{i}"), &format!("filler {i}"), None, &[]));
+            }
+            serde_json::to_string(&outline).map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    // The chapter closes at total 2; the fillers push the counter to 7 —
+    // past the first threshold (close + 5), so ch1's level-1 review is due.
+    let event_log = state.store.event_log(&doc_id).unwrap();
+    for node in ["n1", "n2", "x1", "x2", "x3", "x4", "x5"] {
+        event_log
+            .append(
+                Some(node),
+                EventKind::MoveGraded {
+                    move_id: format!("m-{node}"),
+                    grade: Grade::Demonstrated,
+                },
+            )
+            .unwrap();
+    }
+
+    // Skip the prerequisite (unlocks `core`; S33-3: a skip never fabricates
+    // a suggestion) and confirm the outline carries the due review.
     let (status, _) = call(authed(
         "POST",
         &format!("/api/documents/{doc_id}/nodes/{intro}/skip"),
@@ -734,12 +790,21 @@ async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node(
     ))
     .await;
     assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        outline["due_review"]["item_id"],
+        serde_json::json!("ch1_review1")
+    );
+    assert_eq!(outline["due_review"]["title"], serde_json::json!("Limits"));
 
     // Drive `core` to its graded exercise, then fail it with a blank
-    // answer — the demo `test`-move objective is `transfer: true`. `"{}"`
-    // (an empty structured-answer artifact, not an empty string) is what
-    // `demo_responder`'s blank check actually matches
-    // (`api/provider.rs`'s `"Student's answer: {}"` pattern).
+    // answer — the structural-failure branch now hints the due review.
     generate_to_completion(&call, &doc_id, &core).await;
     let (status, body) = call(authed(
         "POST",
@@ -757,9 +822,63 @@ async fn remediation_on_a_transfer_objective_suggests_revisiting_a_skipped_node(
         "expected a revisit hint in the remediation thread: {remediation_html}"
     );
     assert!(
-        remediation_html.contains(&intro_title),
-        "expected the skipped prerequisite's title ({intro_title}) in the hint: {remediation_html}"
+        remediation_html.contains("Limits"),
+        "expected the due review's chapter title in the hint: {remediation_html}"
     );
+
+    // Materialize + generate the review on the POST path: `ch1_review1` is
+    // not an outline item yet (a GET never mutates, §3.1) — `prepare`
+    // materializes it, gated on the scheduler agreeing it's due. A level
+    // that is NOT due is refused instead.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/ch1_review2/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "SSE responses are always 200");
+    assert!(body.contains("event: error"));
+    assert!(body.contains("not due yet"));
+    assert!(!body.contains("event: done"));
+
+    let (status, body) = generate_to_completion(&call, &doc_id, "ch1_review1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("event: done"));
+
+    let outline_json = state.store.read_doc_file(&doc_id, "outline.json").unwrap();
+    let outline: crate::engine::Outline = serde_json::from_str(&outline_json).unwrap();
+    let review = outline
+        .items
+        .iter()
+        .find(|i| i.id == "ch1_review1")
+        .expect("the due review must materialize into the outline");
+    assert_eq!(review.mode, NodeMode::Review);
+    assert_eq!(review.parent_id.as_deref(), Some("ch1"));
+    assert_eq!(review.item_type, OutlineItemType::Node);
+    assert!(
+        review.prerequisites.is_empty(),
+        "nothing gates a scheduled review"
+    );
+
+    // Generated (finalized) means consumed: no suggestion remains until
+    // the doubled level-2 threshold passes, and the no-regenerate rule
+    // holds for a review like any other node.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/ch1_review1/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("already generated"));
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/outline"),
+        "",
+    ))
+    .await;
+    let outline: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(outline["due_review"], serde_json::Value::Null);
 }
 
 #[tokio::test]

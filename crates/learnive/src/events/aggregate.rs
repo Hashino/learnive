@@ -191,44 +191,374 @@ pub fn research_attempted(mut events: impl Iterator<Item = Event>, node_id: &str
     })
 }
 
-/// §S5's revisit scheduler: which currently-`Skipped` node has been
-/// deferred longest. A pure spacing heuristic (least-recently-touched
-/// wins), not a full spaced-repetition algorithm — PLAN.md's S5 bullet
-/// asks for "scheduler de revisita", this is its whole implementation.
-/// `None` when nothing is currently skipped. A separate one-pass fold
-/// rather than folded into `node_states` (which only keeps the *final*
-/// state, discarding the timestamp that made it the most-overdue skip) —
-/// same "several small aggregates, each its own pass" shape as the rest
-/// of this module.
-pub fn revisit_suggestion(events: impl Iterator<Item = Event>) -> Option<String> {
-    let mut last_skip_ts: HashMap<String, u64> = HashMap::new();
+/// S33-3 spaced review scheduler (n·2ᵏ, user decision 2026-09-03) — the
+/// concrete policy PLAN.md's S24 "due-for-review" queue waited on, and the
+/// replacement for the deleted `revisit_suggestion` (which could only point
+/// back at skipped nodes and had no schedule at all). When a chapter CLOSES
+/// (its last member node demonstrates or is skipped), reviews come due at
+/// fixed offsets measured in nodes-completed-since-then: 5, 10, 20, 40, 80…
+/// (`REVIEW_BASE_NODES * 2^(level-1)` — the user's exact sequence, each
+/// level's gap doubling). Pure zero-token arithmetic over the event log:
+/// no call, no persisted state to desync — the whole point of the S33 cut
+/// line ("the source answers 'what is true'; telemetry answers 'what comes
+/// next'").
+///
+/// Deliberate choices, each load-bearing:
+///
+/// - **Only a node's FIRST `Demonstrated` grade counts** toward the counter
+///   (a "practice again" re-grade of an already-demonstrated node is not
+///   progress through the curriculum), and **review nodes never count**:
+///   they arrive as `OutlineItem`s with `mode: Review`, so the api layer
+///   leaves them out of `ReviewChapter::members` AND out of the counting
+///   set — a completed review must not push the next review further out,
+///   or the schedule would outrun itself exactly when it's working.
+/// - **A review level is consumed when its node was GENERATED**
+///   (`NodeGenerated`, i.e. finalized), not when it demonstrated. A
+///   partially-generated review resumes on the next visit; suggesting the
+///   same level again would duplicate a review that already exists.
+/// - **Levels fire in order, by construction**: the due level is always
+///   `1 + (generated reviews for this chapter)` — ignoring review 1 and
+///   studying on means review 1 keeps being the suggestion (still due,
+///   still open), never a level-2 review appearing out of nowhere.
+/// - **Several chapters due at once**: the one that closed EARLIEST wins
+///   (smallest close position, then lowest level) — the oldest material is
+///   the most decayed, which is exactly what a review is for.
+///
+/// The api layer (`api::reading::review_chapters`) derives the per-chapter
+/// member lists from the outline; this fold never reads the outline, so it
+/// stays a pure function of the log like every other aggregate here.
+pub const REVIEW_BASE_NODES: u64 = 5;
+
+/// One scheduler-input chapter: the outline members whose
+/// `Demonstrated`/`Skipped` state closes it. For a decomposed chapter these
+/// are its non-review direct children; for a chapter that generated as a
+/// single node (genuine `NoSplit`), the chapter item's own id — it carries
+/// its own grades in that shape.
+#[derive(Clone)]
+pub struct ReviewChapter {
+    pub id: String,
+    pub members: Vec<String>,
+}
+
+/// A review that is due right now. `level` is 1-based; the api layer turns
+/// `(chapter_id, level)` into the review item id
+/// (`{chapter_id}_review{level}`) and the display title (the chapter's own).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueReview {
+    pub chapter_id: String,
+    pub level: u32,
+}
+
+/// The id of the `level`-th review node for a chapter:
+/// `{chapter_id}_review{level}`. An underscore, not `::`, because node ids
+/// must pass `store::ensure_safe_id` (alphanumeric plus `-`/`_`) on their
+/// way to node files.
+pub fn review_node_id(chapter_id: &str, level: u32) -> String {
+    format!("{chapter_id}_review{level}")
+}
+
+/// Inverse of [`review_node_id`], resolved by exact match against the known
+/// chapters — never by string splitting — so a chapter id that happened to
+/// contain `_review` can't produce a collision.
+pub fn parse_review_node_id(chapters: &[ReviewChapter], id: &str) -> Option<(String, u32)> {
+    chapters.iter().find_map(|c| {
+        let prefix = format!("{}_review", c.id);
+        id.strip_prefix(&prefix)
+            .and_then(|rest| rest.parse::<u32>().ok())
+            .filter(|level| *level >= 1)
+            .map(|level| (c.id.clone(), level))
+    })
+}
+
+/// Whether `id` is one of this scheduler's own review nodes. Such nodes are
+/// the scheduler's OUTPUT, never curriculum progress: their completion must
+/// not advance the spacing counter, or every finished review would push the
+/// next one further out exactly when the schedule is working.
+pub fn is_review_node(chapters: &[ReviewChapter], id: &str) -> bool {
+    parse_review_node_id(chapters, id).is_some()
+}
+
+pub fn due_review(
+    events: impl Iterator<Item = Event>,
+    chapters: &[ReviewChapter],
+) -> Option<DueReview> {
+    // Nodes-completed counter (first `Demonstrated` per counting node) and
+    // per-member satisfaction (Demonstrated OR Skipped — a deliberate skip
+    // satisfies the chapter's gate, `engine::effective_state`'s rule, so it
+    // closes the chapter for scheduling too).
+    let mut total: u64 = 0;
+    let mut demonstrated: HashSet<String> = HashSet::new();
+    let mut satisfied: HashSet<String> = HashSet::new();
+    // (chapter id, total-at-close) in close order; a chapter closes once.
+    let mut closed: Vec<(String, u64)> = Vec::new();
+    // Node ids with a `NodeGenerated` event — the review-consumed signal.
+    let mut generated: HashSet<String> = HashSet::new();
+
+    let chapter_of_member = |node: &str| -> Vec<&ReviewChapter> {
+        chapters
+            .iter()
+            .filter(|c| c.members.iter().any(|m| m == node))
+            .collect()
+    };
+
     for event in events {
-        let ts = event.ts;
-        let Some(node_id) = event.node_id else {
+        let Some(node_id) = event.node_id.clone() else {
             continue;
         };
         match event.kind {
-            EventKind::NodeSkipped => {
-                last_skip_ts.insert(node_id, ts);
+            EventKind::MoveGraded {
+                grade: Grade::Demonstrated,
+                ..
+            } => {
+                if !is_review_node(chapters, &node_id) && demonstrated.insert(node_id.clone()) {
+                    total += 1;
+                }
+                satisfied.insert(node_id.clone());
+                for ch in chapter_of_member(&node_id) {
+                    try_close(total, &satisfied, ch, &mut closed);
+                }
             }
-            // Graded (attempted or demonstrated) since the skip: no
-            // longer merely deferred, drop it as a revisit candidate.
-            EventKind::MoveGraded { .. } => {
-                last_skip_ts.remove(&node_id);
+            EventKind::NodeSkipped => {
+                satisfied.insert(node_id.clone());
+                for ch in chapter_of_member(&node_id) {
+                    try_close(total, &satisfied, ch, &mut closed);
+                }
+            }
+            EventKind::NodeGenerated { .. } => {
+                generated.insert(node_id);
             }
             _ => {}
         }
     }
-    last_skip_ts
-        .into_iter()
-        .min_by_key(|(_, ts)| *ts)
-        .map(|(id, _)| id)
+
+    let mut best: Option<(u64, u32, String)> = None;
+    for (chapter_id, close_at) in &closed {
+        let done = generated
+            .iter()
+            .filter(|g| {
+                parse_review_node_id(chapters, g).map(|(c, _)| c).as_deref() == Some(chapter_id)
+            })
+            .count() as u32;
+        let level = done + 1;
+        let threshold = REVIEW_BASE_NODES << (level - 1);
+        if close_at + threshold <= total {
+            let key = (*close_at, level);
+            if best.as_ref().is_none_or(|(bc, _, _)| key.0 < *bc) {
+                best = Some((*close_at, level, chapter_id.clone()));
+            }
+        }
+    }
+    best.map(|(_, level, chapter_id)| DueReview { chapter_id, level })
+}
+
+/// A chapter closes exactly once, the moment its LAST member reaches the
+/// gate-satisfying state (`Demonstrated` or `Skipped` — `engine::
+/// effective_state`'s rule). `total` is the counter value at this instant.
+fn try_close(
+    total: u64,
+    satisfied: &HashSet<String>,
+    ch: &ReviewChapter,
+    closed: &mut Vec<(String, u64)>,
+) {
+    if closed.iter().any(|(id, _)| id == &ch.id) {
+        return;
+    }
+    if ch.members.iter().all(|m| satisfied.contains(m)) {
+        closed.push((ch.id.clone(), total));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::Event;
+
+    fn chapter(id: &str, members: &[&str]) -> ReviewChapter {
+        ReviewChapter {
+            id: id.to_string(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    fn gen_review(chapter_id: &str, level: u32, ts: u64) -> Event {
+        Event {
+            id: "e".to_string(),
+            ts,
+            node_id: Some(format!("{chapter_id}_review{level}")),
+            kind: EventKind::NodeGenerated {
+                move_id: "m".to_string(),
+            },
+        }
+    }
+
+    fn skipped(node_id: &str, ts: u64) -> Event {
+        Event {
+            id: "e".to_string(),
+            ts,
+            node_id: Some(node_id.to_string()),
+            kind: EventKind::NodeSkipped,
+        }
+    }
+
+    #[test]
+    fn no_chapter_no_review() {
+        let events = vec![graded("n1", 1, Grade::Demonstrated)];
+        assert_eq!(due_review(events.into_iter(), &[]), None);
+    }
+
+    #[test]
+    fn review_is_not_due_before_the_first_threshold() {
+        // NoSplit shape: the chapter generated as one node, so its OWN id
+        // is the member. It closes at total 1; only 3 more nodes complete —
+        // under 5.
+        let ch = chapter("c1", &["c1"]);
+        let events = vec![
+            graded("c1", 1, Grade::Demonstrated),
+            graded("n1", 2, Grade::Demonstrated),
+            graded("n2", 3, Grade::Demonstrated),
+            graded("n3", 4, Grade::Demonstrated),
+        ];
+        assert_eq!(due_review(events.into_iter(), &[ch]), None);
+    }
+
+    #[test]
+    fn first_review_comes_due_five_nodes_after_close() {
+        let ch = chapter("c1", &["n1", "n2"]);
+        let mut events = vec![
+            graded("n1", 1, Grade::Demonstrated),
+            graded("n2", 2, Grade::Demonstrated), // c1 closes at total 2
+        ];
+        for i in 0..5u64 {
+            events.push(graded(&format!("x{i}"), 3 + i, Grade::Demonstrated));
+        }
+        assert_eq!(
+            due_review(events.into_iter(), &[ch]),
+            Some(DueReview {
+                chapter_id: "c1".to_string(),
+                level: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_generated_review_is_consumed_and_the_next_level_waits_for_double() {
+        let ch = chapter("c1", &["n1", "n2"]);
+        let mut events = vec![
+            graded("n1", 1, Grade::Demonstrated),
+            graded("n2", 2, Grade::Demonstrated), // c1 closes at 2
+            // review 1 finalized (total 3): consumed...
+            gen_review("c1", 1, 3),
+            // ...then 5 more nodes (total 8): level 2 needs close+10 = 12.
+            graded("a", 4, Grade::Demonstrated),
+            graded("b", 5, Grade::Demonstrated),
+            graded("c", 6, Grade::Demonstrated),
+            graded("d", 7, Grade::Demonstrated),
+            graded("e", 8, Grade::Demonstrated),
+        ];
+        assert_eq!(due_review(events.clone().into_iter(), std::slice::from_ref(&ch)), None);
+        // Ten nodes past the close (total 12): level 2 due.
+        for i in 0..5u64 {
+            events.push(graded(&format!("y{i}"), 9 + i, Grade::Demonstrated));
+        }
+        assert_eq!(
+            due_review(events.into_iter(), &[ch]),
+            Some(DueReview {
+                chapter_id: "c1".to_string(),
+                level: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_completed_review_never_pushes_the_schedule_back() {
+        // The review node's own Demonstrated grade must not count toward
+        // the counter: here it is exactly the difference between level 2
+        // firing and not. Close at 2, nine real nodes (total 11), then the
+        // review itself demonstrates — if that counted, total would be 12 =
+        // close + 10 and level 2 would fire one node early.
+        let ch = chapter("c1", &["n1", "n2"]);
+        let mut events = vec![
+            graded("n1", 1, Grade::Demonstrated),
+            graded("n2", 2, Grade::Demonstrated), // c1 closes at 2
+            gen_review("c1", 1, 3),
+        ];
+        for i in 0..9u64 {
+            events.push(graded(&format!("x{i}"), 4 + i, Grade::Demonstrated));
+        }
+        events.push(graded("c1_review1", 13, Grade::Demonstrated));
+        assert_eq!(due_review(events.clone().into_iter(), std::slice::from_ref(&ch)), None);
+        events.push(graded("y0", 14, Grade::Demonstrated));
+        assert_eq!(
+            due_review(events.into_iter(), &[ch]),
+            Some(DueReview {
+                chapter_id: "c1".to_string(),
+                level: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn a_partial_review_is_consumed_and_never_suggested_twice() {
+        let ch = chapter("c1", &["n1"]);
+        let events = vec![
+            graded("n1", 1, Grade::Demonstrated), // close at 1
+            // review 1 generated but never demonstrated (partial) — its
+            // NodeGenerated alone consumes level 1, so the suggestion must
+            // not come back as level 1 once the first threshold passes;
+            // level 2's doubled threshold is still far away, so nothing is
+            // due at all.
+            gen_review("c1", 1, 2),
+            graded("x1", 3, Grade::Demonstrated),
+            graded("x2", 4, Grade::Demonstrated),
+            graded("x3", 5, Grade::Demonstrated),
+            graded("x4", 6, Grade::Demonstrated),
+            graded("x5", 7, Grade::Demonstrated), // total 6 >= close 1 + 5
+        ];
+        assert_eq!(due_review(events.into_iter(), &[ch]), None);
+    }
+
+    #[test]
+    fn a_skipped_member_still_closes_the_chapter() {
+        let ch = chapter("c1", &["n1", "n2"]);
+        let events = vec![
+            graded("n1", 1, Grade::Demonstrated),
+            skipped("n2", 2), // closes c1 at 1
+            graded("x1", 3, Grade::Demonstrated),
+            graded("x2", 4, Grade::Demonstrated),
+            graded("x3", 5, Grade::Demonstrated),
+            graded("x4", 6, Grade::Demonstrated),
+            graded("x5", 7, Grade::Demonstrated), // total 6 = close 1 + 5
+        ];
+        assert_eq!(
+            due_review(events.into_iter(), &[ch]),
+            Some(DueReview {
+                chapter_id: "c1".to_string(),
+                level: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn the_earliest_closed_chapter_wins_when_several_are_due() {
+        let first = chapter("c1", &["n1"]);
+        let second = chapter("c2", &["n2"]);
+        let events = vec![
+            graded("n1", 1, Grade::Demonstrated), // c1 closes at 1
+            graded("x1", 2, Grade::Demonstrated),
+            graded("x2", 3, Grade::Demonstrated),
+            graded("x3", 4, Grade::Demonstrated),
+            graded("x4", 5, Grade::Demonstrated),
+            graded("x5", 6, Grade::Demonstrated), // c1 due (1+5 <= 6)
+            graded("n2", 7, Grade::Demonstrated), // c2 closes at 7 — not due yet
+        ];
+        assert_eq!(
+            due_review(events.into_iter(), &[first, second]),
+            Some(DueReview {
+                chapter_id: "c1".to_string(),
+                level: 1,
+            })
+        );
+    }
 
     fn graded(node_id: &str, ts: u64, grade: Grade) -> Event {
         Event {

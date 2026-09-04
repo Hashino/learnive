@@ -730,26 +730,29 @@ pub struct OutlineItemView {
 #[derive(Serialize)]
 pub struct OutlineResp {
     pub(super) items: Vec<OutlineItemView>,
-    /// §S5 revisit scheduler: the currently-skipped node deferred longest,
-    /// if any (`events::aggregate::revisit_suggestion`) — a spacing
-    /// suggestion, not a mandate; the learner can pick any other reachable
-    /// item instead.
+    /// S33-3 spaced review scheduler (`events::aggregate::due_review`): the
+    /// chapter review due RIGHT NOW, if any — the one the client's
+    /// advance should generate before the next regular node. A suggestion,
+    /// not a mandate; the learner can pick any other reachable item
+    /// instead, and the suggestion simply stays until they act on it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) suggested_revisit: Option<String>,
+    pub(super) due_review: Option<DueReviewView>,
 }
 
-/// §S5 revisit scheduler, wired to the response: see
-/// `events::aggregate::revisit_suggestion` for the actual heuristic.
-pub(super) fn suggested_revisit(
-    state: &AppState,
-    doc_id: &str,
-) -> Result<Option<String>, ApiError> {
-    let event_log = state.store.event_log(doc_id)?;
-    Ok(revisit_suggestion(
-        event_log
-            .iter()
-            .map_err(|e| ApiError::Internal(e.to_string()))?,
-    ))
+/// The client-facing shape of a due review. `item_id` is the review node's
+/// id (`{chapter_id}_review{level}`) — an item that may NOT exist in
+/// `items` yet (materialization happens on the generate path, never on a
+/// GET, §3.1): the client hands it to `openNode` directly, whose 404 →
+/// generate fallback is exactly the materialization trigger.
+#[derive(Serialize)]
+pub(super) struct DueReviewView {
+    pub(super) item_id: String,
+    pub(super) chapter_id: String,
+    pub(super) level: u32,
+    /// The chapter's own title — the review reactivates it, so the hint
+    /// names the chapter even though the review item itself isn't
+    /// materialized yet.
+    pub(super) title: String,
 }
 
 /// Resolves every item's gate state against the event log in one fold

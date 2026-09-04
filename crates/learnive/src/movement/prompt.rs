@@ -213,9 +213,15 @@ fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
 /// node, in a "recursive functions in Rust" document, ended up teaching
 /// recursion's base case/recursive step and setting a recursive exercise —
 /// the parent node's own material, taught before the parent node existed.
-fn scope_addendum(parent_title: Option<&str>, item_title: &str) -> String {
+fn scope_addendum(parent_title: Option<&str>, item_title: &str, review_mode: bool) -> String {
+    // A review node (§S15 learner-chosen, or S33-3's scheduled chapter
+    // review) sits UNDER its parent in the tree but the parent is already
+    // taught — "a prerequisite step toward X, taught later" is false for
+    // it, and `review_addendum` already carries the only scoping a review
+    // needs.
     match parent_title {
         None => String::new(),
+        Some(_) if review_mode => String::new(),
         Some(parent) => format!(
             " This node is a PREREQUISITE STEP toward \"{parent}\", which is \
              its own separate node, taught later. Stay strictly inside \
@@ -350,7 +356,11 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
     format!(
         "{base}{integration}{interleave}{}{}{}{}{}",
         review_addendum(ctx.review_mode, move_type),
-        scope_addendum(ctx.parent_title.as_deref(), &ctx.item_title),
+        scope_addendum(
+            ctx.parent_title.as_deref(),
+            &ctx.item_title,
+            ctx.review_mode
+        ),
         remediation_addendum(ctx, move_type),
         fade_addendum(ctx.scaffolding),
         grounding_correction_addendum(ctx.grounding_correction.as_deref()),

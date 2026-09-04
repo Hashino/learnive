@@ -194,21 +194,23 @@ function renderOutline() {
     });
 }
 
-// §S5 revisit scheduler: shows the server's suggestion (the
-// longest-deferred skipped node), clickable, or hides the hint when
-// there's nothing to suggest.
+// S33-3: the outline's only suggestion is the chapter review DUE right now
+// (the skip-based `suggested_revisit` is gone). The review item usually
+// isn't materialized yet — `due_review` carries its id and title directly,
+// and `openNode`'s 404 -> generate fallback is what materializes it
+// (server-side, on the POST path; a GET never mutates).
 function renderRevisitHint() {
   const hint = el("revisitHint");
-  const target = state.allItems.find((it) => it.id === state.suggestedRevisit);
-  if (!target) {
+  const due = state.dueReview;
+  if (!due) {
     hint.hidden = true;
     hint.onclick = null;
     return;
   }
   hint.hidden = false;
-  hint.textContent = t("revisit.hint", target.title);
+  hint.textContent = t("revisit.hint", due.title);
   hint.style.cursor = "pointer";
-  hint.onclick = () => openNode(target.id);
+  hint.onclick = () => openNode(due.item_id);
 }
 
 // Re-reads the outline's gate state from the server (§S5) — called
@@ -218,7 +220,7 @@ async function refreshOutline() {
   if (resp.ok) {
     const data = await resp.json();
     setOutlineItems(data.items);
-    state.suggestedRevisit = data.suggested_revisit || null;
+    state.dueReview = data.due_review || null;
     renderOutline();
     renderRevisitHint();
   }
@@ -331,7 +333,7 @@ async function skipCurrentNode() {
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
     setOutlineItems(data.items);
-    state.suggestedRevisit = data.suggested_revisit || null;
+    state.dueReview = data.due_review || null;
     renderOutline();
     renderRevisitHint();
     // §S15: same full-tree search as renderSkipControl above.
