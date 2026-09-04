@@ -374,7 +374,6 @@ function resetNodeView() {
   state.sections.clear();
   el("nodeSections").innerHTML = "";
   if (edgeObserver) edgeObserver.disconnect();
-  el("planProposal").hidden = true;
   clearReadingLine();
 }
 
