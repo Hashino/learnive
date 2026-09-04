@@ -251,7 +251,7 @@ mod tests {
             std::env::temp_dir().join(format!("learnive-toc-bench-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         // Preload every library book's TOC once (local, no API).
         let mut tocs: Vec<(String, Vec<(usize, String, usize)>)> = Vec::new();
@@ -402,7 +402,7 @@ mod deduction {
             std::env::temp_dir().join(format!("learnive-dedup-bench-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         let dir = std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -546,7 +546,7 @@ mod raw_probe {
             std::env::temp_dir().join(format!("learnive-raw-probe-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         let dir = std::path::PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),

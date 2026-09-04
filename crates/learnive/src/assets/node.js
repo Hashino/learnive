@@ -531,8 +531,8 @@ async function continueGeneration(rec, id) {
 
 // §S18: performs exactly ONE `/generate` request. The server now settles at
 // most one real move per request, ending the stream with `move_paused`
-// (more moves remain — pause and let the learner read) or `done`/
-// `plan_proposal` (node finished, one way or another) — see
+// (more moves remain — pause and let the learner read) or `done` (the
+// node's graded move landed and `finalize` ran) — see
 // `api::generation::generate_node`'s doc comment for the full event
 // vocabulary. Shared by `generateNode` (the node's first move, after DOM
 // reset) and `continueGeneration` (every later move).
@@ -635,15 +635,7 @@ async function streamMoveRequest(rec, id) {
         // submit target match what was actually generated.
         rec.nodeId = data;
         renderExerciseInto(rec, data);
-      } else if (event === "plan_proposal") {
-        // A `plan` move proposed a structural outline change (§5) —
-        // this generation request ends here, unfinished, awaiting the
-        // learner's decision (nothing was persisted for this attempt).
-        renderPlanProposal(rec, JSON.parse(data));
       } else if (event === "done") {
-        // Empty data means a plan_proposal paused this request instead
-        // of finishing a node — renderPlanProposal already set up the
-        // approve/reject controls, so leave them alone.
         if (data) {
           state.nodeId = data;
           rec.prose.dataset.nodeId = data;
@@ -720,50 +712,6 @@ function renderExerciseInto(rec, nodeId) {
   const iframe = buildExerciseIframe(nodeId);
   rec.exercise.replaceChildren(iframe);
   rec.exerciseFrame = iframe;
-}
-
-// Shows a `plan` move's proposed outline revision (§5 propose→approve,
-// §S4). The rationale is sanitized prose (app origin, same contract as
-// the node's own prose); the proposed titles are plain text. `#planProposal`
-// stays a single shared element (index.html) rather than one per section —
-// a `plan` move can only fire on the frontier node currently generating,
-// which is always the last section, so its fixed position after
-// `#nodeSections` already lines up right where it needs to be.
-function renderPlanProposal(rec, proposal) {
-  rec.controls.innerHTML = "";
-  el("planRationale").innerHTML = sanitizeHtml(proposal.html);
-  el("planProposedOutline").innerHTML = proposal.proposed
-    .map((t) => "<li>" + escapeHtml(t) + "</li>")
-    .join("");
-  el("planProposal").hidden = false;
-}
-
-el("planApproveBtn").addEventListener("click", () => decidePlanProposal(true));
-el("planRejectBtn").addEventListener("click", () => decidePlanProposal(false));
-
-// Either way the proposal is resolved and the interrupted generation
-// attempt is retried from scratch — any of its moves that had already
-// settled (§S6 follow-up) live in an unfinalized node the retry simply
-// overwrites, never read as real content until a future `finalize` runs.
-async function decidePlanProposal(approve) {
-  el("planProposal").hidden = true;
-  try {
-    const resp = await postJson(
-      `/api/documents/${state.docId}/plan/decide`,
-      { approve },
-    );
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    setOutlineItems(data.items);
-    renderOutline();
-  } catch (err) {
-    const rec = state.sections.get(state.currentId);
-    (rec ? rec.result : el("nodeSections")).innerHTML =
-      '<span class="error">plan decision failed: ' +
-      escapeHtml(String(err)) +
-      "</span>";
-  }
-  generateNode(state.currentId);
 }
 
 // Builds a sandboxed exercise iframe (used for the node's check AND for the

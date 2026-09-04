@@ -1,4 +1,4 @@
-use super::{AgentPolicy, MoveContext, MoveRecord, MoveRender, MoveType};
+use super::{MoveContext, MoveType};
 use crate::ai::ChatMessage;
 use crate::engine::prompt::{
     CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
@@ -62,13 +62,11 @@ pub fn verify_grounding(source_text: &str, generated_html: &str) -> Vec<ChatMess
 }
 
 /// Continuity instruction + the node's own verbatim tail (§14 budget),
-/// shared by `generate_move_streamed`/`generate_move` — `decide_move`
-/// already got `node_tail` (line ~90); the content-writing calls didn't,
-/// which is exactly why a node's second move used to open with its own
-/// fresh `<h2>` repeating the concept title, reintroducing it from
-/// scratch as if the first move had never run (seen live, 2026-08-15: a
-/// node's `explain` and `integrate` moves each titled themselves
-/// "Noção de iteração em programação").
+/// shared by `generate_move_streamed`/`generate_move`. Without it a node's
+/// second move used to open with its own fresh `<h2>` repeating the concept
+/// title, reintroducing it from scratch as if the first move had never run
+/// (seen live, 2026-08-15: a node's `explain` and `integrate` moves each
+/// titled themselves "Noção de iteração em programação").
 fn continuity_note() -> &'static str {
     "If \"Node content so far\" below is non-empty, this move is NOT the \
      first in this node — it continues content the learner already read. \
@@ -139,211 +137,6 @@ fn not_yet_taught_line(ctx: &MoveContext) -> String {
     }
 }
 
-/// Renders `MoveContext::observation` (§S18) as a user-message line — the
-/// event log's fold of what the learner did between the last move settling
-/// and this `decide_move` call. Empty when nothing happened (a request
-/// reopened immediately, e.g. right after a `research` pick with nothing to
-/// read yet), so a quiet window adds no noise to the prompt.
-fn observation_line(ctx: &MoveContext) -> String {
-    let o = &ctx.observation;
-    if !o.reached_end && o.questions.is_empty() && o.annotations.is_empty() {
-        return String::new();
-    }
-    let mut parts = Vec::new();
-    if o.reached_end {
-        parts.push("read to the end of the last move's content".to_string());
-    }
-    if !o.questions.is_empty() {
-        parts.push(format!("asked: {}", o.questions.join(" | ")));
-    }
-    if !o.annotations.is_empty() {
-        parts.push(format!(
-            "annotated near block(s): {}",
-            o.annotations.join(", ")
-        ));
-    }
-    format!(
-        "\nWhat the learner did since the last move: {}",
-        parts.join("; ")
-    )
-}
-
-fn describe_prior(prior: &[MoveRecord]) -> String {
-    if prior.is_empty() {
-        return "(none — this is the first move)".to_string();
-    }
-    prior
-        .iter()
-        .map(|m| {
-            if m.graded {
-                format!("{} (graded)", m.move_type)
-            } else {
-                m.move_type.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// The move menu, with `profile` (§7) dropped when there is nothing for it
-/// to investigate.
-///
-/// A `profile` move probes an OPEN HYPOTHESIS about the learner; on a fresh
-/// document there are none, and the per-move instruction used to handle
-/// that by asking the model to "skip this move type". A model cannot skip a
-/// move it was just told to write: seen live (2026-08-14, first node of a
-/// new document) it dutifully wrote the skip itself into the document —
-/// "Nenhuma hipótese aberta foi listada… nenhuma investigação será gerada."
-/// as the learner's opening prose. So the option is withheld instead of
-/// restraint being requested.
-fn candidate_types(ctx: &MoveContext) -> Vec<MoveType> {
-    let mut types = vec![MoveType::Explain, MoveType::Ask, MoveType::Test];
-    if ctx.profile.contains(crate::profile::HYPOTHESES_HEADER) {
-        types.push(MoveType::Profile);
-    }
-    types.extend([
-        MoveType::Confront,
-        MoveType::Integrate,
-        MoveType::Revisit,
-        MoveType::Plan,
-    ]);
-    // Offered only when there is genuinely nothing to ground on — same
-    // withhold-don't-ask-restraint pattern as `profile` above (a model told
-    // "research is available" when grounding already exists has no reason
-    // not to pick it "just in case", spending a whole move on nothing).
-    if !ctx.research_attempted && ctx.grounding.trim().is_empty() {
-        types.push(MoveType::Research);
-    }
-    types
-}
-
-fn menu(policy: AgentPolicy, ctx: &MoveContext) -> String {
-    let types = candidate_types(ctx)
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    match policy {
-        AgentPolicy::L1 => format!(
-            "Choose the NEXT move from EXACTLY this closed menu: {types}. \
-             Pick one type; do not combine or invent one."
-        ),
-        AgentPolicy::L2 => format!(
-            "Choose the NEXT move. Prefer a named type ({types}) but you may \
-             use \"other\" for a bespoke move that doesn't fit any of them."
-        ),
-        AgentPolicy::L0 => unreachable!("L0 decides via l0_next_move, never the AI"),
-    }
-}
-
-/// Prompt for `decide_move` (L1/L2 only — L0 never calls this). Carries
-/// `outline_context`/grounding in the user message (S18 minor correction 1)
-/// — both fields were already populated on `ctx` and used by
-/// `generate_move_streamed`, but this prompt omitted them, so the tutor
-/// picked the next move blind to what earlier nodes already taught or what
-/// sources are available to ground in.
-pub fn decide_move(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::system(format!(
-            "You are a personal tutor deciding what to do next in a living \
-             document — the app is the learner's tutor, not a fixed \
-             exercise machine. {}\n\
-             Respond ONLY with JSON choosing the next move: \
-             {{\"move_type\":\"...\",\"rationale\":\"one short sentence\"}}.",
-            menu(policy, ctx)
-        )),
-        ChatMessage::user(format!(
-            "Overall topic: {}\nConcept of this node: {}\n\
-             Context of what has been taught so far: {}{}\n\
-             Curriculum objective: {}\nLearner profile: {}{}\n\
-             Moves already in this node: {}\n\
-             Node content so far (tail): {}{}",
-            ctx.topic,
-            ctx.item_title,
-            non_empty(&ctx.outline_context),
-            not_yet_taught_line(ctx),
-            non_empty(&ctx.objective),
-            non_empty(&ctx.profile),
-            sources_block(&ctx.grounding),
-            describe_prior(&ctx.prior_moves),
-            non_empty(tail_chars(&ctx.node_tail, 1500)),
-            observation_line(ctx),
-        )),
-    ]
-}
-
-/// Prompt for the merged decide+generate call (§14 latency,
-/// `decide_and_generate`, L1/L2 only) — see the module docs' "merged
-/// decide+generate" note. Asks for a leading `<!--move: type-->` marker
-/// (mirrors the existing trailing `<!--tactics: ...-->` sentinel, just
-/// leading); if the chosen type renders streamed, the model keeps writing
-/// that move's full content in the SAME response, under the same contract as
-/// `generate_move_streamed`. If it renders structured, the model is told to
-/// write NOTHING else — the caller makes a real `generate_move` call for
-/// that content (see the module docs for why this call never asks a
-/// structured type to stream its own JSON).
-pub fn decide_and_generate(policy: AgentPolicy, ctx: &MoveContext) -> Vec<ChatMessage> {
-    let candidates = candidate_types(ctx);
-    let streamed_purposes = candidates
-        .iter()
-        .filter(|t| t.render() == MoveRender::Streamed)
-        .map(|t| format!("- \"{t}\": {}", purpose(*t, ctx)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let structured_names = candidates
-        .iter()
-        .filter(|t| t.render() == MoveRender::Structured)
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let cite = cite_addendum(&ctx.grounding);
-    let lang = language_directive(ctx.locale);
-
-    vec![
-        ChatMessage::system(format!(
-            "You are a personal tutor deciding what to do next in a living \
-             document, and — for most outcomes — generating it in the SAME \
-             response. {}\n\n\
-             STEP 1: on the very first line, write EXACTLY one HTML comment \
-             naming your choice: <!--move: type-->. No text before it.\n\n\
-             STEP 2: what comes after depends on which type you chose:\n\
-             - If you chose one of: {structured_names} — write NOTHING else. \
-             Stop immediately after the marker; that move's content is \
-             generated in a separate call.\n\
-             - If you chose one of the other types, continue in the SAME \
-             response with that move's full content, following the guidance \
-             for whichever you picked:\n{streamed_purposes}\n\n\
-             {}\n\n{}\n\n{lang}\n\n{PROSE_HTML_CONTRACT}\n\n{ISLAND_CONTRACT}\n\n{cite}\n\n\
-             If you continued with content, after your HTML, on its own line, \
-             append an HTML comment listing the tactic self-labels you used \
-             (e.g. \"analogy\", \"worked-example\", \"interactive-visual\", \
-             \"formal-first\"): <!--tactics: label-one, label-two-->. This \
-             comment is invisible when rendered and is stripped before \
-             storage — it is bookkeeping, not content.",
-            menu(policy, ctx),
-            continuity_note(),
-            topic_scope_note(),
-        )),
-        ChatMessage::user(format!(
-            "Overall topic: {}\nConcept of this node: {}\n\
-             Context of what has been taught so far: {}{}\n\
-             Curriculum objective: {}\nLearner profile: {}\n\
-             Moves already in this node: {}{}{}",
-            ctx.topic,
-            ctx.item_title,
-            non_empty(&ctx.outline_context),
-            not_yet_taught_line(ctx),
-            non_empty(&ctx.objective),
-            non_empty(&ctx.profile),
-            describe_prior(&ctx.prior_moves),
-            sources_block(&ctx.grounding),
-            node_so_far_line(ctx),
-        )),
-    ]
-}
-
-/// Last `max_chars` characters of `s` (char-boundary safe) — the §14
-/// verbatim-tail budget for `decide_move`'s context.
 fn tail_chars(s: &str, max_chars: usize) -> &str {
     match s.char_indices().rev().nth(max_chars.saturating_sub(1)) {
         Some((i, _)) => &s[i..],
@@ -515,11 +308,6 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              not include an exercise or ask a question — those are separate \
              moves."
             .to_string(),
-        MoveType::Confront => "Build the STRONGEST counter-argument to the learner's stated \
-             position: be adversarial, not flattering. Distinguish \
-             legitimate disagreement from a misconception — if it looks like \
-             the latter, say so and explain why, gently but plainly."
-            .to_string(),
         MoveType::Respond => respond_purpose(ctx),
         MoveType::Test => "This move MUST be graded: produce a comprehension check AND its \
              rubric, locked together. Every 'application' objective needs \
@@ -528,36 +316,25 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
              node's exercise, this check must probe something genuinely new — \
              not the same operation on cosmetically different numbers/names."
             .to_string(),
-        MoveType::Profile => "Investigate ONE of the open hypotheses about the learner listed in \
-             the profile context: ONE short conversational question about HOW \
-             the learner thinks about or approaches this concept. If none is \
-             listed (L2 may still pick this move off-menu), ask one short \
-             question about how the learner would approach THIS concept \
-             instead. This is NOT an exercise: never pose a task with a \
-             correct answer to check ('write a function that…', 'calculate…', \
-             'implement…'), never require code or a worked solution, never \
-             emit a form — that is what the \"test\" move is for. graded MUST \
-             be false. NEVER write about the absence of a hypothesis: \
-             whatever you produce is what the learner reads."
-            .to_string(),
         MoveType::Integrate => "Connect this node's concept to concept(s) the learner has \
              ALREADY been taught — named in \"Context of what has been \
-             taught so far\" or earlier in \"Moves already in this node\". \
-             Never integrate forward into \"Curriculum objective\" or a \
-             concept not yet taught: do not preview, name, or state the \
-             curriculum's final definition/destination, even to foreshadow \
-             where the material is headed. If nothing has been taught yet to \
-             integrate with, pick a different move instead of forcing one."
+             taught so far\" or earlier in this same node. Never integrate \
+             forward into \"Curriculum objective\" or a concept not yet \
+             taught: do not preview, name, or state the curriculum's final \
+             definition/destination, even to foreshadow where the material \
+             is headed. If nothing has been taught yet to integrate with, \
+             say so plainly instead of forcing a connection."
             .to_string(),
-        MoveType::Plan => "Revise the outline non-destructively ONLY if you have a concrete \
-             structural change to propose (reordering, adding, splitting, or \
-             removing concepts) — write your rationale as short prose in \"html\" \
-             and put the COMPLETE revised ordered list of outline item titles \
-             (existing titles you keep, unchanged, plus the new/changed ones) in \
-             the \"outline\" field. If you have nothing structural to propose \
-             right now, just remark in \"html\" and leave \"outline\" empty — the \
-             learner is never asked to approve a non-change."
+        MoveType::Revisit => "Reactivate, don't re-teach: one compact pass that brings THIS \
+             node's concept back to active recall — state the concept, name \
+             the one or two things most worth remembering, and connect them \
+             to what the learner has read since. Do NOT re-derive or \
+             re-explain the full lesson: the learner has seen it before, and \
+             the point of this move is retrieval, not repetition."
             .to_string(),
+        // `Research` is intercepted by the orchestration loop and never
+        // rendered; `Other` is a deserialization catch-all, never generated.
+        // The catch-all stays so the match is total without panicking.
         _ => "Produce this move's content, atomic and focused on its stated purpose.".to_string(),
     };
     let integration = if move_type == MoveType::Test {
@@ -584,27 +361,26 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
 /// old `answer_question`/`subnode_prose` system messages — branches on
 /// `MoveContext::spawned_section_title` to tell the two `AskDecision`
 /// outcomes apart, same distinction `api::reading::ask_question` already
-/// made before this slice, just now expressed as prompt text instead of two
-/// separate functions.
+/// made before that slice, just now expressed as prompt text.
 fn respond_purpose(ctx: &MoveContext) -> String {
     let question = ctx.question.as_deref().unwrap_or("(no question given)");
     match ctx.spawned_section_title.as_deref() {
         Some(sub_title) => format!(
             "The learner asked a question that warrants a real new section of \
-             the living document (§7/§9), not a short inline reply — it will be \
+             the living document, not a short inline reply — it will be \
              spliced permanently into the document, right after the paragraph \
              where they asked. Write it as a self-contained elaboration titled \
              \"{sub_title}\": someone reading only this section, without the \
              surrounding conversation, should still follow it. Answer the \
              question directly; if it states a position or disagreement, engage \
-             dialectically rather than flattering or simply validating it (§7). \
+             dialectically rather than flattering or simply validating it. \
              The learner's question: {question}"
         ),
         None => format!(
             "Answer the learner's question directly and completely — do not \
              repeat the whole node's content, resolve the specific doubt. If \
              it states a position or disagreement, engage dialectically rather \
-             than flattering or simply validating it (§7); a plain clarifying \
+             than flattering or simply validating it; a plain clarifying \
              question just gets a clear, honest answer. The learner's \
              question: {question}"
         ),
@@ -679,44 +455,29 @@ fn remediation_addendum(ctx: &MoveContext, move_type: MoveType) -> String {
 
 /// Prompt for the **streamed** path (`MoveRender::Streamed` types): pure
 /// prose contract, no JSON envelope — flags are fixed by the caller from
-/// the type, not emitted here. Tactics ride a trailing sentinel comment
-/// (stripped server-side, never shown — see the module docs).
+/// the type, not emitted here.
 pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
     let cite = cite_addendum(&ctx.grounding);
     let lang = language_directive(ctx.locale);
-    // A `plan` move's whole job is reasoning about the outline/topic as a
-    // structural whole — the "don't teach the overall topic" framing below
-    // would be irrelevant noise there, not a helpful constraint.
-    let scope_note = if move_type == MoveType::Plan {
-        ""
-    } else {
-        topic_scope_note()
-    };
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {}\n\n{}\n\n{scope_note}\n\n{lang}\n\n\
+             for a living document. {}\n\n{}\n\n{}\n\n{lang}\n\n\
              {PROSE_HTML_CONTRACT}\n\n\
-             {ISLAND_CONTRACT}\n\n{cite}\n\n\
-             After your HTML, on its own line, append an HTML comment \
-             listing the tactic self-labels you used (e.g. \"analogy\", \
-             \"worked-example\", \"interactive-visual\", \"formal-first\"): \
-             <!--tactics: label-one, label-two-->. This comment is invisible \
-             when rendered and is stripped before storage — it is bookkeeping, \
-             not content.",
+             {ISLAND_CONTRACT}\n\n{cite}",
             purpose(move_type, ctx),
-            continuity_note()
+            continuity_note(),
+            topic_scope_note()
         )),
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
              Context of what has been taught so far: {}{}\n\
-             Curriculum objective: {}\nLearner profile: {}{}{}{}",
+             Curriculum objective: {}{}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
             not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
-            non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
             node_so_far_line(ctx),
             reading_selection_line(ctx),
@@ -727,9 +488,8 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
 /// §S17: renders `MoveContext::reading_context` (a `Respond` move's
 /// selection/reading-line anchor) as a user-message line — mirrors
 /// `engine::prompt`'s old `reading_context_block`, just folded into the
-/// shared streamed-path builder instead of a separate `answer_question`
-/// prompt function. Empty for every move type/caller with no reading
-/// context set.
+/// shared streamed-path builder. Empty for every move type/caller with no
+/// reading context set.
 fn reading_selection_line(ctx: &MoveContext) -> String {
     match ctx.reading_context.as_deref() {
         Some(t) if !t.trim().is_empty() => format!("\nWhere the learner is reading: {t}"),
@@ -738,17 +498,13 @@ fn reading_selection_line(ctx: &MoveContext) -> String {
 }
 
 /// Prompt for the **structured** path (`MoveRender::Structured` types):
-/// JSON envelope with flags + tactics + (if graded) objectives. Contract
-/// choice mirrors §3.1/§4.4 exactly as `engine::prompt` does: `test`
-/// (always graded, sandbox-capable) gets `EXERCISE_HTML_CONTRACT`; the
-/// rest get `PROSE_HTML_CONTRACT` — getting this backwards means a graded
+/// JSON envelope with flags + (if graded) objectives. Contract choice
+/// mirrors §3.1/§4.4 exactly as `engine::prompt` does: `test` (always
+/// graded, sandbox-capable) gets `EXERCISE_HTML_CONTRACT`; anything else
+/// gets `PROSE_HTML_CONTRACT` — getting this backwards means a graded
 /// move's JS vanishes on render, or sanitized prose gets exercise-only
 /// guidance.
-pub fn generate_move(
-    policy: AgentPolicy,
-    move_type: MoveType,
-    ctx: &MoveContext,
-) -> Vec<ChatMessage> {
+pub fn generate_move(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
     let contract = match move_type {
         MoveType::Test => EXERCISE_HTML_CONTRACT,
         _ => PROSE_HTML_CONTRACT,
@@ -762,29 +518,19 @@ pub fn generate_move(
     } else {
         cite_addendum(&ctx.grounding)
     };
-    let rung_note = match policy {
-        AgentPolicy::L0 => "This move type was chosen by a fixed rule.",
-        AgentPolicy::L1 => "This move type was chosen from a closed menu.",
-        AgentPolicy::L2 => "This move type was chosen freely.",
-    };
     let lang = language_directive(ctx.locale);
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
-             for a living document. {rung_note} {}\n\n{}\n\n{}\n\n{lang}\n\n\
+             for a living document. {}\n\n{}\n\n{}\n\n{lang}\n\n\
              {contract}\n\n{cite}\n\n\
-             Also emit the tactic self-labels you used (e.g. \"analogy\", \
-             \"worked-example\", \"interactive-visual\", \"formal-first\") — \
-             short kebab-case tags, in the SAME call (§7).\n\n\
              Respond ONLY with the Move JSON contract: \
              {{\"html\":\"...\",\"interactive\":true|false,\"graded\":true|\
-             false,\"tactics\":[\"...\"],\"reference_solution\":\"...\",\
+             false,\"reference_solution\":\"...\",\
              \"objectives\":[{{\"id\":\"o1\",\
              \"kind\":\"knowledge|application|synthesis\",\"description\":\
-             \"...\",\"criteria\":\"...\",\"transfer\":true|false}}],\
-             \"outline\":[\"...\"]}}. Omit \"objectives\" (or leave it empty) \
-             when graded=false. Omit \"outline\" (or leave it empty) for every \
-             move type except \"plan\" with a concrete structural change. \
+             \"...\",\"criteria\":\"...\",\"transfer\":true|false}}]}}. \
+             Omit \"objectives\" (or leave it empty) when graded=false. \
              Omit \"reference_solution\" when graded=false; when graded=true \
              (a \"test\" move) it is REQUIRED — the worked-out correct answer \
              to the exact task in html, server-only, never shown to the \
@@ -796,13 +542,12 @@ pub fn generate_move(
         ChatMessage::user(format!(
             "Overall topic: {}\nConcept of this node: {}\n\
              Context of what has been taught so far: {}{}\n\
-             Curriculum objective: {}\nLearner profile: {}{}{}",
+             Curriculum objective: {}{}{}",
             ctx.topic,
             ctx.item_title,
             non_empty(&ctx.outline_context),
             not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
-            non_empty(&ctx.profile),
             sources_block(&ctx.grounding),
             node_so_far_line(ctx),
         )),
@@ -812,38 +557,6 @@ pub fn generate_move(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn menu_text(ctx: &MoveContext) -> String {
-        decide_move(AgentPolicy::L1, ctx)
-            .into_iter()
-            .map(|m| m.content)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// §S13 withhold-don't-ask-restraint: `research` only belongs on the
-    /// menu when there is genuinely nothing to ground on yet, and must
-    /// disappear the moment either grounding exists or one attempt already
-    /// ran this node — otherwise a model "offered" the option with nothing
-    /// to gain picks it anyway (the same failure mode `profile` had before
-    /// it was withheld the same way).
-    #[test]
-    fn research_offered_only_when_ungrounded_and_unattempted() {
-        let bare = MoveContext::default();
-        assert!(menu_text(&bare).contains(", research"));
-
-        let grounded = MoveContext {
-            grounding: "[id: x | loc: sec:1 | Title — Sec]\nSome passage.".into(),
-            ..Default::default()
-        };
-        assert!(!menu_text(&grounded).contains(", research"));
-
-        let attempted = MoveContext {
-            research_attempted: true,
-            ..Default::default()
-        };
-        assert!(!menu_text(&attempted).contains(", research"));
-    }
 
     /// §S15: a node with materialized children must be told, in its `test`
     /// move, to integrate them rather than probe each in isolation — the
@@ -855,12 +568,12 @@ mod tests {
             children_titles: vec!["Product rule".into(), "Chain rule".into()],
             ..Default::default()
         };
-        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &with_children)[0].content;
+        let sys = &generate_move(MoveType::Test, &with_children)[0].content;
         assert!(sys.contains("Product rule"));
         assert!(sys.contains("MUST require combining"));
 
         let bare = MoveContext::default();
-        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &bare)[0].content;
+        let sys = &generate_move(MoveType::Test, &bare)[0].content;
         assert!(!sys.contains("MUST require combining"));
     }
 
@@ -893,12 +606,12 @@ mod tests {
             interleave_titles: vec!["Product rule".into()],
             ..Default::default()
         };
-        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &with_nearby)[0].content;
+        let sys = &generate_move(MoveType::Test, &with_nearby)[0].content;
         assert!(sys.contains("Product rule"));
         assert!(sys.contains("DISTINGUISHING"));
 
         let bare = MoveContext::default();
-        let sys = &generate_move(AgentPolicy::L1, MoveType::Test, &bare)[0].content;
+        let sys = &generate_move(MoveType::Test, &bare)[0].content;
         assert!(!sys.contains("DISTINGUISHING"));
     }
 
@@ -942,7 +655,7 @@ mod tests {
         assert!(explain_sys.contains("compact"));
         assert!(explain_sys.contains("own definition"));
 
-        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &review)[0].content;
+        let test_sys = &generate_move(MoveType::Test, &review)[0].content;
         assert!(test_sys.contains("REVIEW"));
         assert!(test_sys.contains("MUST be graded"));
         assert!(test_sys.contains("own concept"));
@@ -968,7 +681,7 @@ mod tests {
         assert!(explain_sys.contains("recursive functions in Rust"));
         assert!(explain_sys.contains("Defining and calling functions in Rust"));
 
-        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &sub_node)[0].content;
+        let test_sys = &generate_move(MoveType::Test, &sub_node)[0].content;
         assert!(test_sys.contains("PREREQUISITE STEP"));
 
         let bare = MoveContext::default();
@@ -978,41 +691,22 @@ mod tests {
 
     /// General form of the same fix, on EVERY node regardless of tree shape
     /// (not just prerequisite sub-nodes): `topic` must read as background/
-    /// emphasis guidance, never as content to teach in this node. `plan` is
-    /// exempt — its whole job is reasoning about the outline/topic as a
-    /// structural whole, so the note would be noise there.
+    /// emphasis guidance, never as content to teach in this node.
     #[test]
     fn topic_is_framed_as_emphasis_guidance_not_content_to_teach() {
         let ctx = MoveContext::default();
         let explain_sys = &generate_move_streamed(MoveType::Explain, &ctx)[0].content;
         assert!(explain_sys.contains("background/motivational context ONLY"));
 
-        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &ctx)[0].content;
+        let test_sys = &generate_move(MoveType::Test, &ctx)[0].content;
         assert!(test_sys.contains("background/motivational context ONLY"));
-
-        let plan_sys = &generate_move_streamed(MoveType::Plan, &ctx)[0].content;
-        assert!(!plan_sys.contains("background/motivational context ONLY"));
-    }
-
-    /// Live report (2026-08-17, `hidc0ayawb`): a `profile` move wrote a full
-    /// ungradable coding task ("Please define a recursive function...") as
-    /// plain prose instead of a short conversational question — the old
-    /// "targeted mini-check" wording read as license to pose a task. The
-    /// prompt must rule that out explicitly.
-    #[test]
-    fn profile_move_is_told_it_is_not_an_exercise() {
-        let ctx = MoveContext::default();
-        let profile_sys = &generate_move(AgentPolicy::L1, MoveType::Profile, &ctx)[0].content;
-        assert!(profile_sys.contains("NOT an exercise"));
-        assert!(profile_sys.contains("graded MUST be false"));
     }
 
     /// Live report (2026-08-20): a document requested in pt-BR, with the
     /// outline/objective correctly in pt-BR, still drifted into English
     /// mid-document because no move-generation prompt carried ANY language
-    /// instruction. Every content-producing prompt must now carry the
-    /// `Locale`-derived directive, on both the merged decide+generate path
-    /// and the two standalone paths, for both locales.
+    /// instruction. Every content-producing prompt must carry the
+    /// `Locale`-derived directive, on both paths, for both locales.
     #[test]
     fn every_content_prompt_carries_the_locale_directive() {
         use crate::locale::Locale;
@@ -1023,30 +717,15 @@ mod tests {
             ..Default::default()
         };
 
-        let decide_gen_en = &decide_and_generate(AgentPolicy::L1, &en)[0].content;
-        let decide_gen_pt = &decide_and_generate(AgentPolicy::L1, &pt)[0].content;
-        assert!(decide_gen_en.contains("in English"));
-        assert!(decide_gen_pt.contains("Brazilian Portuguese"));
-
         let streamed_en = &generate_move_streamed(MoveType::Explain, &en)[0].content;
         let streamed_pt = &generate_move_streamed(MoveType::Explain, &pt)[0].content;
         assert!(streamed_en.contains("in English"));
         assert!(streamed_pt.contains("Brazilian Portuguese"));
 
-        let structured_en = &generate_move(AgentPolicy::L1, MoveType::Test, &en)[0].content;
-        let structured_pt = &generate_move(AgentPolicy::L1, MoveType::Test, &pt)[0].content;
+        let structured_en = &generate_move(MoveType::Test, &en)[0].content;
+        let structured_pt = &generate_move(MoveType::Test, &pt)[0].content;
         assert!(structured_en.contains("in English"));
         assert!(structured_pt.contains("Brazilian Portuguese"));
-    }
-
-    /// §S17: `Respond` is Rust-forced (`/ask`) — it must never appear in a
-    /// menu a model can pick from, on either rung that has a real menu.
-    #[test]
-    fn respond_never_offered_in_the_menu() {
-        let ctx = MoveContext::default();
-        assert!(!menu_text(&ctx).contains("respond"));
-        let l2 = decide_move(AgentPolicy::L2, &ctx)[0].content.clone();
-        assert!(!l2.contains("respond"));
     }
 
     /// §S17: the two `AskDecision` outcomes must produce distinguishable
@@ -1117,7 +796,7 @@ mod tests {
         assert!(explain_sys.contains("2+2=?"));
         assert!(explain_sys.contains("never a heading, label, or aside"));
 
-        let test_sys = &generate_move(AgentPolicy::L1, MoveType::Test, &remediating)[0].content;
+        let test_sys = &generate_move(MoveType::Test, &remediating)[0].content;
         assert!(test_sys.contains("arithmetic wrong"));
         assert!(test_sys.contains("DIFFERENT instance"));
     }
@@ -1147,10 +826,19 @@ mod tests {
         let sys = &generate_move_streamed(MoveType::Explain, &flagged)[0].content;
         assert!(sys.contains("GROUNDING CORRECTION"));
         assert!(sys.contains("photosystem II makes plastocyanin"));
+    }
 
-        // Also reaches the structured path (`plan` is in the gate's scope).
-        let sys = &generate_move(AgentPolicy::L1, MoveType::Plan, &flagged)[0].content;
-        assert!(sys.contains("GROUNDING CORRECTION"));
+    /// S33: a `revisit` move is told to reactivate, not re-teach — the
+    /// scheduled-review move must be active retrieval, not a rerun of the
+    /// lesson (the failure that motivated the template: an L1-chosen
+    /// `revisit` on a brand-new node just re-explained it).
+    #[test]
+    fn revisit_move_is_framed_as_reactivation_not_reteaching() {
+        let ctx = MoveContext::default();
+        let sys = &generate_move_streamed(MoveType::Revisit, &ctx)[0].content;
+        assert!(sys.contains("Reactivate"));
+        assert!(sys.contains("retrieval, not repetition"));
+        assert!(!sys.contains("counter-argument"));
     }
 
     /// §S21: the verification call's own prompt names both SOURCE and

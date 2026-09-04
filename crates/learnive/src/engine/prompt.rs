@@ -536,7 +536,10 @@ pub fn grading(
              (§8). When a reference solution is given below, use it as the answer key — \
              a submission that doesn't match it on the graded specifics fails that \
              objective regardless of how confident or well-written it sounds; do not \
-             award credit for reasoning that merely sounds plausible. For each \
+             award credit for reasoning that merely sounds plausible. A defensible \
+             reading of the source material that differs from the expected answer is \
+             legitimate disagreement, not a comprehension error: grade it strictly by \
+             the rubric's own criteria, never as a failure to understand. For each \
              objective give the grade {{not_demonstrated|partial|demonstrated}} and \
              short feedback that never restates the reference solution itself. \
              Respond ONLY with JSON: \

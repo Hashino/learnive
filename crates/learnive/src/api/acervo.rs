@@ -739,7 +739,6 @@ mod tests {
             allowed_hosts: Arc::new(HashSet::from([HOST.to_string()])),
             store: crate::store::Store::open(&data_dir).unwrap(),
             ai: Arc::new(ArcSwap::from_pointee(crate::api::demo_ai())),
-            policy: Arc::new(ArcSwap::from_pointee(crate::movement::AgentPolicy::L0)),
             config: Arc::new(RwLock::new(crate::config::AppConfig::default())),
             secret: Arc::new(crate::secret::SecretStore::open(&data_dir)),
             data_dir: Arc::from(data_dir.to_string_lossy().as_ref()),

@@ -46,9 +46,6 @@ const I18N = {
     // reference — only shown when it differs from the document being read.
     "interaction.askedIn": "asked while reading {0}",
     // Plan proposal
-    "plan.title": "Proposed outline change",
-    "plan.approve": "Approve",
-    "plan.reject": "Reject",
     // Ask bar
     "ask.placeholder": "Ask about what you're reading…",
     "ask.aria": "Ask about what you're reading",
@@ -235,9 +232,6 @@ const I18N = {
     "nexttopic.title": "O que vamos aprender agora?",
     "nexttopic.button": "Continuar",
     "interaction.askedIn": "perguntado lendo {0}",
-    "plan.title": "Mudança de estrutura proposta",
-    "plan.approve": "Aprovar",
-    "plan.reject": "Rejeitar",
     "ask.placeholder": "Pergunte sobre o que está lendo…",
     "ask.aria": "Pergunte sobre o que está lendo",
     "ask.send": "Enviar",

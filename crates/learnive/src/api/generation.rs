@@ -1,13 +1,10 @@
 use super::cold_start::{acquire, outline_view, suggested_revisit};
 use super::grading::sse_frame;
-use super::reading::{
-    finalize, grounding_for, prepare, rung_for, spawn_profile_distillation, tail_chars,
-    topic_and_title,
-};
+use super::reading::{finalize, grounding_for, prepare, tail_chars, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Node generation (§6): decide → generate → stream, move by move (§14).
+// Node generation (§6): the deterministic template → generate → stream, move by move (§14).
 //
 // §S18: the loop closes by MOVE, not by node. One `/generate` request
 // produces at most one real (non-`research`) move, then ends the stream —
@@ -25,16 +22,17 @@ use super::*;
 // one real move happens.
 // ---------------------------------------------------------------------------
 
-/// Hard cap on moves generated for one node, now enforced ACROSS requests
-/// (§S18) rather than within a single one (§12.2 cost control): the node
-/// must still close in a graded check even if L1/L2 keeps picking ungraded
-/// moves, so once `prepare`'s reconstructed index reaches the last allowed
-/// slot, that request forces `test` instead of asking `decide_move` again.
-/// L0 never gets close to this (it always closes at move 2: explain, then
-/// test).
+/// Hard cap on moves generated for one node, enforced ACROSS requests
+/// (§S18) rather than within a single one (§12.2 cost control). The
+/// deterministic template closes a node in 2-3 moves, so it never comes
+/// near this; the slots exist for the research interception (which
+/// consumes one when a node starts ungrounded) and as a last-resort cost
+/// guard: once `prepare`'s reconstructed index reaches the last allowed
+/// slot, that request forces `Test` so the node still closes in a graded
+/// check (every node ends in one, §6).
 const MAX_MOVES_PER_NODE: usize = 4;
 
-/// Verbatim §14 context budget fed to `decide_move` (~1.5k chars).
+/// Verbatim §14 context budget for the move loop's own node tail (~1.5k chars).
 pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 
 /// Streams the SSE format over a POST — one real move per request as of
@@ -49,10 +47,7 @@ pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 /// request is ending here on purpose so the learner can read/interact before
 /// the client reopens `/generate` for the next move), `exercise` (the graded
 /// move's form, sandboxed), `done` (node_id — the node's graded move landed
-/// and `finalize` wrote its complete content layer; ALSO fires, with an
-/// empty payload, when a `plan` move paused this request on a proposed
-/// outline revision instead — `node.js`'s `done` handler distinguishes the
-/// two by payload emptiness, unchanged by this slice), `error`.
+/// and `finalize` wrote its complete content layer), `error`.
 ///
 /// Block-level interactive islands (§4.4/§S11) — a `<figure data-interactive>`
 /// the model opens mid-move's HTML, not the whole-move `interactive` flag
@@ -68,16 +63,6 @@ pub(super) const NODE_TAIL_BUDGET: usize = 1500;
 /// it's ever inserted, so nothing executes; it's a cosmetic gap (the island
 /// shows empty until the post-`done` refetch swaps in the properly hydrated
 /// version), not a security one.
-///
-/// `interactive:true && graded:false` on the [`GeneratedMove`] struct itself
-/// (an L1/L2 **structured** move choosing to make its *entire* output an
-/// interactive widget, e.g. `profile`, rather than prose with an island in
-/// it) is a different, still-open gap: no code path here reads that flag, so
-/// such a move's whole `html` is folded into `content_html` and sanitized as
-/// plain prose — any `<script>` it carries at the top level is stripped the
-/// same way. Not a bug to fix here; a future slice that wants a whole
-/// ungraded move to render as one sandboxed widget needs its own slot in the
-/// wire format, distinct from the island mechanism above.
 pub async fn generate_node(
     State(state): State<AppState>,
     Path((doc_id, item_id)): Path<(String, String)>,
@@ -97,7 +82,6 @@ pub async fn generate_node(
         };
 
         let ai = state.ai.load_full();
-        let config_prior = *state.policy.load_full();
         let event_log = match state.store.event_log(&doc_id) {
             Ok(l) => l,
             Err(e) => {
@@ -105,16 +89,6 @@ pub async fn generate_node(
                 return;
             }
         };
-        // §9 "mover o degrau por documento": this document's own ladder
-        // telemetry (schema violations, move-diversity collapse) can step
-        // the config prior down for THIS document, without touching
-        // `state.policy` (the global prior every other document still
-        // starts from). Computed once per node, not per move, so the whole
-        // node's move loop runs at one stable rung and the `rung` field
-        // stamped on every `MoveGenerated` below reflects what was actually
-        // used, not a stale global value.
-        let policy = rung_for(&state, &doc_id, config_prior);
-
         // §14 resilience: a prior, interrupted attempt at this same node may
         // have already completed and persisted some ungraded moves
         // (`prepare`'s `resumed_moves`/`resumed_content_html`) — seed the
@@ -132,7 +106,6 @@ pub async fn generate_node(
             outline_context: prep.context.clone(),
             grounding: prep.grounding.clone(),
             objective: prep.objective.clone(),
-            profile: prep.profile.clone(),
             children_titles: prep.children_titles.clone(),
             review_mode: prep.review_mode,
             parent_title: prep.parent_title.clone(),
@@ -140,7 +113,6 @@ pub async fn generate_node(
             prior_moves: prep.resumed_moves.clone(),
             node_tail: resumed_tail,
             locale,
-            observation: prep.observation.clone(),
             research_attempted: prep.research_attempted,
             scaffolding: prep.scaffolding,
             interleave_titles: prep.interleave_titles.clone(),
@@ -160,34 +132,25 @@ pub async fn generate_node(
         // block runs — so reusing that index here can't collide.
         let start = prep.resumed_move_index.min(MAX_MOVES_PER_NODE - 1);
         for i in start..MAX_MOVES_PER_NODE {
-            // §14: on L1/L2, `decide_and_generate` folds the decide round
-            // trip into the front of the content call itself for a
-            // `MoveRender::Streamed` pick — when it does, the stream is
-            // already open here and the `MoveRender::Streamed` branch below
-            // reuses it instead of opening a fresh one (`movement.rs`
-            // module docs, "merged decide+generate").
-            let mut pregenerated_stream: Option<crate::ai::TokenStream> = None;
+            // S33: move choice is the deterministic template
+            // (`movement::next_move`) — the model never picks. One
+            // structural interception remains: §S13/S30's research move,
+            // Rust-forced now instead of menu-offered — a node that starts
+            // with no grounding and no acquisition attempt yet acquires
+            // first (one attempt per node, `ctx.research_attempted`), then
+            // the template resumes. Like any other move it consumes one of
+            // `MAX_MOVES_PER_NODE`'s slots; the forced-`Test` last slot
+            // always outranks it, so a node can never spend its whole
+            // budget without reaching a graded check.
             let move_type = if i == MAX_MOVES_PER_NODE - 1 {
                 // Cost guard exhausted without a graded check — force one so
                 // the node still closes (every node ends in a check, §6).
                 MoveType::Test
-            } else if policy == AgentPolicy::L0 {
-                // L0 has no round trip to merge — it never called the AI to
-                // decide in the first place.
-                match movement::l0_next_move(&ctx.prior_moves) {
-                    Ok(mt) => mt,
-                    Err(e) => {
-                        yield Ok(sse_frame("error", &e.to_string()));
-                        return;
-                    }
-                }
+            } else if ctx.grounding.trim().is_empty() && !ctx.research_attempted {
+                MoveType::Research
             } else {
-                match movement::decide_and_generate(&ai, policy, &ctx).await {
-                    Ok(movement::DecidedMove::Streamed { move_type, stream }) => {
-                        pregenerated_stream = Some(stream);
-                        move_type
-                    }
-                    Ok(movement::DecidedMove::Structured { move_type }) => move_type,
+                match movement::next_move(&ctx) {
+                    Ok(mt) => mt,
                     Err(e) => {
                         yield Ok(sse_frame("error", &e.to_string()));
                         return;
@@ -197,12 +160,11 @@ pub async fn generate_node(
 
             if move_type == MoveType::Research {
                 // §S13: acquires grounding for this concept, then loops back
-                // to decide the REAL next move — never reaches `render()`
-                // (see `MoveType::Research`'s doc comment). Capped at one
-                // attempt per node-generation call via `ctx.research_attempted`
-                // (withheld from the menu once true, `movement::prompt::menu`),
-                // so a source that genuinely can't be found costs exactly one
-                // of `MAX_MOVES_PER_NODE`'s slots, never a loop.
+                // to the template — never reaches `render()` (see
+                // `MoveType::Research`'s doc comment). Capped at one attempt
+                // per node across requests via `ctx.research_attempted`
+                // (reconstructed from the log in `prepare`), so a source
+                // that genuinely can't be found costs exactly one slot.
                 let looking_en = format!("Looking for sources on {}…", ctx.item_title);
                 let looking_pt = format!("Procurando fontes sobre {}…", ctx.item_title);
                 yield Ok(sse_frame(
@@ -231,7 +193,7 @@ pub async fn generate_node(
                         move_id: engine::new_id(),
                         move_type: move_type.to_string(),
                         tactics: Vec::new(),
-                        rung: format!("{policy:?}"),
+                        rung: "deterministic".to_string(),
                     },
                 ) {
                     eprintln!("event log append failed: {e}");
@@ -245,15 +207,14 @@ pub async fn generate_node(
 
             let generated = match move_type.render() {
                 MoveRender::Streamed => {
-                    let mut tokens = match pregenerated_stream {
-                        Some(s) => s,
-                        None => match movement::generate_move_stream(&ai, move_type, &ctx).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                yield Ok(sse_frame("error", &e.to_string()));
-                                return;
-                            }
-                        },
+                    let mut tokens = match movement::generate_move_stream(&ai, move_type, &ctx)
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            yield Ok(sse_frame("error", &e.to_string()));
+                            return;
+                        }
                     };
                     // §S11: gate an interactive island's raw HTML out of the
                     // `token` frames — the client only ever sees its empty
@@ -282,7 +243,7 @@ pub async fn generate_node(
                     movement::finish_streamed_move(move_type, &accumulated)
                 }
                 MoveRender::Structured => {
-                    match movement::generate_move(&ai, policy, move_type, &ctx).await {
+                    match movement::generate_move(&ai, move_type, &ctx).await {
                         Ok(mv) => mv,
                         Err(e) => {
                             yield Ok(sse_frame("error", &e.to_string()));
@@ -293,10 +254,8 @@ pub async fn generate_node(
             };
 
             // §S21: post-generation grounding-verification gate, run for
-            // BOTH render paths above (covers `plan`, the one structured
-            // type in the gate's six-type scope, alongside the five
-            // streamed ones) — right after the move's content is fully
-            // settled and before it's used any further (event log, §S6
+            // BOTH render paths above — right after the move's content is
+            // fully settled and before it's used any further (event log, §S6
             // progressive persistence below). `applies` is the same
             // cheap grounded/in-scope check `verify` makes internally;
             // checked again here only to gate the status frame, so a plain
@@ -306,7 +265,7 @@ pub async fn generate_node(
             // drop, same principle as S27's existence verification) rather
             // than propagating. One check call only (2026-09-01, no more
             // corrective regeneration — see `movement::grounding`'s module
-            // doc), so `policy` is no longer needed here.
+            // doc).
             let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
                 let checking_en = "Checking grounding…";
                 let checking_pt = "Verificando fundamentação…";
@@ -320,8 +279,9 @@ pub async fn generate_node(
             };
 
             if generated.repaired {
-                // §9 ladder telemetry signal: the first response violated the
-                // Move JSON contract and needed a repair round.
+                // Kept as a zero-cost diagnostic after S33: the first
+                // response violated the Move JSON contract and needed a
+                // repair round.
                 if let Err(e) = event_log.append(
                     Some(&prep.node_id),
                     EventKind::SchemaViolation {
@@ -340,7 +300,7 @@ pub async fn generate_node(
                     move_id: move_id.clone(),
                     move_type: move_type.to_string(),
                     tactics: generated.tactics.clone(),
-                    rung: format!("{policy:?}"),
+                    rung: "deterministic".to_string(),
                 },
             ) {
                 eprintln!("event log append failed: {e}");
@@ -349,46 +309,6 @@ pub async fn generate_node(
             if generated.graded {
                 graded = Some((move_id, generated));
                 break;
-            }
-
-            if move_type == MoveType::Plan
-                && !generated.proposed_outline.is_empty()
-                && generated.proposed_outline != prep.outline_titles
-            {
-                // Structural proposal (§5 propose→approve, non-destructive):
-                // persist it and end this generation request without
-                // finalizing a node — approval is a separate user action
-                // (`/plan/decide`), never assumed. No `NodeGenerated` event
-                // fires here (only `finalize` appends one), so `prepare`'s
-                // regen guard does not treat this node as done. If an
-                // earlier move in this same request already progressively
-                // persisted (§S6 follow-up), that partial content-only node
-                // is left on disk rather than deleted — inert, not a
-                // rollback in the literal §5 sense, but self-healing: the
-                // next real generation attempt for this node id (whether
-                // this proposal is rejected, or approved and this item's id
-                // is reused) overwrites it cleanly from move 1, and nothing
-                // reads a non-finalized node as real content in the
-                // meantime. `/plan/decide` appends the resolution event.
-                let proposal = PlanProposal {
-                    move_id,
-                    node_id: prep.node_id.clone(),
-                    html: generated.html.clone(),
-                    proposed: generated.proposed_outline.clone(),
-                    resolved: false,
-                };
-                let payload = serde_json::to_string(&proposal).unwrap_or_default();
-                if let Err(e) =
-                    state
-                        .store
-                        .write_doc_file(&doc_id, "outline.proposal.json", &payload)
-                {
-                    yield Ok(sse_frame("error", &e.to_string()));
-                    return;
-                }
-                yield Ok(sse_frame("plan_proposal", &payload));
-                yield Ok(sse_frame("done", ""));
-                return;
             }
 
             // Ungraded: both streamed moves (tokens already yielded above) and
@@ -403,13 +323,9 @@ pub async fn generate_node(
             // finish. `tag_move_html` is the ONLY place this move's HTML is
             // ever run through `render_math`/`ensure_block_ids` — `finalize`
             // later only concatenates already-tagged moves, never re-runs
-            // either (`engine::wrap_article`'s doc comment). The client
-            // gets the tagged fragment directly in the event payload (no
-            // refetch needed) so it can splice it in and enable reading/
-            // asking against it immediately.
+            // either (`engine::wrap_move`'s doc comment).
             let tagged = engine::tag_move_html(&prep.node_id, i, &generated.html);
             content_html.push_str(&tagged);
-            content_html.push('\n');
             match engine::assemble_partial_node(&doc_id, &prep.node_id, &content_html) {
                 Ok(partial) => {
                     if let Err(e) = state.store.write_node_content(&partial) {
@@ -432,16 +348,11 @@ pub async fn generate_node(
             ));
             // §S18: the loop now closes by MOVE, not by node — one real
             // (non-`research`) move settles per request, then the request
-            // ends here. The learner reads it, can ask/annotate/scroll to
-            // its end, all of which `events::aggregate::observation_frame`
-            // folds back into `MoveContext.observation` for the next
-            // `decide_move` call — the event log is a perception channel
-            // now, not just an audit trail. `prepare`'s resume machinery
-            // (already built for §14 crash recovery) reconstructs
-            // `prior_moves`/`node_tail`/the loop index from the event log +
-            // persisted content on that next `/generate` call for this same
-            // node, so updating `ctx` further here would be dead code —
-            // nothing reads it again in this request.
+            // ends here. The learner reads it (crossing the read-to-end
+            // sentinel reopens `/generate` for the next template move);
+            // `prepare`'s resume machinery reconstructs `prior_moves`/
+            // `node_tail`/the loop index from the event log + persisted
+            // content on that next call for this same node.
             yield Ok(sse_frame("move_paused", &prep.node_id));
             return;
         }
@@ -475,172 +386,6 @@ pub async fn generate_node(
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
         .expect("valid stream response")
-}
-
-#[derive(Deserialize)]
-pub struct PlanDecisionReq {
-    approve: bool,
-}
-
-/// The pending (or already-decided) `plan` proposal — `<doc>/outline.proposal.json`.
-/// Written by `generate_node` when a `plan` move proposes a structural
-/// outline change; read and updated by `decide_plan_proposal`.
-#[derive(Serialize, Deserialize)]
-struct PlanProposal {
-    move_id: String,
-    node_id: String,
-    html: String,
-    proposed: Vec<String>,
-    /// Set once a decision has been recorded — guards against replaying a
-    /// stale proposal (e.g. reject, then approve the same file again) after
-    /// the outline has already moved on.
-    #[serde(default)]
-    resolved: bool,
-}
-
-/// Resolves a `plan` move's proposed outline revision (§5 propose→approve):
-/// on approval, rebuilds `outline.json`'s item list from the proposed titles
-/// (topic unchanged); on rejection, leaves `outline.json` untouched. Either
-/// way appends a `PlanDecided` event (§9 telemetry: acceptance rate joined
-/// back to the generating move) and marks the proposal `resolved` so it
-/// can't be replayed. Returns the resolved outline view so the client can
-/// re-render.
-///
-/// §S5: a proposed title that matches an existing item's title **reuses that
-/// item's id** — the model only returns titles, and re-minting ids on every
-/// approval would orphan every already-generated node file on the very next
-/// silent reorder. A title with no match (a genuinely new item) mints a
-/// fresh id. This can't reassign an existing id to a different title (ids
-/// are never looked up by anything but exact title match here), so the
-/// worst case is an orphaned node file for a renamed/removed title — that's
-/// fine per §5 (nothing destroyed, just unreachable from the current
-/// outline), not silent corruption. Rebuilt as a linear chain (§S5's own
-/// scope: `plan` proposes titles only, never edges) — one consequence worth
-/// naming: a title-only rename mints a fresh id with no prerequisites
-/// satisfied, so everything from that point on re-locks even though the
-/// learner may have already demonstrated the equivalent concept under the
-/// old title. Accepted for S5 (the alternative, fuzzy-matching titles across
-/// a rename, needs the model to signal "this is the same concept renamed"
-/// explicitly — not something the current `plan` contract carries).
-pub async fn decide_plan_proposal(
-    State(state): State<AppState>,
-    Path(doc_id): Path<String>,
-    Json(body): Json<PlanDecisionReq>,
-) -> Result<Json<OutlineResp>, ApiError> {
-    let proposal_json = state
-        .store
-        .read_doc_file(&doc_id, "outline.proposal.json")?;
-    let mut proposal: PlanProposal =
-        serde_json::from_str(&proposal_json).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    if proposal.resolved {
-        return Err(ApiError::BadRequest(
-            "this proposal was already decided".to_string(),
-        ));
-    }
-
-    if body.approve {
-        // Guarded read-modify-write (§S8): a sub-node spawn (`ask_question`)
-        // can insert into `outline.json` from a concurrent request, the same
-        // race `interaction_lock` closed for node interaction appends.
-        state.store.update_outline_file(&doc_id, |json| {
-            let mut outline: Outline = serde_json::from_str(json).map_err(|e| e.to_string())?;
-            let ids: Vec<String> = proposal
-                .proposed
-                .iter()
-                .map(|title| {
-                    outline
-                        .items
-                        .iter()
-                        .find(|i| &i.title == title)
-                        .map(|i| i.id.clone())
-                        .unwrap_or_else(engine::new_id)
-                })
-                .collect();
-            // A `plan` move only ever proposes titles for the main line
-            // (§S4/§S5) — sub-nodes spawned from a question (§S8) and
-            // prerequisite-tree items (§S15) are never among them, so
-            // rebuilding `outline.items` from `proposed` wholesale would
-            // silently drop them. Preserve them verbatim.
-            let sub_nodes: Vec<OutlineItem> = outline
-                .items
-                .iter()
-                .filter(|i| i.parent_id.is_some())
-                .cloned()
-                .collect();
-            // §S15: the old main-line item 0 carries the prerequisite tree's
-            // root ids as its own `prerequisites` (nothing else can be there
-            // — idx 0 has no chain predecessor). Carried forward onto the new
-            // item 0 so a `plan` reorder doesn't silently unlock content that
-            // was gated behind an unfinished prerequisite. If item 0's title
-            // changed, the roots' own `parent_id` still points at the old id
-            // — the same accepted degradation a title-only rename already
-            // causes for chain prerequisites (see this fn's doc comment).
-            let carried_prereqs = outline
-                .items
-                .iter()
-                .find(|i| i.parent_id.is_none())
-                .map(|i| i.prerequisites.clone())
-                .unwrap_or_default();
-            outline.items = proposal
-                .proposed
-                .iter()
-                .cloned()
-                .zip(ids.iter().cloned())
-                .enumerate()
-                .map(|(idx, (title, id))| OutlineItem {
-                    id,
-                    title,
-                    prerequisites: if idx == 0 {
-                        carried_prereqs.clone()
-                    } else {
-                        vec![ids[idx - 1].clone()]
-                    },
-                    parent_id: None,
-                    mode: NodeMode::Learn,
-                    source_doc_id: None,
-                    // A `plan`-move item is always a directly generable
-                    // concept node (S27e: `Book`/`Chapter`/`Article` items
-                    // only ever come from the reading-list cold start, never
-                    // from a mid-document outline revision).
-                    item_type: OutlineItemType::Node,
-                    expansion: ExpansionState::NotExpanded,
-                    source: None,
-                    chapter_number: None,
-                    resolved_page: None,
-                })
-                .collect();
-            outline.items.extend(sub_nodes);
-            serde_json::to_string(&outline).map_err(|e| e.to_string())
-        })?;
-    }
-
-    let event_log = state.store.event_log(&doc_id)?;
-    if let Err(e) = event_log.append(
-        Some(&proposal.node_id),
-        EventKind::PlanDecided {
-            move_id: proposal.move_id.clone(),
-            approved: body.approve,
-        },
-    ) {
-        eprintln!("event log append failed: {e}");
-    }
-
-    proposal.resolved = true;
-    state.store.write_doc_file(
-        &doc_id,
-        "outline.proposal.json",
-        &serde_json::to_string(&proposal).unwrap_or_default(),
-    )?;
-
-    let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
-    let outline: Outline =
-        serde_json::from_str(&outline_json).map_err(|e| ApiError::Internal(e.to_string()))?;
-    let items = outline_view(&state, &doc_id, &outline)?;
-    let suggested_revisit = suggested_revisit(&state, &doc_id)?;
-    Ok(Json(OutlineResp {
-        items,
-        suggested_revisit,
-    }))
 }
 
 /// Read-only outline + gate state (§S5) — a GET is fine here (§3.1 only
@@ -697,8 +442,6 @@ pub async fn skip_node(
     if let Err(e) = event_log.append(Some(&item_id), EventKind::NodeSkipped) {
         eprintln!("event log append failed: {e}");
     }
-    spawn_profile_distillation(state.clone(), doc_id.clone(), false);
-
     let items = outline_view(&state, &doc_id, &outline)?;
     let suggested_revisit = suggested_revisit(&state, &doc_id)?;
     Ok(Json(OutlineResp {
@@ -766,8 +509,6 @@ pub async fn skip_book(
             eprintln!("event log append failed: {e}");
         }
     }
-    spawn_profile_distillation(state.clone(), doc_id.clone(), false);
-
     let items = outline_view(&state, &doc_id, &outline)?;
     let suggested_revisit = suggested_revisit(&state, &doc_id)?;
     Ok(Json(OutlineResp {

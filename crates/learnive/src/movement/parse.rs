@@ -3,24 +3,10 @@ use crate::engine::parse::extract_json;
 use learnive_core::ObjectiveType;
 use serde::Deserialize;
 
-#[derive(Deserialize)]
-struct RawDecision {
-    move_type: MoveType,
-    #[serde(default)]
-    #[allow(dead_code)]
-    rationale: String,
-}
-
-pub fn move_type(text: &str) -> Result<MoveType, EngineError> {
-    let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
-    let raw: RawDecision =
-        serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
-    Ok(raw.move_type)
-}
-
-/// Parses a bare type name (e.g. `explain`, not a JSON object) off the
-/// leading `<!--move: type-->` marker (see [`super::decide_and_generate`]),
-/// by reusing [`MoveType`]'s existing `snake_case` [`Deserialize`] impl.
+/// Parses a bare type name (e.g. `explain`, not a JSON object) by reusing
+/// [`MoveType`]'s existing `snake_case` [`Deserialize`] impl. Used to read
+/// `<!--move: type-->` markers off pre-S33 events (S33: move choice is
+/// deterministic, so no new markers are written; old logs still carry them).
 pub fn move_type_name(name: &str) -> Result<MoveType, EngineError> {
     let quoted = format!("\"{}\"", name.trim());
     serde_json::from_str(&quoted).map_err(|e| EngineError::Parse(e.to_string()))
@@ -59,10 +45,6 @@ struct RawMove {
     reference_solution: String,
     #[serde(default)]
     objectives: Vec<RawObjective>,
-    /// `plan`'s proposed revised outline (§S4) — ignored for every other
-    /// move type.
-    #[serde(default)]
-    outline: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,7 +103,6 @@ pub fn generated_move(move_type: MoveType, text: &str) -> Result<GeneratedMove, 
         tactics: raw.tactics,
         rubric,
         reference_solution: raw.reference_solution,
-        proposed_outline: raw.outline,
         repaired: false,
     })
 }

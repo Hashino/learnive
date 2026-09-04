@@ -88,7 +88,7 @@ pub fn language_directive(locale: Locale) -> String {
          text and options, feedback, citations' surrounding text — in {}. \
          This does NOT apply to anything that is a literal marker, JSON key, \
          enum value, CSS class name, or move-type name this prompt specifies \
-         verbatim (e.g. <!--move: ...-->, \"html\", \"graded\", \"objectives\", \
+         verbatim (e.g. \"html\", \"graded\", \"objectives\", \
          \"not_demonstrated\", \"callout\"): keep every one of those exactly \
          as written, unchanged, regardless of this instruction.",
         locale.language_name()

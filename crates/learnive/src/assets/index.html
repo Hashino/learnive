@@ -173,21 +173,6 @@
              prose HTML on reload/regen never wipes it out. -->
         <div id="annotationsLayer"></div>
 
-        <!-- A `plan` move's proposed outline revision, awaiting approval
-             (§5 propose→approve, §S4). Pauses generation until decided.
-             Lives outside `#nodeSections` (never cleared by a section
-             remount) — it only ever appears right after the last section,
-             since a `plan` move can only fire on the frontier node
-             currently being generated, which is always the last one. -->
-        <div id="planProposal" hidden class="card">
-          <h2 data-i18n="plan.title">Proposed outline change</h2>
-          <div id="planRationale"></div>
-          <ol id="planProposedOutline"></ol>
-          <p>
-            <button type="button" id="planApproveBtn" data-i18n="plan.approve">Approve</button>
-            <button type="button" id="planRejectBtn" data-i18n="plan.reject">Reject</button>
-          </p>
-        </div>
       </main>
 
       <!-- S27f: acervo gate ("what's missing"), PDF<->item matching, and

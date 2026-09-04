@@ -1,150 +1,97 @@
-//! Move ABI (§6) and the policy ladder — S2 of the agentic-loop build (see
-//! PLAN.md's "core evolution: agentic loop" section).
+//! Move ABI (§6/§6.3) — S33 deterministic revision (PLAN.md; user decision,
+//! 2026-09-03, after doc rmklzfy56r on a free model repeated explains, wrote
+//! an unanswerable `ask`, and picked `revisit` with nothing to revisit).
 //!
 //! A **move** is the tutor's atomic unit of output: HTML + two invariant
 //! flags — `interactive` (renders in the sandbox iframe, §4.4) and `graded`
-//! (locked rubric + gate, §8) — plus a named, extensible [`MoveType`] and the
-//! tactic self-labels the profile (§7) later joins on. `decide_move` picks
-//! the next move type; `generate_move*` produces its content. Both take an
-//! [`AgentPolicy`] rung:
+//! (locked rubric + gate, §8). **Move selection is deterministic Rust**
+//! ([`next_move`]): the model generates content, it never chooses what kind
+//! of move comes next — the L1/L2 policy ladder, its menu, and the merged
+//! decide+generate call are all gone. The model's move-type *choice* was the
+//! quality failure; the tiering that used to ride on it (§12.1's fast/robust
+//! split) survives unchanged through [`MoveType::tier`].
 //!
-//! - **L0** (scripted): `decide_move` is a pure Rust function reproducing
-//!   today's prose→exercise sequence exactly — no AI call, no ambiguity.
-//! - **L1** (guided) / **L2** (open): `decide_move` is an AI call from a
-//!   closed menu (L1) or an open one that allows `other` (L2).
+//! Template per node (the old L0 rule, generalized):
+//! - a learning node: `explain` → `test`
+//! - a review node (`MoveContext::review_mode`): `revisit` → `test`
+//! - a chapter-close node (S33-4, `MoveContext::chapter_close`):
+//!   `explain` → `integrate` → `test`
+//!
+//! Rust-forced moves remain, never decided: `respond` answers a learner
+//! question (§S6/§S17, `api::reading::ask_question`), `research` acquires
+//! grounding (§S13) — the orchestration loop intercepts `research` when
+//! grounding is empty, exactly one attempt per node, then loops back to the
+//! template.
 //!
 //! **Streamed vs structured is a real invariant of the move ABI, not an
-//! implementation detail** (revises the first cut of this module, which used
-//! one non-streamed JSON call for every move type — that contradicted §14's
-//! ~1s TTFT target). [`MoveType::render`] partitions the nine types:
+//! implementation detail** (§14's ~1s TTFT target). [`MoveType::render`]
+//! partitions the types:
 //!
-//! - **Streamed** (`explain`, `ask`, `confront`, `integrate`, `revisit`):
+//! - **Streamed** (`explain`, `integrate`, `revisit`, `respond`):
 //!   prose-contract HTML, streamed token-by-token straight into the app
-//!   origin exactly like today's prose does — a JSON envelope would defeat
-//!   that. Their flags are therefore *fixed* by the type (`interactive:
-//!   false, graded: false`), never model-chosen, and tactics ride along as a
-//!   trailing `<!--tactics: a, b-->` HTML comment the model appends after its
-//!   content — invisible when rendered (comments never display, streamed or
-//!   not) and stripped server-side, from the *stored* HTML only, once the
-//!   stream ends.
-//! - **Structured** (`test`, `profile`, `plan`, `other`): exercise-contract
-//!   HTML, one non-streamed call returning the JSON envelope (flags +
-//!   tactics +, if graded, the rubric). Nothing here can be shown
-//!   half-built — a half-rendered `<form>`/sandboxed widget is useless, the
-//!   rubric must be locked *whole* before submission (§8), and `plan`'s
-//!   proposed outline is structured data with nowhere to live in a prose
-//!   stream (§S4: it moved here from the streamed set for exactly this
-//!   reason — the model, not Rust, computes the diff, via the envelope's
-//!   optional `outline` field) — so paying the extra latency is the same
-//!   trade today's exercise+rubric call already makes.
+//!   origin. Flags are *fixed* by the type (`interactive: false, graded:
+//!   false`), never model-chosen.
+//! - **Structured** (`test`): exercise-contract HTML, one non-streamed call
+//!   returning the JSON envelope (flags + rubric, locked together, §8).
+//!   Nothing here can be shown half-built — a half-rendered `<form>` is
+//!   useless and the rubric must be locked *whole* before submission — so
+//!   paying the extra latency is the same trade the exercise+rubric call has
+//!   always made.
 //!
-//! `generate_move` (structured) shares one JSON contract, parse/validate, and
-//! one bounded repair-on-violation across L0/L1/L2 — templates constrain a
-//! move's shape, never the prose's voice (PLAN.md). The streamed path has no
-//! repair (same as today's prose: once tokens are in flight to the client,
-//! there is nothing to retry).
+//! `generate_move` (structured) keeps one JSON contract and one bounded
+//! repair-on-violation. The streamed path has no repair (once tokens are in
+//! flight to the client, there is nothing to retry).
 //!
-//! **Merged decide+generate for L1/L2 (§14 latency, 2026-08-19).**
-//! `decide_move_ai` used to always be its own full round trip before content
-//! generation started — every move paid for two separate calls regardless of
-//! what was decided. [`decide_and_generate`] collapses that to one call for
-//! the common case: it starts a single **streamed** request whose response
-//! must begin with a `<!--move: type-->` marker (the mirror of the existing
-//! trailing `<!--tactics: ...-->` sentinel, just leading) —
-//! [`read_move_marker`] reads it off the front of the stream. If the
-//! declared type is [`MoveRender::Streamed`], the model keeps writing that
-//! move's full content on the SAME call and [`DecidedMove::Streamed`] hands
-//! the remainder of the stream straight back to the caller — no second round
-//! trip. If it's [`MoveRender::Structured`] (including `research`), the
-//! model was told to write nothing else; [`DecidedMove::Structured`] carries
-//! only the type, and the caller still makes a real [`generate_move`] call
-//! for its content — that call was already non-streamed, kept that way
-//! deliberately (see below), so this branch costs the same two round trips
-//! as before the merge, never more.
+//! `Other` exists only as a `#[serde(other)]` deserialization catch-all: the
+//! event log is append-only source of truth (§4.3), and logs written before
+//! S33 carry `ask`/`profile`/`confront`/`plan` moves. It is never generated,
+//! never decided, never rendered.
 //!
-//! This is why the merge is asymmetric rather than a single call for every
-//! move type: a **standalone** JSON-only response has previously been
-//! swallowed whole by a reasoning-heavy model's invisible `reasoning` delta
-//! and never reached usable `content` (`engine.rs`'s `collect` doc comment,
-//! confirmed live 2026-08-17) — that's why `decide_move_ai` and structured
-//! `generate_move` use `Ai::complete` (non-streamed), not `Ai::stream`, to
-//! this day. Folding the decision into the FRONT of an already-reliable
-//! streamed prose call (proven live to deliver content once reasoning ends,
-//! confirmed again 2026-08-19) doesn't repeat that failure; folding it into
-//! a structured JSON call that streams on its own would.
-//!
-//! Tier: [`decide_and_generate`] always calls at [`Tier::Fast`], same as the
-//! old standalone `decide_move_ai` — a deliberate trade, not an oversight.
-//! [`MoveType::tier`] routes `explain`/`confront` to `Tier::Robust`; a move
-//! chosen via this merged call that turns out to be one of those two is
-//! generated by the fast model instead of the robust one. The alternative
-//! (always call at `Tier::Robust`, to never risk that) was rejected: it
-//! would pay robust-tier latency/cost on every decision, including the
-//! common case where the outcome is Fast-tier content or no content at all
-//! (a `Structured` pick, whose real content-call already uses the correct
-//! tier) — working directly against the latency goal that motivated this
-//! change. Revisit if this quality trade proves to matter in practice; there
-//! is no telemetry yet to judge it by (same gap PLAN.md already flags for
-//! `calibrate_rung`).
-//!
-//! `decide_and_generate` falls back to the OLD two-call path
-//! (`decide_move_ai` then, if applicable, a fresh `generate_move_stream`) on
-//! any marker-read failure — never worse than before this change, only
-//! sometimes better. L0 is untouched: it never called the AI for `decide`
-//! in the first place, so there was no round trip here to collapse.
-//!
-//! Wired into `api.rs::generate_node` (S3): its decide→generate loop drives
-//! this module move by move. `GeneratedMove::move_type`/`interactive` are
-//! part of the stable contract but unread by S3 (the caller already has the
-//! decided type, and no render path yet distinguishes `interactive` — see
-//! `generate_node`'s doc comment); hence the `allow` stays until a later
-//! slice reads them.
+//! Wired into `api::generation::generate_node`: its template→generate loop
+//! drives this module move by move.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
 use crate::ai::{Ai, ChatMessage, ProviderError, Tier, TokenStream};
 use crate::engine::{self, EngineError, Rubric, RubricObjective};
-use futures_util::StreamExt;
 
-/// Named, extensible move type (§6 ABI).
+/// Named move type (§6 ABI, S33 revision).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MoveType {
     Explain,
-    Ask,
     Test,
-    Profile,
-    Confront,
     Integrate,
     Revisit,
-    Plan,
-    Other,
-    /// Answers a question the learner asked mid-reading (§S6/§9/§S17) —
-    /// distinct from `Ask` (the TUTOR asking the student). Forced by Rust
-    /// only, exactly like `Research`: never listed in `candidate_types`, so
-    /// `decide_move`/`decide_and_generate` can never pick it — §8.2's
-    /// unification is of the generation PATH (profile/grounding/citations/
-    /// tactics/`MoveGenerated`), not of who decides to answer a question.
-    /// Streamed (`render()`), Robust tier (genuine explanatory prose,
-    /// §12.1) — same as the `answer_question`/`generate_subnode_prose`
-    /// calls it replaces. Used for both the inline-answer and the
+    /// Answers a question the learner asked mid-reading (§S6/§9/§S17).
+    /// Forced by Rust only, exactly like `Research` — the deterministic
+    /// template never picks it. §8.2's unification is of the generation
+    /// PATH (grounding/citations/`MoveGenerated`), not of who decides to
+    /// answer a question. Streamed (`render()`), Robust tier (genuine
+    /// explanatory prose, §12.1). Used for both the inline-answer and the
     /// spawn-a-sub-node cases (`MoveContext::spawned_section_title`
     /// distinguishes them for `purpose()`); `api::reading::ask_question`
-    /// still decides which case via `engine::decide_ask_response`, unchanged
-    /// — only the generation call itself moved onto the ABI.
+    /// decides which case via `engine::decide_ask_response`.
     Respond,
     /// Acquires grounding for a concept the current corpus has nothing on
-    /// (§S13, `api::cold_start::acquire`) — chosen exactly like any other
-    /// move (offered in the menu only when `MoveContext::grounding` is
-    /// empty, mirroring how `profile` is withheld with no open hypothesis),
-    /// but produces no learner-facing content of its own. The orchestration
-    /// loop (`api::generation::generate_node`) intercepts it before
-    /// `render()` is ever consulted, runs acquisition, refreshes the
-    /// context's grounding, and loops back to decide the real next move —
-    /// `render()`/`generate_move*` must never actually be called with this
-    /// type (debug-asserted the same way the streamed/structured split is).
+    /// (§S13, `api::cold_start::acquire`) — forced by the orchestration
+    /// loop (`api::generation::generate_node`) when grounding is empty and
+    /// unattempted, never by the template; produces no learner-facing
+    /// content of its own. The loop intercepts it before `render()` is
+    /// ever consulted, runs acquisition, refreshes the context's grounding,
+    /// and loops back to the template — `render()`/`generate_move*` must
+    /// never actually be called with this type (debug-asserted the same way
+    /// the streamed/structured split is).
     Research,
+    /// Deserialization catch-all for the append-only event log (§4.3):
+    /// logs written before S33 contain `ask`/`profile`/`confront`/`plan`
+    /// moves that no longer exist as types. `#[serde(other)]` folds any
+    /// unknown name here instead of failing the whole log read; `Other` is
+    /// never generated, never decided, and `resumed_ungraded_moves` filters
+    /// it out so an old partial node can't wedge the template.
+    #[serde(other)]
+    Other,
 }
 
 /// Which generation path a move type uses — see the module docs.
@@ -158,11 +105,11 @@ pub enum MoveRender {
 }
 
 impl MoveType {
-    /// Tier routing (§14): robust for explanatory prose/confrontation, fast
-    /// for the rest (exercises, questions, short moves).
+    /// Tier routing (§14): robust for explanatory prose, fast for the rest
+    /// (exercises, short moves).
     pub fn tier(self) -> Tier {
         match self {
-            MoveType::Explain | MoveType::Confront | MoveType::Respond => Tier::Robust,
+            MoveType::Explain | MoveType::Respond => Tier::Robust,
             _ => Tier::Fast,
         }
     }
@@ -173,11 +120,7 @@ impl MoveType {
     /// arbitrary total-match default, not a real routing decision.
     pub fn render(self) -> MoveRender {
         match self {
-            MoveType::Test
-            | MoveType::Profile
-            | MoveType::Plan
-            | MoveType::Other
-            | MoveType::Research => MoveRender::Structured,
+            MoveType::Test | MoveType::Other | MoveType::Research => MoveRender::Structured,
             _ => MoveRender::Streamed,
         }
     }
@@ -187,48 +130,30 @@ impl std::fmt::Display for MoveType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             MoveType::Explain => "explain",
-            MoveType::Ask => "ask",
             MoveType::Test => "test",
-            MoveType::Profile => "profile",
-            MoveType::Confront => "confront",
             MoveType::Integrate => "integrate",
             MoveType::Revisit => "revisit",
-            MoveType::Plan => "plan",
-            MoveType::Other => "other",
             MoveType::Respond => "respond",
             MoveType::Research => "research",
+            MoveType::Other => "other",
         };
         write!(f, "{s}")
     }
 }
 
-/// The policy-ladder rung (§14/§6.2 applied to the model): capability is
-/// measured, not assumed. Invariants (move ABI, sandbox, locked rubric,
-/// append-only) never relax across rungs — only how a move is *decided* and
-/// how strictly its shape is templated does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentPolicy {
-    /// `decide_move` is a Rust function — today's loop, unchanged in shape.
-    L0,
-    /// `decide_move` picks from a closed menu of named types.
-    L1,
-    /// `decide_move` picks freely; `other` (a bespoke move) is allowed.
-    L2,
-}
-
-/// A move already emitted in the node, summarized for L0's rule and for the
-/// L1/L2 prompt's context tail — not the full HTML (§14 budget).
+/// A move already emitted in the node — the template's decision input,
+/// not the full HTML (§14 budget).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveRecord {
     pub move_type: MoveType,
     pub graded: bool,
 }
 
-/// Context handed to `decide_move`/`generate_move*` (§14 context budget).
+/// Context handed to `next_move`/`generate_move*` (§14 context budget).
 /// `objective` is the document's current objective text (§S4) — empty only
-/// for a document with no confirmed objective yet. `profile` (§S7) is still empty
-/// until that slice exists. Every function degrades gracefully on an empty
-/// field, the same way grounding already does in `api.rs::grounding_for`.
+/// for a document with no confirmed objective yet. Every function degrades
+/// gracefully on an empty field, the same way grounding already does in
+/// `api::reading::grounding_for`.
 #[derive(Debug, Clone, Default)]
 pub struct MoveContext {
     pub topic: String,
@@ -240,10 +165,9 @@ pub struct MoveContext {
     pub outline_context: String,
     pub prior_moves: Vec<MoveRecord>,
     pub objective: String,
-    pub profile: String,
     pub grounding: String,
     /// Verbatim tail of this node's content so far (§14 budget: ~1.5k chars),
-    /// fed to `decide_move` only — the caller keeps this updated as moves are
+    /// fed to the content prompts — the caller keeps this updated as moves are
     /// generated. Empty for the node's first move.
     pub node_tail: String,
     /// Set once a `research` move has run for this NODE (§S13) — withholds
@@ -320,7 +244,7 @@ pub struct MoveContext {
     /// elaboration titled X, spliced right after where it was asked".
     pub spawned_section_title: Option<String>,
     /// §8.2 remediation, forced in Rust the same way `question` is (never
-    /// `decide_move`'s choice): the exercise the learner just got wrong,
+    /// the template's choice): the exercise the learner just got wrong,
     /// paired with their answer — mirrors `engine::remediate`'s
     /// `exercise_html`/`answer` params, pre-formatted into one block by the
     /// caller. Set together with `unmet_objectives`/`remediation_attempt` or
@@ -334,13 +258,14 @@ pub struct MoveContext {
     /// difficulty ramps back up. Mirrors `remediate`/`generate_remediation_
     /// exercise`'s `attempt` param.
     pub remediation_attempt: Option<u32>,
-    /// §S18: what the learner did since the last move settled in this node
-    /// (`events::aggregate::observation_frame`) — reconstructed by `prepare`
-    /// on every per-move `/generate` call, the same way `prior_moves`/
-    /// `node_tail` are. Fed only to `decide_move`'s prompt
-    /// (`movement/prompt.rs::observation_line`): the log is now a
-    /// perception channel, not just an audit trail (PLAN.md's S18).
-    pub observation: crate::events::aggregate::ObservationFrame,
+    /// S33-4: this node is the LAST node of a chapter that was actually
+    /// decomposed into more than one atomic `Node` child (computed in
+    /// `prepare` from the outline shape — never guessed) — the template
+    /// inserts `integrate` between `explain` and `test` when true (§8's
+    /// integration, scoped to the chapter the learner just finished).
+    /// False for every other node shape, and false for a review node
+    /// (`review_mode` wins: a review reactivates, it doesn't integrate).
+    pub chapter_close: bool,
     /// §S23: the zero-cost scaffolding parameter
     /// (`events::aggregate::scaffolding_level`), reconstructed by `prepare`
     /// on every `/generate` call the same way `research_attempted` is —
@@ -373,9 +298,11 @@ pub struct GeneratedMove {
     pub interactive: bool,
     pub graded: bool,
     pub html: String,
-    /// Tactic self-labels emitted in the same call (§7) — profile
-    /// attribution is a join over `events::EventKind::MoveGenerated`, 0
-    /// reflection tokens.
+    /// Tactic self-labels emitted in the same call, parsed defensively from
+    /// a trailing sentinel — the §7 evidence table that consumed them is
+    /// gone (S33), so nothing reads these any more; kept because the event
+    /// log's `MoveGenerated` schema carries tactics and stripping must stay
+    /// tolerant of a model emitting one anyway.
     pub tactics: Vec<String>,
     /// Present iff `graded` — locked together with the move (§8).
     pub rubric: Option<Rubric>,
@@ -385,13 +312,6 @@ pub struct GeneratedMove {
     /// this field; see `engine::ExerciseAndRubric::reference_solution` for
     /// why it exists and `engine::grade`'s degrade-when-empty behavior.
     pub reference_solution: String,
-    /// The revised outline titles a `plan` move proposes (§S4/§5) — the
-    /// model computes the diff, not Rust. Empty for every other move type,
-    /// and empty for a `plan` move that only remarks in prose without a
-    /// concrete change (§S4: "extensões menores silenciosas" — no proposal,
-    /// no approval needed). The caller (`api.rs::generate_node`) decides
-    /// what "differs from the current outline" means and gates approval.
-    pub proposed_outline: Vec<String>,
     /// Whether the first response failed validation and a repair round was
     /// needed. Only meaningful for `MoveRender::Structured` (the streamed
     /// path has no repair). Not yet logged as an event — S3's caller decides
@@ -399,204 +319,52 @@ pub struct GeneratedMove {
     pub repaired: bool,
 }
 
-/// Decides the next move type. L0 never calls the AI; L1/L2 do, with one
-/// bounded repair attempt on a schema violation.
-pub async fn decide_move(
-    ai: &Ai,
-    policy: AgentPolicy,
-    ctx: &MoveContext,
-) -> Result<MoveType, EngineError> {
-    match policy {
-        AgentPolicy::L0 => l0_next_move(&ctx.prior_moves),
-        AgentPolicy::L1 | AgentPolicy::L2 => decide_move_ai(ai, policy, ctx).await,
-    }
-}
-
-/// L0's rule: reproduces today's loop exactly — explain, then check. Once
-/// both have happened, there is nothing left for `decide_move` to decide;
-/// completion is `Assessment::all_demonstrated`'s call, not this function's.
-/// `pub(crate)`: called directly by `api::generation`'s loop (not through
-/// [`decide_move`]/[`decide_and_generate`]) since L0 has no round trip to
-/// merge and no reason to go through either.
-pub(crate) fn l0_next_move(prior: &[MoveRecord]) -> Result<MoveType, EngineError> {
-    match prior {
-        [] => Ok(MoveType::Explain),
+/// The deterministic move template (S33) — pure Rust, zero tokens, no round
+/// trip. The generalization of the old L0 rule (`explain`, then `test`)
+/// with the two shapes S33 adds: a review node reactivates before it checks,
+/// and a chapter-close node integrates before it checks. Every node still
+/// ends in a graded check (§6's invariant), every node still opens with
+/// teaching (the old `enforce_teaching_before_test`'s invariant is now
+/// structural, not a guard on a model choice).
+///
+/// `Err(NoNextMove)` means the node's template is exhausted — the caller's
+/// cost guard (`api::generation::generate_node`) forces `test` at the last
+/// slot before this can surface, and `resumed_ungraded_moves` filters old-log
+/// move types the template doesn't recognize so a partial pre-S33 node can't
+/// wedge here.
+pub fn next_move(ctx: &MoveContext) -> Result<MoveType, EngineError> {
+    match ctx.prior_moves.as_slice() {
+        // A review node reactivates (one compact reactivation pass) before
+        // checking; a fresh node teaches first.
+        [] => Ok(if ctx.review_mode {
+            MoveType::Revisit
+        } else {
+            MoveType::Explain
+        }),
+        // Either opener is followed by the check — unless this node closes a
+        // chapter that was actually decomposed (S33-4), in which case the
+        // integration move comes first.
         [
             MoveRecord {
-                move_type: MoveType::Explain,
-                graded: false,
+                move_type: MoveType::Explain | MoveType::Revisit,
+                ..
+            },
+        ] => Ok(if ctx.chapter_close {
+            MoveType::Integrate
+        } else {
+            MoveType::Test
+        }),
+        // An integration move is itself followed by the check (§8: the
+        // gate still closes the node).
+        [
+            _,
+            MoveRecord {
+                move_type: MoveType::Integrate,
+                ..
             },
         ] => Ok(MoveType::Test),
         _ => Err(EngineError::NoNextMove),
     }
-}
-
-/// S18 minor correction 2 — a Rust-enforced structural floor, not a menu
-/// restriction: `Test` is never withheld from `candidate_types` (a check
-/// can legitimately be the right move later), but choosing it as a node's
-/// very first move produces a node that never teaches anything before
-/// grading it. Live bug (§S8): a node shipped as `exercise`+`done` with
-/// zero prose because L1 picked `Test` at move-index 0. This can't be
-/// caught by `calibrate_rung`'s ladder telemetry — a `Test` at position 0
-/// is schema-valid and type-diverse, so nothing there sees a problem.
-/// Sibling of the "every node ends in a check" invariant Rust already
-/// owns — this is "every node opens with teaching".
-fn enforce_teaching_before_test(move_type: MoveType, ctx: &MoveContext) -> MoveType {
-    if move_type == MoveType::Test && ctx.prior_moves.is_empty() {
-        MoveType::Explain
-    } else {
-        move_type
-    }
-}
-
-async fn decide_move_ai(
-    ai: &Ai,
-    policy: AgentPolicy,
-    ctx: &MoveContext,
-) -> Result<MoveType, EngineError> {
-    let messages = prompt::decide_move(policy, ctx);
-    let text = engine::collect(ai, Tier::Fast, messages.clone()).await?;
-    if let Ok(mt) = parse::move_type(&text) {
-        return Ok(enforce_teaching_before_test(mt, ctx));
-    }
-    let repair = repair_messages(messages, &text, "expected JSON {\"move_type\":\"...\"}");
-    let text = engine::collect(ai, Tier::Fast, repair).await?;
-    parse::move_type(&text).map(|mt| enforce_teaching_before_test(mt, ctx))
-}
-
-/// Outcome of [`decide_and_generate`] — see the module docs' "merged
-/// decide+generate" note.
-pub enum DecidedMove {
-    /// A `MoveRender::Streamed` type was chosen; `stream` continues exactly
-    /// where the leading marker left off (any bytes from the same chunk
-    /// that closed it are replayed first) — pump it exactly like
-    /// [`generate_move_stream`]'s own output, then call
-    /// [`finish_streamed_move`] once it ends.
-    Streamed {
-        move_type: MoveType,
-        stream: TokenStream,
-    },
-    /// A `MoveRender::Structured` type (or `research`) was chosen via a
-    /// marker-only response with no content behind it — the caller still
-    /// needs a real [`generate_move`] call for its content.
-    Structured { move_type: MoveType },
-}
-
-const MOVE_MARKER_PREFIX: &str = "<!--move: ";
-const MOVE_MARKER_SUFFIX: &str = "-->";
-/// Bound on how many characters of a streamed response `read_move_marker`
-/// buffers looking for a complete marker before giving up. Only counts real
-/// content chunks (the provider's `reasoning` delta never reaches this
-/// stream — `parse_sse_line` drops it before `Ai::stream` ever yields a
-/// chunk), so a long reasoning phase before the marker appears never trips
-/// this; only a marker that's missing, malformed, or absurdly delayed does.
-const MOVE_MARKER_BUFFER_CAP: usize = 200;
-
-/// Reads the leading `<!--move: type-->` marker off a
-/// [`decide_and_generate`] response. Returns the decided type and a stream
-/// that continues exactly where the marker left off: any trailing bytes
-/// from the same chunk that closed it are replayed first, then the
-/// underlying stream is relayed verbatim, unchanged.
-async fn read_move_marker(mut tokens: TokenStream) -> Result<(MoveType, TokenStream), EngineError> {
-    let mut buf = String::new();
-    loop {
-        match tokens.next().await {
-            Some(Ok(chunk)) => {
-                buf.push_str(&chunk);
-                if let Some(open) = buf.find(MOVE_MARKER_PREFIX) {
-                    let type_start = open + MOVE_MARKER_PREFIX.len();
-                    if let Some(close_rel) = buf[type_start..].find(MOVE_MARKER_SUFFIX) {
-                        let type_end = type_start + close_rel;
-                        let move_type = parse::move_type_name(buf[type_start..type_end].trim())?;
-                        let leftover = buf[type_end + MOVE_MARKER_SUFFIX.len()..]
-                            .trim_start_matches('\n')
-                            .to_string();
-                        let rest: TokenStream = Box::pin(async_stream::stream! {
-                            if !leftover.is_empty() {
-                                yield Ok(leftover);
-                            }
-                            while let Some(item) = tokens.next().await {
-                                yield item;
-                            }
-                        });
-                        return Ok((move_type, rest));
-                    }
-                }
-                if buf.len() > MOVE_MARKER_BUFFER_CAP {
-                    return Err(EngineError::Parse(
-                        "no <!--move: type--> marker in leading response".to_string(),
-                    ));
-                }
-            }
-            Some(Err(e)) => return Err(e.into()),
-            None => {
-                return Err(EngineError::Parse(
-                    "stream ended before a move marker".to_string(),
-                ));
-            }
-        }
-    }
-}
-
-/// Merged decide+generate for L1/L2 — see the module docs' "merged
-/// decide+generate" note for the full rationale (why the tier is fixed at
-/// `Tier::Fast`, why the fallback exists, why this never touches L0).
-pub async fn decide_and_generate(
-    ai: &Ai,
-    policy: AgentPolicy,
-    ctx: &MoveContext,
-) -> Result<DecidedMove, EngineError> {
-    debug_assert_ne!(
-        policy,
-        AgentPolicy::L0,
-        "L0 never calls the AI — use l0_next_move directly"
-    );
-    let messages = prompt::decide_and_generate(policy, ctx);
-    let outcome = match ai.stream(Tier::Fast, messages).await {
-        Ok(tokens) => read_move_marker(tokens).await,
-        Err(e) => Err(e.into()),
-    };
-    match outcome {
-        Ok((move_type, rest)) => {
-            let effective = enforce_teaching_before_test(move_type, ctx);
-            if effective != move_type {
-                // The guard overrode the model's choice (`Test` at
-                // move-index 0) — `rest` is a `Structured` type's empty
-                // tail (the model was told to write nothing else), not
-                // usable content for `effective`'s `Streamed` contract, so
-                // this is the one path that pays for a second call.
-                return Ok(DecidedMove::Streamed {
-                    move_type: effective,
-                    stream: generate_move_stream(ai, effective, ctx).await?,
-                });
-            }
-            Ok(match move_type.render() {
-                MoveRender::Streamed => DecidedMove::Streamed {
-                    move_type,
-                    stream: rest,
-                },
-                MoveRender::Structured => DecidedMove::Structured { move_type },
-            })
-        }
-        Err(_) => decide_only_fallback(ai, policy, ctx).await,
-    }
-}
-
-/// Fallback for [`decide_and_generate`] on any marker-read failure — the OLD
-/// two-call path, unchanged. Never worse than before the merge existed.
-async fn decide_only_fallback(
-    ai: &Ai,
-    policy: AgentPolicy,
-    ctx: &MoveContext,
-) -> Result<DecidedMove, EngineError> {
-    let move_type = decide_move_ai(ai, policy, ctx).await?;
-    Ok(match move_type.render() {
-        MoveRender::Streamed => DecidedMove::Streamed {
-            move_type,
-            stream: generate_move_stream(ai, move_type, ctx).await?,
-        },
-        MoveRender::Structured => DecidedMove::Structured { move_type },
-    })
 }
 
 /// Starts a **streamed** move (`MoveRender::Streamed` types only — debug-
@@ -635,7 +403,6 @@ pub fn finish_streamed_move(move_type: MoveType, accumulated: &str) -> Generated
         tactics,
         rubric: None,
         reference_solution: String::new(),
-        proposed_outline: Vec::new(),
         repaired: false,
     }
 }
@@ -794,11 +561,10 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
 
 /// Generates a **structured** move's content (`MoveRender::Structured` types
 /// only — debug-asserted), tier-routed by `MoveType::tier` (§14), with one
-/// bounded repair attempt on a schema violation (§9 ladder telemetry
-/// eventually counts these; for now the caller just gets `repaired: true`).
+/// bounded repair attempt on a schema violation (logged as `SchemaViolation`
+/// by the caller; §9).
 pub async fn generate_move(
     ai: &Ai,
-    policy: AgentPolicy,
     move_type: MoveType,
     ctx: &MoveContext,
 ) -> Result<GeneratedMove, EngineError> {
@@ -808,7 +574,7 @@ pub async fn generate_move(
         "generate_move is only for MoveRender::Structured types — use generate_move_stream"
     );
     let tier = move_type.tier();
-    let messages = prompt::generate_move(policy, move_type, ctx);
+    let messages = prompt::generate_move(move_type, ctx);
     let text = engine::collect(ai, tier, messages.clone()).await?;
     if let Ok(mv) = parse::generated_move(move_type, &text) {
         return Ok(mv);
@@ -1008,14 +774,11 @@ mod tests {
     #[test]
     fn tier_routing_matches_plan() {
         assert_eq!(MoveType::Explain.tier(), Tier::Robust);
-        assert_eq!(MoveType::Confront.tier(), Tier::Robust);
+        assert_eq!(MoveType::Respond.tier(), Tier::Robust);
         for mt in [
-            MoveType::Ask,
             MoveType::Test,
-            MoveType::Profile,
             MoveType::Integrate,
             MoveType::Revisit,
-            MoveType::Plan,
             MoveType::Other,
         ] {
             assert_eq!(mt.tier(), Tier::Fast);
@@ -1026,305 +789,85 @@ mod tests {
     fn render_partitions_streamed_vs_structured() {
         for mt in [
             MoveType::Explain,
-            MoveType::Ask,
-            MoveType::Confront,
             MoveType::Integrate,
             MoveType::Revisit,
+            MoveType::Respond,
         ] {
             assert_eq!(mt.render(), MoveRender::Streamed);
         }
-        for mt in [
-            MoveType::Test,
-            MoveType::Profile,
-            MoveType::Plan,
-            MoveType::Other,
-        ] {
+        for mt in [MoveType::Test, MoveType::Research, MoveType::Other] {
             assert_eq!(mt.render(), MoveRender::Structured);
         }
     }
 
-    #[tokio::test]
-    async fn l0_decides_explain_first_then_test() {
-        let ai = mock_ai("unused");
-        let ctx = MoveContext::default();
-
-        let first = decide_move(&ai, AgentPolicy::L0, &ctx).await.unwrap();
-        assert_eq!(first, MoveType::Explain);
-
-        let mut ctx = ctx;
-        ctx.prior_moves.push(MoveRecord {
-            move_type: MoveType::Explain,
-            graded: false,
-        });
-        let second = decide_move(&ai, AgentPolicy::L0, &ctx).await.unwrap();
-        assert_eq!(second, MoveType::Test);
+    /// S33: deleted move types deserialize from old event logs as `Other`
+    /// instead of failing the read — the append-only log is source of truth
+    /// (§4.3), and `#[serde(other)]` is what keeps pre-S33 documents
+    /// readable.
+    #[test]
+    fn pre_s33_move_names_deserialize_as_other() {
+        for name in ["ask", "profile", "confront", "plan"] {
+            let mt: MoveType =
+                serde_json::from_str(&format!("\"{name}\"")).expect("must deserialize");
+            assert_eq!(mt, MoveType::Other, "{name} must fold into Other");
+        }
     }
 
-    #[tokio::test]
-    async fn l0_errors_when_node_is_already_complete() {
-        let ai = mock_ai("unused");
+    #[test]
+    fn template_opens_explain_then_test() {
         let mut ctx = MoveContext::default();
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Explain);
+
         ctx.prior_moves.push(MoveRecord {
             move_type: MoveType::Explain,
             graded: false,
         });
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Test);
+
         ctx.prior_moves.push(MoveRecord {
             move_type: MoveType::Test,
             graded: true,
         });
-        let err = decide_move(&ai, AgentPolicy::L0, &ctx).await.unwrap_err();
-        assert!(matches!(err, EngineError::NoNextMove));
-    }
-
-    #[tokio::test]
-    async fn l1_decide_move_parses_ai_json() {
-        // Non-empty `prior_moves` so the S18 teaching-before-test guard
-        // (below) doesn't shadow what this test actually checks — JSON
-        // parsing of the model's choice.
-        let ctx = MoveContext {
-            prior_moves: vec![MoveRecord {
-                move_type: MoveType::Explain,
-                graded: false,
-            }],
-            ..Default::default()
-        };
-        let ai = mock_ai(r#"{"move_type":"test","rationale":"time to check"}"#);
-        let mt = decide_move(&ai, AgentPolicy::L1, &ctx).await.unwrap();
-        assert_eq!(mt, MoveType::Test);
-    }
-
-    /// S18 minor correction 2: a `Test` chosen as a node's very first move
-    /// (live bug, §S8 — a node shipped as `exercise`+`done` with zero prose)
-    /// is overridden to `Explain` in Rust, not left to the model or to
-    /// ladder telemetry (which can't see this failure mode at all).
-    #[tokio::test]
-    async fn decide_move_forces_a_teaching_move_before_test_at_position_zero() {
-        let ai = mock_ai(r#"{"move_type":"test","rationale":"skip straight to grading"}"#);
-        let mt = decide_move(&ai, AgentPolicy::L1, &MoveContext::default())
-            .await
-            .unwrap();
-        assert_eq!(mt, MoveType::Explain);
-    }
-
-    #[tokio::test]
-    async fn decide_move_repairs_once_on_malformed_json() {
-        let calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let calls_inner = calls.clone();
-        let ai = scripted_ai(move |_req| {
-            let n = calls_inner.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                "not json at all".to_string()
-            } else {
-                r#"{"move_type":"ask","rationale":"fixed"}"#.to_string()
-            }
-        });
-        let mt = decide_move(&ai, AgentPolicy::L1, &MoveContext::default())
-            .await
-            .unwrap();
-        assert_eq!(mt, MoveType::Ask);
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "one repair round");
-    }
-
-    /// §14 merged decide+generate: the marker and any content from the same
-    /// chunk that closed it must both be recovered correctly.
-    #[tokio::test]
-    async fn read_move_marker_splits_type_from_leftover_content() {
-        let stream: TokenStream = Box::pin(async_stream::stream! {
-            yield Ok("<!--move: explain-->".to_string());
-            yield Ok("Hello ".to_string());
-            yield Ok("world.".to_string());
-        });
-        let (move_type, rest) = read_move_marker(stream).await.unwrap();
-        assert_eq!(move_type, MoveType::Explain);
-        let collected: String = rest.map(|r| r.unwrap()).collect::<Vec<_>>().await.concat();
-        assert_eq!(collected, "Hello world.");
-    }
-
-    #[tokio::test]
-    async fn read_move_marker_handles_marker_and_content_in_the_same_chunk() {
-        let stream: TokenStream = Box::pin(async_stream::stream! {
-            yield Ok("<!--move: test-->rest-of-chunk".to_string());
-        });
-        let (move_type, rest) = read_move_marker(stream).await.unwrap();
-        assert_eq!(move_type, MoveType::Test);
-        let collected: String = rest.map(|r| r.unwrap()).collect::<Vec<_>>().await.concat();
-        assert_eq!(collected, "rest-of-chunk");
-    }
-
-    #[tokio::test]
-    async fn read_move_marker_errors_when_no_marker_appears() {
-        let filler = "x".repeat(300);
-        let stream: TokenStream = Box::pin(async_stream::stream! {
-            yield Ok(filler);
-        });
-        assert!(read_move_marker(stream).await.is_err());
-    }
-
-    /// End to end: a mock reply carrying the marker plus streamed content
-    /// yields `DecidedMove::Streamed` with the right type and the content
-    /// recovered intact, in one call.
-    #[tokio::test]
-    async fn decide_and_generate_streams_content_after_a_streamed_marker() {
-        let ai = mock_ai("<!--move: explain-->Explained content here.");
-        let ctx = MoveContext::default();
-        let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
-            .await
-            .unwrap();
-        match outcome {
-            DecidedMove::Streamed { move_type, stream } => {
-                assert_eq!(move_type, MoveType::Explain);
-                let text: String = stream
-                    .map(|r| r.unwrap())
-                    .collect::<Vec<_>>()
-                    .await
-                    .concat();
-                assert!(text.contains("Explained"));
-            }
-            DecidedMove::Structured { .. } => panic!("expected streamed"),
-        }
-    }
-
-    /// A structured-render type (e.g. `test`) needs no content in the same
-    /// call — the marker alone is a complete, valid response.
-    #[tokio::test]
-    async fn decide_and_generate_returns_structured_with_no_content_call() {
-        let ai = mock_ai("<!--move: test-->");
-        // Non-empty `prior_moves` so the S18 teaching-before-test guard
-        // doesn't override `test` here — that override has its own test
-        // below.
-        let ctx = MoveContext {
-            prior_moves: vec![MoveRecord {
-                move_type: MoveType::Explain,
-                graded: false,
-            }],
-            ..Default::default()
-        };
-        let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
-            .await
-            .unwrap();
-        match outcome {
-            DecidedMove::Structured { move_type } => assert_eq!(move_type, MoveType::Test),
-            DecidedMove::Streamed { .. } => panic!("expected structured"),
-        }
-    }
-
-    /// S18 minor correction 2, merged-call path: the marker names `test` at
-    /// move-index 0, so the guard overrides it to `explain` — and since the
-    /// merged call's own stream was a `Structured` type's empty tail (the
-    /// model was told to write nothing else), the override must fetch real
-    /// `explain` content via a fresh call rather than reusing it.
-    #[tokio::test]
-    async fn decide_and_generate_forces_teaching_before_test_at_position_zero() {
-        let ai = mock_ai("<!--move: test-->");
-        let ctx = MoveContext::default();
-        let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
-            .await
-            .unwrap();
-        match outcome {
-            DecidedMove::Streamed { move_type, stream } => {
-                assert_eq!(move_type, MoveType::Explain);
-                let text: String = stream
-                    .map(|r| r.unwrap())
-                    .collect::<Vec<_>>()
-                    .await
-                    .concat();
-                assert!(!text.is_empty());
-            }
-            DecidedMove::Structured { .. } => panic!("expected streamed explain"),
-        }
-    }
-
-    /// A response with no marker at all must not surface as an error to the
-    /// caller — it falls back to the OLD two-call path (`decide_move_ai`
-    /// then, if applicable, a fresh `generate_move_stream`), reusing that
-    /// already-tested code unchanged (see the module docs' fallback note).
-    #[tokio::test]
-    async fn decide_and_generate_falls_back_to_the_two_call_path_on_a_missing_marker() {
-        let ai = scripted_ai(|req| {
-            let sys = req
-                .messages
-                .first()
-                .map(|m| m.content.as_str())
-                .unwrap_or("");
-            if sys.contains("SAME response") {
-                "No marker here, sorry.".to_string()
-            } else if sys.contains("Respond ONLY with JSON choosing the next move") {
-                r#"{"move_type":"explain","rationale":"fallback"}"#.to_string()
-            } else {
-                "Explained via fallback.".to_string()
-            }
-        });
-        let ctx = MoveContext::default();
-        let outcome = decide_and_generate(&ai, AgentPolicy::L1, &ctx)
-            .await
-            .unwrap();
-        match outcome {
-            DecidedMove::Streamed { move_type, stream } => {
-                assert_eq!(move_type, MoveType::Explain);
-                let text: String = stream
-                    .map(|r| r.unwrap())
-                    .collect::<Vec<_>>()
-                    .await
-                    .concat();
-                assert!(text.contains("fallback"));
-            }
-            DecidedMove::Structured { .. } => panic!("expected streamed via fallback"),
-        }
+        assert!(matches!(
+            next_move(&ctx).unwrap_err(),
+            EngineError::NoNextMove
+        ));
     }
 
     #[test]
-    fn decide_move_prompt_carries_the_profile_text() {
-        // §S7 "injeção no decide_move": `MoveContext::profile` (evidence
-        // table + distilled traits/hypotheses, wired by `api::profile_for`)
-        // must actually reach the decision prompt, not just exist as a field.
-        let ctx = MoveContext {
-            profile: "worked-example: 3 demonstrated, 0 partial".to_string(),
+    fn review_node_reactivates_before_it_checks() {
+        let mut ctx = MoveContext {
+            review_mode: true,
             ..Default::default()
         };
-        let user = &prompt::decide_move(AgentPolicy::L1, &ctx)[1].content;
-        assert!(user.contains("worked-example: 3 demonstrated, 0 partial"));
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Revisit);
+
+        ctx.prior_moves.push(MoveRecord {
+            move_type: MoveType::Revisit,
+            graded: false,
+        });
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Test);
     }
 
     #[test]
-    fn decide_move_prompt_carries_outline_context_and_grounding() {
-        // S18 minor correction 1: both fields already existed and were
-        // populated on `ctx`, but `decide_move`'s prompt omitted them —
-        // the tutor chose the next move blind to what earlier nodes had
-        // already taught and to what sources were available to ground in.
-        let ctx = MoveContext {
-            outline_context: "Fractions: numerator/denominator already taught".to_string(),
-            grounding: "[src1] OpenStax, ch. 3".to_string(),
+    fn chapter_close_inserts_integrate_between_explain_and_test() {
+        let mut ctx = MoveContext {
+            chapter_close: true,
             ..Default::default()
         };
-        let user = &prompt::decide_move(AgentPolicy::L1, &ctx)[1].content;
-        assert!(user.contains("numerator/denominator already taught"));
-        assert!(user.contains("OpenStax, ch. 3"));
-    }
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Explain);
 
-    #[test]
-    fn profile_move_is_offered_only_when_there_is_a_hypothesis_to_test() {
-        // Regression, found in a live run: on a fresh document (no hypotheses
-        // yet) the model picked `profile` and then wrote the skip instruction
-        // itself into the learner's document. The menu now withholds the
-        // option instead of asking the model to decline it.
-        let fresh = MoveContext {
-            profile: "Evidence (tactic -> outcome, from the event log):\nanalogy: 1 demonstrated"
-                .to_string(),
-            ..Default::default()
-        };
-        let with_hypothesis = MoveContext {
-            profile: format!(
-                "{} (a \"profile\" move should test one of these):\n- prefers worked examples",
-                crate::profile::HYPOTHESES_HEADER
-            ),
-            ..Default::default()
-        };
-        for policy in [AgentPolicy::L1, AgentPolicy::L2] {
-            let without = &prompt::decide_move(policy, &fresh)[0].content;
-            let with = &prompt::decide_move(policy, &with_hypothesis)[0].content;
-            assert!(!without.contains("profile"), "{policy:?} offered profile");
-            assert!(with.contains("profile"), "{policy:?} withheld profile");
-        }
+        ctx.prior_moves.push(MoveRecord {
+            move_type: MoveType::Explain,
+            graded: false,
+        });
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Integrate);
+
+        ctx.prior_moves.push(MoveRecord {
+            move_type: MoveType::Integrate,
+            graded: false,
+        });
+        assert_eq!(next_move(&ctx).unwrap(), MoveType::Test);
     }
 
     #[test]
@@ -1333,7 +876,9 @@ mod tests {
         let sys = &prompt::generate_move_streamed(MoveType::Explain, &ctx)[0].content;
         assert!(sys.contains("NEVER use"));
         assert!(!sys.contains("postMessage"));
-        assert!(sys.contains("tactics:"));
+        // S33: the tactics sentinel contract is gone with the §7 evidence
+        // table — the streamed prompt must not ask for self-labels anymore.
+        assert!(!sys.contains("tactics:"));
         // §S11: the streamed path is the only one with a real IslandGate
         // behind it, so it's the only one told about the island contract.
         assert!(sys.contains("figure data-interactive"));
@@ -1342,7 +887,7 @@ mod tests {
     #[test]
     fn test_prompt_carries_exercise_contract_and_forces_graded() {
         let ctx = MoveContext::default();
-        let sys = &prompt::generate_move(AgentPolicy::L0, MoveType::Test, &ctx)[0].content;
+        let sys = &prompt::generate_move(MoveType::Test, &ctx)[0].content;
         assert!(sys.contains("postMessage"));
         assert!(sys.contains("sandbox"));
         assert!(sys.contains("MUST be graded"));
@@ -1373,23 +918,15 @@ mod tests {
 
     #[test]
     fn structured_prose_prompt_omits_the_island_contract() {
-        // §S11 follow-up: `profile`/`plan`/`other` share `PROSE_HTML_CONTRACT`
-        // with the streamed path but have no `IslandGate` behind them, and
-        // asking a JSON-envelope call to emit raw island HTML/JS inside a
-        // string field risks breaking the envelope itself. The island
-        // paragraph must stay out of their prompt entirely.
+        // §S11 follow-up: a structured PROSE move (`other`, the deserialization
+        // catch-all) shares `PROSE_HTML_CONTRACT` with the streamed path but
+        // has no `IslandGate` behind it, and asking a JSON-envelope call to
+        // emit raw island HTML/JS inside a string field risks breaking the
+        // envelope itself. The island paragraph must stay out of its prompt.
         let ctx = MoveContext::default();
-        for mt in [MoveType::Profile, MoveType::Plan, MoveType::Other] {
-            let sys = &prompt::generate_move(AgentPolicy::L0, mt, &ctx)[0].content;
-            assert!(
-                sys.contains("NEVER use"),
-                "{mt} should still get the base HTML contract"
-            );
-            assert!(
-                !sys.contains("figure data-interactive"),
-                "{mt} must not be told about the island contract"
-            );
-        }
+        let sys = &prompt::generate_move(MoveType::Other, &ctx)[0].content;
+        assert!(sys.contains("NEVER use"));
+        assert!(!sys.contains("figure data-interactive"));
     }
 
     #[test]
@@ -1433,52 +970,13 @@ mod tests {
         let ai = mock_ai(
             r#"{"html":"<form><input name=\"a\"></form>","graded":false,"objectives":[{"id":"o1","kind":"application","description":"apply","criteria":"transfers","transfer":true}]}"#,
         );
-        let mv = generate_move(
-            &ai,
-            AgentPolicy::L0,
-            MoveType::Test,
-            &MoveContext::default(),
-        )
-        .await
-        .unwrap();
+        let mv = generate_move(&ai, MoveType::Test, &MoveContext::default())
+            .await
+            .unwrap();
         assert!(mv.graded, "test is intrinsically graded (§8)");
         let rubric = mv.rubric.unwrap();
         assert_eq!(rubric.objectives.len(), 1);
         assert!(rubric.objectives[0].transfer);
-    }
-
-    #[tokio::test]
-    async fn plan_move_carries_proposed_outline_through_the_envelope() {
-        let ai = mock_ai(
-            r#"{"html":"<p>Splitting limits into its own concept.</p>","graded":false,"outline":["Intro","Limits","Continuity","Derivatives"]}"#,
-        );
-        let mv = generate_move(
-            &ai,
-            AgentPolicy::L1,
-            MoveType::Plan,
-            &MoveContext::default(),
-        )
-        .await
-        .unwrap();
-        assert!(!mv.graded);
-        assert_eq!(
-            mv.proposed_outline,
-            vec!["Intro", "Limits", "Continuity", "Derivatives"]
-        );
-    }
-
-    #[tokio::test]
-    async fn non_plan_moves_never_carry_a_proposed_outline() {
-        let ai = mock_ai(r#"{"html":"<p>A remark, not a proposal.</p>","graded":false}"#);
-        let mv = generate_move(
-            &ai,
-            AgentPolicy::L1,
-            MoveType::Profile,
-            &MoveContext::default(),
-        )
-        .await
-        .unwrap();
-        assert!(mv.proposed_outline.is_empty());
     }
 
     #[tokio::test]
@@ -1487,14 +985,9 @@ mod tests {
         // First attempt fails validation; repair attempt gets the same broken
         // reply (MockProvider::new is constant), so the whole call errors —
         // proving the invariant is actually enforced, not just parsed.
-        let err = generate_move(
-            &ai,
-            AgentPolicy::L0,
-            MoveType::Test,
-            &MoveContext::default(),
-        )
-        .await
-        .unwrap_err();
+        let err = generate_move(&ai, MoveType::Test, &MoveContext::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, EngineError::Parse(_)));
     }
 
@@ -1510,25 +1003,20 @@ mod tests {
                 r#"{"html":"<form><input name=\"a\"></form>","graded":true,"objectives":[{"id":"o1","kind":"knowledge","description":"d","criteria":"c","transfer":false}]}"#.to_string()
             }
         });
-        let mv = generate_move(
-            &ai,
-            AgentPolicy::L0,
-            MoveType::Test,
-            &MoveContext::default(),
-        )
-        .await
-        .unwrap();
+        let mv = generate_move(&ai, MoveType::Test, &MoveContext::default())
+            .await
+            .unwrap();
         assert!(mv.repaired);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    /// The real check for "L0 ≙ today's loop" (PLAN.md): assemble a node from
-    /// L0's Explain+Test output through the SAME `engine::assemble_node`
-    /// the live endpoint uses, and assert the structural shape
-    /// `engine::tests::assemble_node_wraps_prose_and_exercise` pins today —
-    /// not just that the new decision sequence agrees with itself.
+    /// The real check for the template (PLAN.md): assemble a node from the
+    /// deterministic Explain+Test sequence through the SAME
+    /// `engine::assemble_node` the live endpoint uses, and assert the
+    /// structural shape `engine::tests::assemble_node_wraps_prose_and_
+    /// exercise` pins — not just that the template agrees with itself.
     #[tokio::test]
-    async fn l0_move_pipeline_matches_todays_node_shape() {
+    async fn template_move_pipeline_matches_todays_node_shape() {
         let explicar_ai = mock_ai("<h2>Limits</h2><p>Explanation.</p> <!--tactics: analogy-->");
         let testar_ai = mock_ai(
             r#"{"html":"<form><input name=\"a\"></form>","interactive":false,"graded":true,"tactics":["worked-example"],"objectives":[{"id":"o1","kind":"application","description":"apply","criteria":"transfers","transfer":true}]}"#,
@@ -1540,9 +1028,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mt1 = decide_move(&explicar_ai, AgentPolicy::L0, &ctx)
-            .await
-            .unwrap();
+        let mt1 = next_move(&ctx).unwrap();
         assert_eq!(mt1, MoveType::Explain);
         let accumulated = collect_stream(&explicar_ai, mt1, &ctx).await;
         let mv1 = finish_streamed_move(mt1, &accumulated);
@@ -1552,19 +1038,15 @@ mod tests {
             move_type: mv1.move_type,
             graded: mv1.graded,
         });
-        let mt2 = decide_move(&testar_ai, AgentPolicy::L0, &ctx)
-            .await
-            .unwrap();
+        let mt2 = next_move(&ctx).unwrap();
         assert_eq!(mt2, MoveType::Test);
-        let mv2 = generate_move(&testar_ai, AgentPolicy::L0, mt2, &ctx)
-            .await
-            .unwrap();
+        let mv2 = generate_move(&testar_ai, mt2, &ctx).await.unwrap();
         assert!(mv2.graded);
         let rubric = mv2.rubric.clone().unwrap();
         assert!(!rubric.objectives.is_empty());
 
-        // One-shot assembly from raw moves — `api.rs::finalize` now goes
-        // through `engine::finalize_node` against already-tagged,
+        // One-shot assembly from raw moves — `api::generation::finalize` now
+        // goes through `engine::finalize_node` against already-tagged,
         // progressively-persisted content (§S6 follow-up), but this is
         // still the reference shape both produce: prose blocks + a tagged
         // exercise form in one node.
@@ -1579,9 +1061,7 @@ mod tests {
             move_type: mv2.move_type,
             graded: mv2.graded,
         });
-        let done = decide_move(&testar_ai, AgentPolicy::L0, &ctx)
-            .await
-            .unwrap_err();
+        let done = next_move(&ctx).unwrap_err();
         assert!(matches!(done, EngineError::NoNextMove));
     }
 
@@ -1605,7 +1085,7 @@ mod tests {
             std::env::temp_dir().join(format!("learnive-live-check-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         let topics: [(&str, &str); 10] = [
             ("Photosynthesis", "the light-dependent reactions"),
@@ -1634,7 +1114,7 @@ mod tests {
                 ..Default::default()
             };
             println!("\n=== TOPIC: {topic} ===");
-            match generate_move(&ai, policy, MoveType::Test, &ctx).await {
+            match generate_move(&ai, MoveType::Test, &ctx).await {
                 Ok(mv) => {
                     println!("--- exercise_html ---\n{}", mv.html);
                     println!(
@@ -1643,86 +1123,6 @@ mod tests {
                     );
                 }
                 Err(e) => println!("--- ERROR: {e} ---"),
-            }
-        }
-    }
-
-    /// Latency investigation: for a real `Explain` move under L1/L2, times
-    /// `decide_move` (a full, non-streamed round trip to pick the move type)
-    /// separately from time-to-first-token of the subsequent
-    /// `generate_move_stream` call, against the REAL configured provider.
-    /// Answers "where does the >1min wall time actually go" instead of
-    /// guessing. Not part of the normal suite. Run with:
-    /// `cargo test -p learnive movement::tests::live_time_to_first_token -- --ignored --nocapture`
-    #[tokio::test]
-    #[ignore = "hits the real configured AI provider; run manually, see doc comment"]
-    async fn live_time_to_first_token() {
-        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
-        crate::load_dotenv(env_path);
-        let data_dir =
-            std::env::temp_dir().join(format!("learnive-live-timing-{}", std::process::id()));
-        let config = crate::config::AppConfig::load(&data_dir);
-        let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, policy) = crate::api::build_ai(&config, &secret);
-        println!("policy rung = {policy:?}");
-
-        for round in 1..=3 {
-            let ctx = MoveContext {
-                topic: "Photosynthesis".into(),
-                item_title: "the light-dependent reactions".into(),
-                objective: "Demonstrate understanding of the light-dependent reactions.".into(),
-                ..Default::default()
-            };
-
-            let t0 = std::time::Instant::now();
-            let move_type = match decide_move(&ai, policy, &ctx).await {
-                Ok(mt) => mt,
-                Err(e) => {
-                    println!(
-                        "round {round}: decide_move ERROR after {:?}: {e}",
-                        t0.elapsed()
-                    );
-                    continue;
-                }
-            };
-            let t1 = std::time::Instant::now();
-            println!(
-                "round {round}: decide_move -> {move_type:?} in {:?}",
-                t1 - t0
-            );
-
-            if move_type.render() != MoveRender::Streamed {
-                println!("round {round}: decided move is structured, not streamed — skipping TTFT");
-                continue;
-            }
-
-            let mut tokens = match generate_move_stream(&ai, move_type, &ctx).await {
-                Ok(s) => s,
-                Err(e) => {
-                    println!(
-                        "round {round}: generate_move_stream ERROR after {:?}: {e}",
-                        t1.elapsed()
-                    );
-                    continue;
-                }
-            };
-            let t2 = std::time::Instant::now();
-            println!(
-                "round {round}: stream() call itself returned in {:?}",
-                t2 - t1
-            );
-            match tokens.next().await {
-                Some(Ok(first)) => {
-                    let t3 = std::time::Instant::now();
-                    println!(
-                        "round {round}: first token after {:?} (total since decide_move start: {:?}) — {:?}",
-                        t3 - t2,
-                        t3 - t0,
-                        first.chars().take(40).collect::<String>()
-                    );
-                }
-                Some(Err(e)) => println!("round {round}: stream ERROR: {e}"),
-                None => println!("round {round}: stream ended with no tokens"),
             }
         }
     }
@@ -1772,7 +1172,7 @@ mod tests {
             std::env::temp_dir().join(format!("learnive-live-grounding-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         let ctx = MoveContext {
             topic: topic.clone(),
@@ -1796,77 +1196,6 @@ mod tests {
             }
             Err(e) => println!("--- ERROR after {:?}: {e} ---", t0.elapsed()),
         }
-    }
-
-    /// Dumps the REAL request bodies `decide_move` and an `Ask` move's
-    /// streamed generation would send — no network — so they can be curled
-    /// directly against the provider to isolate raw provider TTFB from
-    /// app-side overhead, with realistic (not toy) prompt sizes.
-    #[test]
-    #[ignore = "writes to /tmp for a manual curl comparison, see doc comment"]
-    fn dump_real_request_bodies() {
-        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
-        crate::load_dotenv(env_path);
-        let fast = std::env::var("LEARNIVE_MODEL_FAST").unwrap_or_default();
-        let robust = std::env::var("LEARNIVE_MODEL_ROBUST").unwrap_or_default();
-
-        let ctx = MoveContext {
-            topic: "Photosynthesis".into(),
-            item_title: "the light-dependent reactions".into(),
-            objective: "Demonstrate understanding of the light-dependent reactions.".into(),
-            ..Default::default()
-        };
-
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            model: &'a str,
-            messages: &'a [crate::ai::ChatMessage],
-            stream: bool,
-        }
-
-        let decide = prompt::decide_move(AgentPolicy::L1, &ctx);
-        println!(
-            "decide_move chars: {}",
-            decide.iter().map(|m| m.content.len()).sum::<usize>()
-        );
-        std::fs::write(
-            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_decide_move.json",
-            serde_json::to_string(&Body {
-                model: &fast,
-                messages: &decide,
-                stream: true,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let ask = prompt::generate_move_streamed(MoveType::Ask, &ctx);
-        println!(
-            "ask chars: {}",
-            ask.iter().map(|m| m.content.len()).sum::<usize>()
-        );
-        std::fs::write(
-            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_ask.json",
-            serde_json::to_string(&Body {
-                model: &fast,
-                messages: &ask,
-                stream: true,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let explain = prompt::generate_move_streamed(MoveType::Explain, &ctx);
-        std::fs::write(
-            "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_explain.json",
-            serde_json::to_string(&Body {
-                model: &robust,
-                messages: &explain,
-                stream: true,
-            })
-            .unwrap(),
-        )
-        .unwrap();
     }
 
     /// Dumps REAL `Test` move request bodies (exercise+rubric contract) for
@@ -1904,7 +1233,7 @@ mod tests {
                 objective: format!("Demonstrate understanding of {item_title}."),
                 ..Default::default()
             };
-            let messages = prompt::generate_move(AgentPolicy::L1, MoveType::Test, &ctx);
+            let messages = prompt::generate_move(MoveType::Test, &ctx);
             std::fs::write(
                 format!(
                     "/tmp/claude-1000/-home-hashino-Projects-learnive/47a18ee9-2d2e-4f3d-83f6-0fb5cc70e776/scratchpad/req_test_{i}.json"

@@ -187,13 +187,10 @@ pub async fn save_setup(
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
-    // Apply live: swap config + rebuild the provider + rung (§12 hot-swap).
-    // Both come from the same `build_ai` call — see its doc comment on why
-    // they must never be derived separately.
+    // Apply live: swap config + rebuild the provider (§12 hot-swap).
     *state.config.write().await = config.clone();
-    let (ai, policy) = build_ai(&config, &state.secret);
+    let ai = build_ai(&config, &state.secret);
     state.ai.store(std::sync::Arc::new(ai));
-    state.policy.store(std::sync::Arc::new(policy));
 
     let status = status_of(&config, &state.secret);
     Ok(Json(status))

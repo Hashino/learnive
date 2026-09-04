@@ -1557,7 +1557,7 @@ mod tests {
         )
     }
 
-    /// Same test-double convention as `movement.rs`/`profile.rs`: a
+    /// Same test-double convention as `movement.rs`: a
     /// provider whose reply is computed from the actual request, for
     /// asserting on prompt CONTENT (e.g. S27e's rejected-title retry) —
     /// `mock_ai` above only fixes the reply, not what was asked.
@@ -2187,7 +2187,7 @@ mod tests {
             std::env::temp_dir().join(format!("learnive-live-check-{}", std::process::id()));
         let config = crate::config::AppConfig::load(&data_dir);
         let secret = crate::secret::SecretStore::open(&data_dir);
-        let (ai, _policy) = crate::api::build_ai(&config, &secret);
+        let ai = crate::api::build_ai(&config, &secret);
 
         let pdf_path = concat!(
             env!("CARGO_MANIFEST_DIR"),

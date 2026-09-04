@@ -1,8 +1,5 @@
 use super::cold_start::suggested_revisit;
-use super::reading::{
-    escape_html, grounding_for, objective_for, profile_for, spawn_profile_distillation,
-    topic_and_title,
-};
+use super::reading::{escape_html, grounding_for, objective_for, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -221,14 +218,12 @@ pub async fn answer(
 
     // Advancing requires every objective demonstrated (§8).
     if assessment.all_demonstrated() {
-        spawn_profile_distillation(state.clone(), doc_id.clone(), true);
         return Ok(Json(AnswerResp {
             advance: true,
             attempt_html,
             remediation_html: None,
         }));
     }
-    spawn_profile_distillation(state.clone(), doc_id.clone(), false);
 
     // §S15 item 4: a failed transfer/synthesis objective is a cheap signal
     // that a PRIOR concept (a child node folded into this integration
@@ -285,14 +280,14 @@ pub async fn answer(
         })
         .count() as u32
         + 1;
-    // §S17: remediation now generates through the move ABI
+    // §S17: remediation generates through the move ABI
     // (`movement::generate_move_complete`/`generate_move`) instead of the
     // standalone `engine::remediate`/`generate_remediation_exercise` calls —
-    // same profile/grounding/citations context and real tactic self-labels
-    // any other move gets, joined to this node's evidence table via the
-    // `MoveGenerated` events appended below. WHICH move type fires stays a
-    // Rust decision either way (§8.2: never the model's choice) — this
-    // slice only unifies the generation path, not who decides.
+    // same grounding/citations context any other move gets, with its
+    // `MoveGenerated` events appended below. WHICH move type fires is a
+    // Rust decision (§8.2: never the model's choice) — S33's deterministic
+    // template generalizes that to every move, and remediation stays
+    // outside the template because it re-fires per failed attempt.
     let unmet_summary = assessment
         .unmet()
         .iter()
@@ -304,7 +299,6 @@ pub async fn answer(
         sidecar.exercise_html, body.answer
     );
     let grounding = grounding_for(&state, &sidecar.title).await;
-    let policy = *state.policy.load_full();
     let ctx = MoveContext {
         topic: sidecar.topic.clone(),
         item_title: sidecar.title.clone(),
@@ -315,7 +309,6 @@ pub async fn answer(
         // tail already uses.
         node_tail: node.content.html.clone(),
         objective: objective_for(&state, &doc_id),
-        profile: profile_for(&state, &doc_id),
         grounding,
         locale,
         failed_attempt: Some(failed_attempt),
@@ -335,7 +328,7 @@ pub async fn answer(
             move_id: explain_move_id,
             move_type: MoveType::Explain.to_string(),
             tactics: explain_move.tactics.clone(),
-            rung: format!("{policy:?}"),
+            rung: "deterministic".to_string(),
         },
     ) {
         eprintln!("event log append failed: {e}");
@@ -355,7 +348,7 @@ pub async fn answer(
     // answer is never revealed (EXERCISE_HTML_CONTRACT). Its own move_id, so a
     // future submission's MoveGraded joins onto it and not the one just graded
     // above.
-    let new_move = movement::generate_move(&ai, policy, MoveType::Test, &ctx).await?;
+    let new_move = movement::generate_move(&ai, MoveType::Test, &ctx).await?;
     let new_move_id = engine::new_id();
     if let Err(e) = event_log.append(
         Some(&node_id),
@@ -363,7 +356,7 @@ pub async fn answer(
             move_id: new_move_id.clone(),
             move_type: MoveType::Test.to_string(),
             tactics: new_move.tactics.clone(),
-            rung: format!("{policy:?}"),
+            rung: "deterministic".to_string(),
         },
     ) {
         eprintln!("event log append failed: {e}");
@@ -479,19 +472,17 @@ pub async fn practice_node(
     let node = state.store.read_node(&owner_id, &node_id)?;
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let ai = state.ai.load_full();
-    let policy = *state.policy.load_full();
     let grounding = grounding_for(&state, &title).await;
     let ctx = MoveContext {
         topic: topic.clone(),
         item_title: title.clone(),
         node_tail: node.content.html.clone(),
         objective: objective_for(&state, &doc_id),
-        profile: profile_for(&state, &doc_id),
         grounding,
         locale,
         ..Default::default()
     };
-    let new_move = movement::generate_move(&ai, policy, MoveType::Test, &ctx).await?;
+    let new_move = movement::generate_move(&ai, MoveType::Test, &ctx).await?;
     let new_move_id = engine::new_id();
     if let Err(e) = event_log.append(
         Some(&node_id),
@@ -499,7 +490,7 @@ pub async fn practice_node(
             move_id: new_move_id.clone(),
             move_type: MoveType::Test.to_string(),
             tactics: new_move.tactics.clone(),
-            rung: format!("{policy:?}"),
+            rung: "deterministic".to_string(),
         },
     ) {
         eprintln!("event log append failed: {e}");

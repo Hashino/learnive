@@ -23,7 +23,6 @@ use tokio::sync::RwLock;
 
 use crate::ai::Ai;
 use crate::config::AppConfig;
-use crate::movement::AgentPolicy;
 use crate::retrieval::Retriever;
 use crate::secret::SecretStore;
 use crate::source::{Corpus, Source};
@@ -44,10 +43,6 @@ pub struct AppState {
     /// AI provider + tiering (§12). Hot-swappable so the settings window
     /// applies without a restart — read per request with `state.ai.load_full()`.
     pub ai: Arc<ArcSwap<Ai>>,
-    /// Policy-ladder rung (§14) that goes with `ai` — always set together with
-    /// it (`api::build_ai`), never derived from `config` alone (see that
-    /// function's doc comment).
-    pub policy: Arc<ArcSwap<AgentPolicy>>,
     /// Persisted user config (provider + intent, §12/§12.1). No secrets.
     pub config: Arc<RwLock<AppConfig>>,
     /// Secret store for API keys (§12) — file-first, never a central DB.
@@ -145,9 +140,7 @@ impl AppState {
             }
         };
 
-        let (ai, policy) = api::build_ai(&config, &secret);
-        let ai = Arc::new(ArcSwap::from_pointee(ai));
-        let policy = Arc::new(ArcSwap::from_pointee(policy));
+        let ai = Arc::new(ArcSwap::from_pointee(api::build_ai(&config, &secret)));
 
         Self {
             token: Arc::from(security::generate_token()),
@@ -155,7 +148,6 @@ impl AppState {
             allowed_hosts: Arc::new(allowed_hosts),
             store,
             ai,
-            policy,
             config: Arc::new(RwLock::new(config)),
             secret: Arc::new(secret),
             data_dir: Arc::from(data_dir.as_str()),
@@ -275,10 +267,6 @@ pub fn build_router(state: AppState) -> Router {
             post(api::read_to_end),
         )
         .route(
-            "/api/documents/{doc}/plan/decide",
-            post(api::decide_plan_proposal),
-        )
-        .route(
             "/api/documents/{doc}/objective",
             post(api::revise_objective),
         )
@@ -289,10 +277,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/documents/{doc}/name", post(api::rename_document))
         // Deleting a whole living document (§S12) — DELETE, never GET (§3.1).
         .route("/api/documents/{doc}", delete(api::delete_document))
-        .route(
-            "/api/documents/{doc}/profile",
-            get(api::get_profile).post(api::revise_profile),
-        )
         // S27f: the acervo gate report ("what's missing"), PDF<->item
         // manual matching, and TOC-confirmation screens. Read/act-on-demand:
         // enforcement lives in `api::reading::ensure_document_grounded`

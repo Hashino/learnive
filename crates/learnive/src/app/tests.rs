@@ -55,7 +55,6 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         allowed_hosts: Arc::new(HashSet::from([HOST.to_string()])),
         store: crate::store::Store::open(&dir).unwrap(),
         ai: Arc::new(ArcSwap::from_pointee(ai)),
-        policy: Arc::new(ArcSwap::from_pointee(AgentPolicy::L0)),
         config: Arc::new(RwLock::new(AppConfig::default())),
         secret: Arc::new(SecretStore::open(&dir)),
         data_dir: Arc::from(dir.to_string_lossy().as_ref()),
@@ -1351,11 +1350,10 @@ async fn interactive_island_never_leaks_raw_script_but_is_served_sandboxed() {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        if text.contains("<!--tactics:") {
+        if text.contains("Write short, atomic explanatory prose") {
             "<p>Before the island.</p>\n\
              <figure data-interactive><script>parent.postMessage({type:'ping'},'*')</script></figure>\n\
-             <p>After the island.</p>\n\
-             <!--tactics: worked-example-->"
+             <p>After the island.</p>"
                 .to_string()
         } else {
             crate::api::demo_responder(req)
@@ -1625,9 +1623,8 @@ async fn ask_answer_renders_math_before_storing() {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        if text.contains("<!--tactics:") {
-            return "<p>Half is $\\frac{1}{2}$ of the whole.</p>\n<!--tactics: analogy-->"
-                .to_string();
+        if text.contains("Answer the learner's question") {
+            return "<p>Half is $\\frac{1}{2}$ of the whole.</p>".to_string();
         }
         crate::api::demo_responder(req)
     }));
@@ -1688,106 +1685,8 @@ async fn ask_answer_renders_math_before_storing() {
     assert!(!ask_html.contains("$\\frac"));
 }
 
-/// §S7 — evidence profile: a node closing (demonstrated) is the "fechar
-/// nó" distillation trigger (§7.1). Exercises the whole chain through the
-/// real router + demo_responder (which has a dedicated branch for the
-/// distillation prompt, same as every other move type): the always-fresh
-/// evidence table (0 LLM tokens), the rare distillation call persisting
-/// traits/hypotheses to `profile.json`, GET reflecting them, and POST
-/// editing them (§7.1 "inspecionável/editável") without resetting the
-/// ~30-event distillation threshold a manual edit must not touch.
 #[tokio::test]
-async fn profile_evidence_and_distillation_flow_in_demo_mode() {
-    let state = test_state();
-    let call = |req: Request<Body>| {
-        let state = state.clone();
-        async move {
-            let resp = build_router(state).oneshot(req).await.unwrap();
-            let status = resp.status();
-            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-            (status, String::from_utf8_lossy(&bytes).into_owned())
-        }
-    };
-
-    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
-    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let doc_id = created["doc_id"].as_str().unwrap().to_string();
-    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
-
-    // Before any node closes, the profile endpoint still works — just empty.
-    let (status, body) = call(authed(
-        "GET",
-        &format!("/api/documents/{doc_id}/profile"),
-        "",
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(profile["evidence"], serde_json::json!(""));
-    assert!(profile["traits"].as_array().unwrap().is_empty());
-
-    // Generate + answer node0 for real (demo grades non-blank content as
-    // demonstrated) — the node closing is the distillation trigger. §S18:
-    // one move per request, so drive it to its graded exercise first.
-    generate_to_completion(&call, &doc_id, &node0).await;
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/answer"),
-        r#"{"answer":"I apply the concept to a new case like this..."}"#,
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(ans["advance"], serde_json::json!(true));
-
-    // Distillation is now backgrounded (§14: never block answer→advance,
-    // the hottest transition in the app, on a second LLM call) — give the
-    // spawned task a chance to run before checking its effect.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // The evidence table now carries the graded test move's tactic
-    // (0-token Rust fold); the rare distillation ran and persisted.
-    let (status, body) = call(authed(
-        "GET",
-        &format!("/api/documents/{doc_id}/profile"),
-        "",
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(
-        profile["evidence"]
-            .as_str()
-            .unwrap()
-            .contains("worked-example: 1 demonstrated"),
-        "evidence table: {profile}"
-    );
-    assert!(!profile["traits"].as_array().unwrap().is_empty());
-    assert!(!profile["hypotheses"].as_array().unwrap().is_empty());
-    let distilled_through = profile["distilled_through"].as_u64().unwrap();
-    assert!(distilled_through > 0);
-
-    // The learner edits the profile directly (§7.1 human-in-the-loop) —
-    // the ~30-event distillation threshold must NOT reset on a manual edit.
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/profile"),
-        r#"{"traits":["user-authored trait"],"hypotheses":[]}"#,
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let edited: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(edited["traits"], serde_json::json!(["user-authored trait"]));
-    assert!(edited["hypotheses"].as_array().unwrap().is_empty());
-    assert_eq!(
-        edited["distilled_through"].as_u64().unwrap(),
-        distilled_through,
-        "a user edit must not reset the distillation threshold"
-    );
-}
-
-#[tokio::test]
-async fn objective_and_plan_endpoints_work_in_demo_mode() {
+async fn objective_endpoints_work_in_demo_mode() {
     // §S4, exercised through the real router + demo_responder — the
     // out-of-box keyless path, not just a mocked engine call.
     let state = test_state();
@@ -1814,10 +1713,7 @@ async fn objective_and_plan_endpoints_work_in_demo_mode() {
     assert!(!proposal["text"].as_str().unwrap().is_empty());
 
     // 2. Confirm — locks objective version 1. Explicit, already-confirmed
-    // nodes (as the real client always sends), a single flat top-level item
-    // with no children — this test's `plan/decide` step below asserts an
-    // exact title list, which a decomposed node's preserved sub-items would
-    // otherwise pad out.
+    // nodes (as the real client always sends).
     let (status, body) = call(authed(
         "POST",
         "/api/documents",
@@ -1865,49 +1761,6 @@ async fn objective_and_plan_endpoints_work_in_demo_mode() {
         log.current().unwrap().source,
         crate::objective::ObjectiveSource::UserEdit
     );
-
-    // 4. A `plan` proposal (synthesized directly — the demo provider
-    // never proposes a structural change) resolved via `/plan/decide`.
-    let proposal = serde_json::json!({
-        "move_id": "mv1",
-        "node_id": "n0",
-        "html": "<p>rationale</p>",
-        "proposed": ["Introduction", "Adding fractions", "Subtracting fractions"],
-        "resolved": false,
-    });
-    state
-        .store
-        .write_doc_file(&doc_id, "outline.proposal.json", &proposal.to_string())
-        .unwrap();
-
-    let (status, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/plan/decide"),
-        r#"{"approve":true}"#,
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let titles: Vec<&str> = resp["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|i| i["title"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        titles,
-        vec!["Introduction", "Adding fractions", "Subtracting fractions"]
-    );
-
-    // Replaying the same (now-resolved) proposal must be rejected, not
-    // silently re-applied.
-    let (status, _) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/plan/decide"),
-        r#"{"approve":false}"#,
-    ))
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 // §S8: the demo responder always answers inline (no real signal to
@@ -2062,30 +1915,19 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
 // does (`, research`), so this test breaks if the menu wording ever
 // changes, rather than silently drifting from what it claims to force.
 fn research_once_responder(req: &crate::ai::ChatRequest) -> String {
-    let text = req
-        .messages
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.contains("choosing the next move") && text.contains(", research") {
-        return r#"{"move_type":"research","rationale":"test: force the research branch"}"#
-            .to_string();
-    }
+    // S33: the research move is Rust-forced now (the gate in
+    // `generate_node` fires on an ungrounded, never-researched node), so
+    // there is no menu to script a "research" pick out of — the plain demo
+    // responder drives whatever the template asks for next.
     crate::api::demo_responder(req)
 }
 
-/// §S13: the `research` move was, until this test, verified only by code
-/// review — both live trials in the session that built it had cold-start
-/// grounding arrive before generation started, so `decide_move` correctly
-/// never offered it and the branch in `generate_node` (acquire → emit two
-/// status frames → loop back, never `render()`) never actually ran. L0
-/// (this suite's default policy) never offers `research` either — its
-/// fixed rule doesn't know the move exists — so this forces L1 and scripts
-/// `decide_move`'s very first call to pick it, then lets the real
-/// `demo_responder` drive the rest of the node once `research_attempted`
-/// withdraws the option from the menu (`movement::prompt::menu`, covered
-/// unit-level by `research_offered_only_when_ungrounded_and_unattempted`).
+/// §S13: the `research` move's branch in `generate_node` (acquire → emit
+/// two status frames → loop back, never `render()`). Since S33 it is not
+/// model-chosen at all — the Rust gate fires when a node starts with no
+/// grounding and no acquisition attempt yet — so this test just needs an
+/// ungrounded node and lets the plain `demo_responder` drive the rest of
+/// the node once `research_attempted` caps the interception at one.
 ///
 /// Rewritten 2026-08-29 for S27m: `test_state_with_ai` now seeds a real
 /// (mock-embedder) retriever plus the two demo library PDFs, so a document
@@ -2109,7 +1951,6 @@ fn research_once_responder(req: &crate::ai::ChatRequest) -> String {
 #[tokio::test]
 async fn research_move_acquires_then_resumes_the_real_move_loop() {
     use crate::ai::{Ai, MockProvider, Models, Provider};
-    use crate::movement::AgentPolicy;
 
     let ai = Ai::new(
         Provider::Mock(MockProvider::scripted(research_once_responder)),
@@ -2118,7 +1959,6 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
     let mut state = test_state_with_ai(ai);
     state.source = Arc::new(Source::Unconfigured);
     state.fallback_source = Arc::new(Source::Unconfigured);
-    state.policy.store(Arc::new(AgentPolicy::L1));
     let call = |req: Request<Body>| {
         let state = state.clone();
         async move {
@@ -2191,105 +2031,6 @@ async fn research_move_acquires_then_resumes_the_real_move_loop() {
     assert_eq!(view["demonstrated"], serde_json::json!(false));
     assert!(view["exercise_block_id"].is_string());
     assert!(!view["content_html"].as_str().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn plan_approval_preserves_spawned_subnodes() {
-    // §S8/§5: a `plan` move only ever proposes titles for the main line
-    // — rebuilding `outline.json` from those titles must not silently
-    // drop a sub-node spawned from a question, which is never among them.
-    let state = test_state_with_ai(spawn_ai());
-    let call = |req: Request<Body>| {
-        let state = state.clone();
-        async move {
-            let resp = build_router(state).oneshot(req).await.unwrap();
-            let status = resp.status();
-            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-            (status, String::from_utf8_lossy(&bytes).into_owned())
-        }
-    };
-
-    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
-    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let doc_id = created["doc_id"].as_str().unwrap().to_string();
-    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
-    let node0_title = created["items"][0]["title"].as_str().unwrap().to_string();
-
-    call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
-        "",
-    ))
-    .await;
-    let (_, body) = call(authed(
-        "GET",
-        &format!("/api/documents/{doc_id}/nodes/{node0}"),
-        "",
-    ))
-    .await;
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let block_id = view["content_html"]
-        .as_str()
-        .unwrap()
-        .split("data-block-id=\"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .unwrap()
-        .to_string();
-
-    let (_, body) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/nodes/{node0}/ask"),
-        &format!(r#"{{"question":"go deeper please","anchor":{{"block_id":"{block_id}"}}}}"#),
-    ))
-    .await;
-    let ask: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let sub_id = ask["node_id"].as_str().unwrap().to_string();
-
-    // Reuses node0's own title so the plan's rebuild keeps its id (the
-    // model only signals a rename by an exact title match, §5's own
-    // documented limit) — the point under test is the sub-node, not id
-    // churn on the main line.
-    let proposal = serde_json::json!({
-        "move_id": "mv1",
-        "node_id": node0,
-        "html": "<p>rationale</p>",
-        "proposed": [node0_title, "A new second concept"],
-        "resolved": false,
-    });
-    state
-        .store
-        .write_doc_file(&doc_id, "outline.proposal.json", &proposal.to_string())
-        .unwrap();
-
-    let (status, _) = call(authed(
-        "POST",
-        &format!("/api/documents/{doc_id}/plan/decide"),
-        r#"{"approve":true}"#,
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let outline_json = state.store.read_doc_file(&doc_id, "outline.json").unwrap();
-    let outline: crate::engine::Outline = serde_json::from_str(&outline_json).unwrap();
-    assert_eq!(
-        outline.items.iter().filter(|i| i.id == sub_id).count(),
-        1,
-        "the spawned sub-node must survive a plan rebuild it was never part of"
-    );
-    let sub_item = outline.items.iter().find(|i| i.id == sub_id).unwrap();
-    assert_eq!(sub_item.parent_id.as_deref(), Some(node0.as_str()));
-
-    let main_line: Vec<&str> = outline
-        .items
-        .iter()
-        .filter(|i| i.parent_id.is_none())
-        .map(|i| i.title.as_str())
-        .collect();
-    assert_eq!(
-        main_line,
-        vec![node0_title.as_str(), "A new second concept"]
-    );
 }
 
 /// §S15b — shared node, steps 1+2 (`source_doc_id`/`owner_of` + write

@@ -14,7 +14,7 @@ use crate::source;
 // preserves whatever interaction layer already exists across the next move's
 // write. A mid-draft `/ask` (or annotation, or the read-to-end sentinel
 // below) is exactly what §S18's `ObservationFrame` reads back on the node's
-// next per-move `/generate` call (`events::aggregate::observation_frame`).
+// next per-move `/generate` call.
 // ---------------------------------------------------------------------------
 
 /// Minimal HTML-escaper for embedding user-authored plain text inside
@@ -491,9 +491,9 @@ pub async fn ask_question(
     // Degrades to `Inline` on failure (a bad/unparseable decision, or a
     // provider error after the one bounded repair) rather than propagating —
     // every other optional-context signal in this codebase degrades the same
-    // way (`objective_for`, `grounding_for`, `profile_for` all fall back to
-    // ""); `/ask` must stay at least as reliable as it was before §S8, not
-    // regress into failing outright when the classifier call itself fails.
+    // way (`objective_for`, `grounding_for` all fall back to ""); `/ask`
+    // must stay at least as reliable as it was before §S8, not regress into
+    // failing outright when the classifier call itself fails.
     let decision = engine::decide_ask_response(
         &ai,
         &topic,
@@ -526,15 +526,13 @@ pub async fn ask_question(
     // §S17: both outcomes below now generate through the move ABI
     // (`movement::generate_move_complete`) instead of the standalone
     // `engine::answer_question`/`generate_subnode_prose` calls — the same
-    // context (profile/grounding/citations) and tactic self-labels any
-    // other move gets, joined to this node's evidence table via the
+    // context (grounding/citations) any other move gets, with its
     // `MoveGenerated` event appended right below.
     let mut ctx = MoveContext {
         topic: topic.clone(),
         item_title: title.clone(),
         node_tail,
         objective: objective_for(&state, &doc_id),
-        profile: profile_for(&state, &doc_id),
         grounding: grounding_for(&state, &title).await,
         locale,
         question: Some(question.to_string()),
@@ -550,8 +548,8 @@ pub async fn ask_question(
                 EventKind::MoveGenerated {
                     move_id: move_id.clone(),
                     move_type: MoveType::Respond.to_string(),
-                    tactics: generated.tactics.clone(),
-                    rung: format!("{:?}", *state.policy.load_full()),
+                    tactics: Vec::new(),
+                    rung: "deterministic".to_string(),
                 },
             ) {
                 eprintln!("event log append failed: {e}");
@@ -600,8 +598,8 @@ pub async fn ask_question(
                 EventKind::MoveGenerated {
                     move_id: move_id.clone(),
                     move_type: MoveType::Respond.to_string(),
-                    tactics: generated.tactics.clone(),
-                    rung: format!("{:?}", *state.policy.load_full()),
+                    tactics: Vec::new(),
+                    rung: "deterministic".to_string(),
                 },
             ) {
                 eprintln!("event log append failed: {e}");
@@ -799,14 +797,6 @@ pub(super) struct NodePrep {
     /// document with no `objective.json`, same graceful-degradation
     /// convention as `grounding`.
     pub(super) objective: String,
-    /// Evidence-profile text for `MoveContext::profile` (§7/§S7) —
-    /// `profile_for`'s always-fresh evidence table plus any distilled
-    /// traits/hypotheses. Empty for a document with no evidence/distillation
-    /// yet, same graceful-degradation convention as `grounding`/`objective`.
-    pub(super) profile: String,
-    /// Current outline item titles, for `generate_node` to detect whether a
-    /// `plan` move's proposal is a real structural change (§5).
-    pub(super) outline_titles: Vec<String>,
     /// §S15: titles of this node's own children (`parent_id` pointing at
     /// it) — fed to `MoveContext::children_titles` so a `test` move on a
     /// node with a decomposed prerequisite tree can integrate them.
@@ -851,11 +841,6 @@ pub(super) struct NodePrep {
     /// counts differ and why the loop must start at this one, not
     /// `resumed_moves.len()`.
     pub(super) resumed_move_index: usize,
-    /// §S18: what the learner did since the last move settled in this node
-    /// (`events::aggregate::observation_frame`) — empty on a node's first
-    /// move, or when this `/generate` call reopened before anything new
-    /// happened. Feeds `MoveContext.observation`.
-    pub(super) observation: crate::events::aggregate::ObservationFrame,
     /// §S18: whether `research` has ever been logged for this node —
     /// reconstructed the same way `resumed_move_index` is, so the one-
     /// attempt-per-node cap (`MoveContext::research_attempted`'s doc
@@ -883,7 +868,7 @@ pub(super) struct NodePrep {
 /// re-attempts only the move that actually failed).
 ///
 /// Excludes `research` on purpose: it's a real logged move (`generation.rs`'s
-/// `MoveType::Research` branch appends one) but never reaches
+/// research interception appends one) but never reaches
 /// `ctx.prior_moves.push` in a live single-request run either — it `continue`s
 /// the loop before that point — so a resumed reconstruction that included it
 /// would disagree with what a live run's own `prior_moves` ever contains.
@@ -896,9 +881,15 @@ pub(super) struct NodePrep {
 /// entry either. Before §S18 this only mattered on a genuine crash-resume
 /// (rare); §S18 makes "ask a question while the node is paused between
 /// moves" the common case, so leaving `respond` in here reliably broke the
-/// NEXT per-move request: L0's fixed [explain, test] rule
-/// (`movement::l0_next_move`) doesn't recognize a 3rd move and errored with
-/// "this node's moves are already complete".
+/// NEXT per-move request: the template rule (`movement::next_move`)
+/// doesn't recognize a 3rd move and errored with "this node's moves are
+/// already complete".
+///
+/// Restricted to TEMPLATE move types (S33): pre-S33 logs may record
+/// `ask`/`plan`/`confront`/`profile`, which deserialize as `MoveType::
+/// Other` — leaving one in a resumed `prior_moves` would wedge `next_move`
+/// (no template arm matches it) and stall the node. A stale partial node
+/// with only non-template moves simply restarts its template from the top.
 fn resumed_ungraded_moves(
     events: impl Iterator<Item = crate::events::Event>,
     node_id: &str,
@@ -911,7 +902,12 @@ fn resumed_ungraded_moves(
             }
             _ => None,
         })
-        .filter(|mt| !matches!(mt, MoveType::Research | MoveType::Respond))
+        .filter(|mt| {
+            matches!(
+                mt,
+                MoveType::Explain | MoveType::Test | MoveType::Integrate | MoveType::Revisit
+            )
+        })
         .map(|move_type| MoveRecord {
             move_type,
             graded: false,
@@ -1076,7 +1072,7 @@ pub(super) async fn prepare(
     // the chain's exit gate) — its `Demonstrated` state lives in the
     // owner's log, not this document's own, so the gate check below needs
     // the same owner-fold `outline_view` uses. Everything else in this
-    // function (`resumed_moves`, `observation`, `research_attempted`
+    // function (`resumed_moves`, `research_attempted`
     // below) stays on the plain local `event_log`: it's this DOCUMENT's
     // own generation history of THIS item, which is always local (a
     // reference is refused above, before this point).
@@ -1251,8 +1247,6 @@ pub(super) async fn prepare(
         }
     };
     let objective = objective_for(state, doc_id);
-    let profile = profile_for(state, doc_id);
-    let outline_titles = outline.items.iter().map(|i| i.title.clone()).collect();
     // §S15: titles of this node's own prerequisite-tree/question-spawned
     // children (`parent_id` pointing back at it) — fed to the `test` move so
     // a node with children can be told to integrate what they taught rather
@@ -1291,10 +1285,6 @@ pub(super) async fn prepare(
             .map(|node| engine::strip_build_marker(&node.content.html).to_string())
             .unwrap_or_default()
     };
-    let observation = crate::events::aggregate::observation_frame(
-        event_log.iter().map_err(|e| e.to_string())?,
-        &item.id,
-    );
     let research_attempted = crate::events::aggregate::research_attempted(
         event_log.iter().map_err(|e| e.to_string())?,
         &item.id,
@@ -1322,8 +1312,6 @@ pub(super) async fn prepare(
         node_id: item.id,
         grounding,
         objective,
-        profile,
-        outline_titles,
         children_titles,
         review_mode,
         parent_title,
@@ -1331,7 +1319,6 @@ pub(super) async fn prepare(
         resumed_moves,
         resumed_content_html,
         resumed_move_index,
-        observation,
         research_attempted,
         scaffolding,
         interleave_titles,
@@ -1395,134 +1382,6 @@ pub(super) fn objective_for(state: &AppState, doc_id: &str) -> String {
         return String::new();
     };
     log.current().map(|v| v.text.clone()).unwrap_or_default()
-}
-
-/// §9 "mover o degrau por documento": the config-derived `config_prior` is a
-/// ceiling, not the rung itself — this document's own `events.jsonl` can
-/// step it down (never up) via `calibrate_rung`. Degrades to `config_prior`
-/// unchanged if the log can't be read, same "optional context degrades,
-/// never blocks generation" convention as `objective_for`/`grounding_for`/
-/// `profile_for` — a telemetry read failing must not fail the whole node
-/// generation. Deliberately synchronous and self-contained (constructs and
-/// fully drains the log's iterator in one call, never holding it as a local
-/// in the caller): `EventLog::iter`'s `Box<dyn Iterator>` isn't `Send`, and
-/// `generate_node`'s SSE stream is a real `async` state machine — a `Box<dyn
-/// Iterator>` local spanning any of its later `.await`s makes the whole
-/// stream `!Send`, which `Body::from_stream` requires. Returning here before
-/// any `.await` keeps the non-`Send` value confined to this function's own
-/// stack frame.
-pub(super) fn rung_for(state: &AppState, doc_id: &str, config_prior: AgentPolicy) -> AgentPolicy {
-    let Ok(event_log) = state.store.event_log(doc_id) else {
-        return config_prior;
-    };
-    let Ok(events) = event_log.iter() else {
-        return config_prior;
-    };
-    calibrate_rung(config_prior, &ladder_signals(events))
-}
-
-/// Reads `<doc>/profile.json` (§S7) if it exists yet — `None` for a document
-/// with no distillation yet (a fresh document, or one predating this slice),
-/// same graceful-degradation convention as `objective_for`.
-pub(super) fn read_profile(state: &AppState, doc_id: &str) -> Option<ProfileProjection> {
-    let json = state.store.read_doc_file(doc_id, "profile.json").ok()?;
-    serde_json::from_str(&json).ok()
-}
-
-/// Compact evidence-profile text for `MoveContext::profile` (§7/§S7): the
-/// always-fresh evidence table (`tactic_outcomes`, 0 LLM tokens, recomputed
-/// on every call) plus whatever distilled traits/hypotheses `profile.json`
-/// currently holds. Degrades to "" on a document with nothing yet, same
-/// convention as `grounding_for`/`objective_for`.
-pub(super) fn profile_for(state: &AppState, doc_id: &str) -> String {
-    let Ok(event_log) = state.store.event_log(doc_id) else {
-        return String::new();
-    };
-    let Ok(events) = event_log.iter() else {
-        return String::new();
-    };
-    let table = tactic_outcomes(events);
-    let evidence_text = profile::evidence_table_text(&table);
-    let projection = read_profile(state, doc_id);
-    profile::render_for_prompt(&evidence_text, projection.as_ref())
-}
-
-/// Fires the rare profile distillation (§7.1) in the background — same
-/// fire-and-forget shape as `spawn_acquisition`. `node_closed: true` fires on
-/// EVERY node close (the answer→advance path, the hottest transition in the
-/// app, §14), so this must never be awaited inline: a synchronous second LLM
-/// call on that path would be a latency regression on exactly the path §14
-/// singles out, and on the remediation branch it would serialize behind
-/// grading too, right when the learner is already stuck.
-pub(super) fn spawn_profile_distillation(state: AppState, doc_id: String, node_closed: bool) {
-    tokio::spawn(async move {
-        maybe_distill_profile(&state, &doc_id, node_closed).await;
-    });
-}
-
-/// Best-effort rare profile distillation (§7.1: "destilação rara"). Never
-/// surfaces failure to the caller — same convention as event-log append
-/// failures elsewhere: a stale profile just means `MoveContext::profile`
-/// stays one distillation behind, not a broken request. `node_closed` is
-/// whether THIS call is the "fechar nó" trigger (§7.1); the ~30-event
-/// fallback is checked regardless, so a document that only skips (never
-/// closes a node) still eventually distills. Only ever called via
-/// `spawn_profile_distillation` — never awaited on a request path.
-async fn maybe_distill_profile(state: &AppState, doc_id: &str, node_closed: bool) {
-    let Ok(event_log) = state.store.event_log(doc_id) else {
-        return;
-    };
-    let Ok(events) = event_log.iter() else {
-        return;
-    };
-    let events: Vec<_> = events.collect();
-    let total_events = events.len() as u32;
-
-    let existing = read_profile(state, doc_id);
-    let distilled_through = existing.as_ref().map(|p| p.distilled_through).unwrap_or(0);
-    if !profile::should_distill(node_closed, total_events, distilled_through) {
-        return;
-    }
-
-    let table = tactic_outcomes(events.iter().cloned());
-    let activity = activity_counts(events.into_iter());
-    let evidence_text = profile::evidence_table_text(&table);
-
-    let ai = state.ai.load_full();
-    match profile::distill(
-        &ai,
-        &evidence_text,
-        &activity,
-        total_events,
-        existing.as_ref(),
-    )
-    .await
-    {
-        Ok(projection) => {
-            // Guard against `revise_profile` landing a manual edit while this
-            // backgrounded call was in flight (§7.1) — the window is seconds
-            // (an LLM call), far wider than `Store::append_interaction`'s
-            // ~1ms critical section. If the on-disk profile no longer matches
-            // what this call started from, something newer already landed;
-            // drop this stale result rather than clobber it. Not airtight (a
-            // second race can still land between this check and the write
-            // below), but shrinks the window from "seconds" back down to
-            // "one read+write", the same residual every sidecar file in this
-            // codebase already accepts.
-            if read_profile(state, doc_id) != existing {
-                eprintln!("profile distillation dropped: a newer edit landed first");
-                return;
-            }
-            if let Err(e) = state.store.write_doc_file(
-                doc_id,
-                "profile.json",
-                &serde_json::to_string(&projection).unwrap_or_default(),
-            ) {
-                eprintln!("profile write failed: {e}");
-            }
-        }
-        Err(e) => eprintln!("profile distillation failed: {e}"),
-    }
 }
 
 /// S27m (PLAN.md, 2026-08-29) — "o nó se funda no livro dele, ou não

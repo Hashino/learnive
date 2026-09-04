@@ -6,10 +6,7 @@ use super::*;
 // else `Provider::Unconfigured` (never offline demo — that's dev-only, §22).
 // ---------------------------------------------------------------------------
 
-/// Builds the `Ai` from the environment (§12), together with the policy-ladder
-/// rung (§14) that goes with it — the two must never be derived separately:
-/// deriving the rung from `config` alone would desync from which `Ai` this
-/// function actually returns whenever an env-var override is active. Precedence:
+/// Builds the `Ai` from the environment (§12). Precedence:
 /// 1. `LEARNIVE_DEMO` (any non-empty value) — dev/test escape hatch, forces
 ///    offline demo mode regardless of what's configured. Never a UI choice,
 ///    never reachable from anything a real user does in the app itself.
@@ -23,20 +20,13 @@ use super::*;
 ///    settings window already auto-opens on boot for this case
 ///    (`SetupStatus::needs_setup`, api/setup.rs).
 ///
-/// Rung: a real provider (paths 1-4) derives L1/L2 from the free/paid intent
-/// (§12.1) — except the `LEARNIVE_DEMO` escape hatch, which is always L0
-/// (deterministic content, no AI call for `decide_move`). Path 5 is also L0,
-/// but it doesn't matter: `Provider::Unconfigured` never returns anything for
-/// the rung to shape.
-pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
-    let real_provider_policy = match config.intent {
-        Intent::Free => AgentPolicy::L1,
-        Intent::Paid => AgentPolicy::L2,
-    };
-
+/// S33: this used to also derive the policy-ladder rung from the free/paid
+/// intent (§12.1); the ladder is deleted — move choice is deterministic, so
+/// the intent question now only feeds model tiering (`config.models`).
+pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> Ai {
     // 0. Dev/test override: force demo mode regardless of any other config.
     if std::env::var("LEARNIVE_DEMO").is_ok_and(|v| !v.is_empty()) {
-        return (demo_ai(), AgentPolicy::L0);
+        return demo_ai();
     }
 
     // 1. Environment override wins (dev / `.env`; CLAUDE.md: the real env wins).
@@ -46,23 +36,17 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
         let key = std::env::var("LEARNIVE_API_KEY")
             .ok()
             .filter(|k| !k.is_empty());
-        return (
-            Ai::new(
-                Provider::OpenAiCompat(OpenAiCompat::new(base_url, key)),
-                models_from_env(),
-            ),
-            real_provider_policy,
+        return Ai::new(
+            Provider::OpenAiCompat(OpenAiCompat::new(base_url, key)),
+            models_from_env(),
         );
     }
     if let Ok(key) = std::env::var("LEARNIVE_OPENROUTER_KEY")
         && !key.is_empty()
     {
-        return (
-            Ai::new(
-                Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
-                models_from_env(),
-            ),
-            real_provider_policy,
+        return Ai::new(
+            Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
+            models_from_env(),
         );
     }
 
@@ -72,22 +56,16 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
     match &config.provider {
         ProviderKind::OpenRouter => {
             if let Some(key) = secret.get("openrouter") {
-                return (
-                    Ai::new(
-                        Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
-                        config.models(),
-                    ),
-                    real_provider_policy,
+                return Ai::new(
+                    Provider::OpenAiCompat(OpenAiCompat::openrouter(Some(key))),
+                    config.models(),
                 );
             }
         }
         ProviderKind::OpenAiCompatible { base_url } => {
-            return (
-                Ai::new(
-                    Provider::OpenAiCompat(OpenAiCompat::new(base_url.clone(), secret.get("api"))),
-                    config.models(),
-                ),
-                real_provider_policy,
+            return Ai::new(
+                Provider::OpenAiCompat(OpenAiCompat::new(base_url.clone(), secret.get("api"))),
+                config.models(),
             );
         }
     }
@@ -102,10 +80,7 @@ pub fn build_ai(config: &AppConfig, secret: &SecretStore) -> (Ai, AgentPolicy) {
         "No provider configured. Open the app and use the settings (⚙) \
          button to configure one."
     );
-    (
-        Ai::new(Provider::Unconfigured, Models::single("unconfigured")),
-        AgentPolicy::L0,
-    )
+    Ai::new(Provider::Unconfigured, Models::single("unconfigured"))
 }
 
 /// Reads the fast/robust model pair from the environment (§12.1). Defaults are
@@ -171,11 +146,6 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
             r#"[{{"title":"{t1}","authors":["{a1}"],"year":2020,"edition":null,"identifier":null,"kind":"book"}},{{"title":"{t2}","authors":["{a2}"],"year":2024,"edition":null,"identifier":null,"kind":"book"}}]"#
         );
     }
-    if text.contains("choosing the next move") {
-        // movement::decide_move (L1/L2) contract.
-        return r#"{"move_type":"explain","rationale":"demo: start with an explanation"}"#
-            .to_string();
-    }
     if text.contains("Move JSON contract") {
         // movement::generate_move (structured path only — test/profile/plan/
         // other) contract. Branch by the move-type marker embedded in its
@@ -183,18 +153,7 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         if text.contains("\"test\" move") {
             return r#"{"html":"<form><p>Apply the concept to a new case:</p><textarea name=\"answer\" rows=\"4\" required></textarea><p><button type=\"submit\">Submit answer</button></p></form>","interactive":false,"graded":true,"tactics":["worked-example"],"objectives":[{"id":"o1","kind":"application","description":"Apply the concept to a new case","criteria":"The answer transfers the concept to a scenario not covered in the text","transfer":true}]}"#.to_string();
         }
-        if text.contains("\"plan\" move") {
-            // No structural change proposed — demo mode never has enough
-            // signal to justify one, so the loop just continues (§S4: "no
-            // proposal, no approval needed").
-            return r#"{"html":"<p>No structural changes needed yet in <strong>demo mode</strong>.</p>","interactive":false,"graded":false,"tactics":[],"outline":[]}"#.to_string();
-        }
         return r#"{"html":"<h2>Core concept</h2><p>This is a structured move generated in <strong>demo mode</strong> via the move ABI.</p>","interactive":false,"graded":false,"tactics":["analogy"],"objectives":[]}"#.to_string();
-    }
-    if text.contains("distill a learner's evidence profile") {
-        // profile::prompt::distill (§7/§S7) contract — checked before the
-        // generic branches below since it's also a JSON-envelope call.
-        return r#"{"traits":["demo mode: not enough graded evidence yet for a real trait"],"hypotheses":["would a more concrete worked example change the outcome?"]}"#.to_string();
     }
     if text.contains("Decide how to answer it: INLINE") {
         // engine::prompt::decide_ask_response (§7/§S8) contract — demo mode
@@ -203,9 +162,12 @@ pub(crate) fn demo_responder(req: &crate::ai::ChatRequest) -> String {
         return r#"{"spawn":false,"title":""}"#.to_string();
     }
     if text.contains("<!--tactics:") {
-        // movement::generate_move_stream (streamed path — explain/ask/
-        // confront/integrate/revisit) prompt: plain HTML, no JSON envelope,
-        // with a trailing tactics sentinel per the contract.
+        // movement::generate_move_stream (streamed path — explain/
+        // integrate/revisit/respond) prompt: plain HTML, no JSON envelope,
+        // with a trailing tactics sentinel per the contract. The sentinel
+        // itself is legacy (S33 dropped the tactics instructions from the
+        // prompts) but a free model might still emit one, and this branch
+        // keeps demo mode exercising `strip_tactics_sentinel` either way.
         return "<h2>Core concept</h2><p>This is explanatory prose generated in \
                 <strong>demo mode</strong> via the move ABI.</p>\n\
                 <!--tactics: analogy-->"

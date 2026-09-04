@@ -37,15 +37,9 @@ use crate::engine::{
     OutlineItemType, Rubric, SourcePointer,
 };
 use crate::events::EventKind;
-use crate::events::aggregate::{
-    NodeState, activity_counts, calibrate_rung, ladder_signals, node_generated, node_states,
-    revisit_suggestion, tactic_outcomes,
-};
-use crate::movement::{
-    self, AgentPolicy, GeneratedMove, MoveContext, MoveRecord, MoveRender, MoveType,
-};
+use crate::events::aggregate::{NodeState, node_generated, node_states, revisit_suggestion};
+use crate::movement::{self, GeneratedMove, MoveContext, MoveRecord, MoveRender, MoveType};
 use crate::objective::{ObjectiveLog, ObjectiveSource};
-use crate::profile::{self, ProfileProjection};
 use crate::secret::SecretStore;
 use crate::store::StoreError;
 
@@ -178,10 +172,10 @@ mod tests {
     /// movement-specific branches ordered first, a `test` move's prompt
     /// (which embeds `EXERCISE_HTML_CONTRACT`, containing the literal
     /// substring "exercise_html") falls into the legacy `exercise_html`
-    /// branch and returns the WRONG JSON shape, so every L1/L2 demo call
-    /// would fail and burn its repair attempt.
+    /// branch and returns the WRONG JSON shape, so every demo call would
+    /// fail and burn its repair attempt.
     #[tokio::test]
-    async fn demo_mode_answers_the_move_abi_contract_l1_and_l0() {
+    async fn demo_mode_answers_the_move_abi_contract() {
         let ai = demo_ai();
         let ctx = MoveContext {
             topic: "fractions".into(),
@@ -189,14 +183,8 @@ mod tests {
             ..Default::default()
         };
 
-        // L1: decide_move is an AI call against the demo responder.
-        let decided = movement::decide_move(&ai, AgentPolicy::L1, &ctx)
-            .await
-            .unwrap();
-        assert_eq!(decided, MoveType::Explain);
-
         // Explain is a streamed move — pump the token stream, then finish it.
-        let stream = movement::generate_move_stream(&ai, decided, &ctx)
+        let stream = movement::generate_move_stream(&ai, MoveType::Explain, &ctx)
             .await
             .unwrap();
         let accumulated = stream
@@ -204,98 +192,16 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .concat();
-        let explained = movement::finish_streamed_move(decided, &accumulated);
+        let explained = movement::finish_streamed_move(MoveType::Explain, &accumulated);
         assert!(!explained.graded);
         assert!(!explained.html.is_empty());
 
-        // L0: a `test` move is structured — must come back graded with a
+        // A `test` move is structured — must come back graded with a
         // non-empty rubric, not the legacy exercise shape.
-        let tested = movement::generate_move(&ai, AgentPolicy::L0, MoveType::Test, &ctx)
+        let tested = movement::generate_move(&ai, MoveType::Test, &ctx)
             .await
             .unwrap();
         assert!(tested.graded);
         assert!(tested.rubric.unwrap().objectives.iter().any(|o| o.transfer));
-    }
-
-    /// §9 "mover o degrau por documento" — exercises the real production
-    /// wiring (`rung_for` → `state.store.event_log` → `EventLog::iter` →
-    /// `calibrate_rung`) against a real on-disk `Store`/`events.jsonl`, not
-    /// just `calibrate_rung`'s own pure-logic unit tests in `events.rs`.
-    /// Guards the `Send` fix: this exact call shape (constructing, fully
-    /// draining, and dropping the log's iterator inside one synchronous
-    /// function) is what keeps `generate_node`'s SSE stream `Send`; a
-    /// regression that reintroduces the boxed iterator as a local held
-    /// across an `.await` would fail to compile, not just fail this test.
-    #[test]
-    fn rung_for_demotes_from_document_telemetry_but_floors_at_l0() {
-        use crate::config::AppConfig;
-        use crate::secret::SecretStore;
-        use crate::source::{Corpus, Source};
-        use arc_swap::ArcSwap;
-        use std::collections::HashSet;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-
-        let dir = std::env::temp_dir().join(format!("learnive-test-{}", engine::new_id()));
-        let state = AppState {
-            token: Arc::from("t"),
-            allowed_origins: Arc::new(HashSet::new()),
-            allowed_hosts: Arc::new(HashSet::new()),
-            store: crate::store::Store::open(&dir).unwrap(),
-            ai: Arc::new(ArcSwap::from_pointee(demo_ai())),
-            policy: Arc::new(ArcSwap::from_pointee(AgentPolicy::L0)),
-            config: Arc::new(RwLock::new(AppConfig::default())),
-            secret: Arc::new(SecretStore::open(&dir)),
-            data_dir: Arc::from(dir.to_string_lossy().as_ref()),
-            source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-            fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-            corpus: Corpus::open(&dir).unwrap(),
-            retriever: None,
-            bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
-            acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        };
-        // No history yet: the prior passes through unchanged.
-        assert_eq!(rung_for(&state, "d1", AgentPolicy::L2), AgentPolicy::L2);
-
-        let log = state.store.event_log("d1").unwrap();
-        for (move_type, violated) in [
-            ("explicar", false),
-            ("explicar", true),
-            ("explicar", false),
-            ("explicar", true),
-            ("explicar", false),
-        ] {
-            log.append(
-                None,
-                crate::events::EventKind::MoveGenerated {
-                    move_id: engine::new_id(),
-                    move_type: move_type.to_string(),
-                    tactics: vec![],
-                    rung: "L2".to_string(),
-                },
-            )
-            .unwrap();
-            if violated {
-                log.append(
-                    None,
-                    crate::events::EventKind::SchemaViolation {
-                        move_type: move_type.to_string(),
-                        detail: "required a repair round".to_string(),
-                    },
-                )
-                .unwrap();
-            }
-        }
-
-        // 2/5 violations (40%) is past the 1-in-3 threshold: steps down once.
-        assert_eq!(rung_for(&state, "d1", AgentPolicy::L2), AgentPolicy::L1);
-        // The prior itself is untouched — a different document would still
-        // start from L2, exactly why this is per-document and not global.
-        assert_eq!(*state.policy.load_full(), AgentPolicy::L0);
-
-        // L0 has nowhere lower to go, regardless of how bad the telemetry is.
-        assert_eq!(rung_for(&state, "d1", AgentPolicy::L0), AgentPolicy::L0);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

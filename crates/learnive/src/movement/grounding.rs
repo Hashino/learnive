@@ -66,12 +66,7 @@ pub fn applies(move_type: MoveType, grounding: &str) -> bool {
 fn in_scope(move_type: MoveType) -> bool {
     matches!(
         move_type,
-        MoveType::Explain
-            | MoveType::Ask
-            | MoveType::Confront
-            | MoveType::Integrate
-            | MoveType::Revisit
-            | MoveType::Plan
+        MoveType::Explain | MoveType::Integrate | MoveType::Revisit | MoveType::Respond
     )
 }
 
@@ -203,7 +198,6 @@ mod tests {
             tactics: Vec::new(),
             rubric: None,
             reference_solution: String::new(),
-            proposed_outline: Vec::new(),
             repaired: false,
         }
     }
@@ -214,7 +208,7 @@ mod tests {
         assert!(!applies(MoveType::Explain, "   "));
         assert!(!applies(MoveType::Test, "some source text"));
         assert!(applies(MoveType::Explain, "some source text"));
-        assert!(applies(MoveType::Plan, "some source text"));
+        assert!(applies(MoveType::Revisit, "some source text"));
     }
 
     /// Out of scope (empty grounding, or a type like `Test`) must never
@@ -300,17 +294,17 @@ mod tests {
         assert!(!result.html.contains("data-grounding-unconfirmed"));
     }
 
-    /// A `plan` move (the one STRUCTURED type in the gate's scope) flags
-    /// through the same single-call path as the streamed types — no
-    /// render-path branching left to get wrong.
+    /// A `respond` move (in scope since S33) flags through the same
+    /// single-call path as the streamed types — no render-path branching
+    /// left to get wrong.
     #[tokio::test]
-    async fn plan_moves_flag_through_the_same_single_call_path() {
-        let ai = mock_ai(r#"{"unsupported_claims":["a fabricated outline rationale"]}"#);
+    async fn respond_moves_flag_through_the_same_single_call_path() {
+        let ai = mock_ai(r#"{"unsupported_claims":["a fabricated mechanism"]}"#);
         let ctx = grounded_ctx();
-        let mut generated = stub_move("<p>A fabricated outline rationale.</p>");
-        generated.move_type = MoveType::Plan;
-        let result = verify(&ai, MoveType::Plan, &ctx, generated).await;
+        let mut generated = stub_move("<p>A fabricated mechanism.</p>");
+        generated.move_type = MoveType::Respond;
+        let result = verify(&ai, MoveType::Respond, &ctx, generated).await;
         assert!(result.html.contains("data-grounding-unconfirmed"));
-        assert!(result.html.contains("A fabricated outline rationale."));
+        assert!(result.html.contains("A fabricated mechanism."));
     }
 }

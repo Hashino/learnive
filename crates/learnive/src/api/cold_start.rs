@@ -1,4 +1,3 @@
-use super::reading::read_profile;
 use super::*;
 
 use std::sync::Arc;
@@ -1401,87 +1400,6 @@ pub async fn revise_objective(
     Ok(Json(ObjectiveResp {
         text: body.text,
         version,
-    }))
-}
-
-#[derive(Serialize)]
-pub struct ProfileResp {
-    traits: Vec<String>,
-    hypotheses: Vec<String>,
-    /// Always-fresh, 0-LLM-token evidence table (§7) — recomputed on every
-    /// read, never itself edited by the user (only what's distilled from it
-    /// is: `traits`/`hypotheses`).
-    evidence: String,
-    distilled_through: u32,
-}
-
-/// Read-only inspection of the evidence profile (§7.1: "perfil inspecionável
-/// e editável" — the human-in-the-loop fix for drift/bad compaction).
-/// `traits`/`hypotheses` are empty before the first distillation.
-pub async fn get_profile(
-    State(state): State<AppState>,
-    Path(doc_id): Path<String>,
-) -> Result<Json<ProfileResp>, ApiError> {
-    let event_log = state.store.event_log(&doc_id)?;
-    let table = tactic_outcomes(
-        event_log
-            .iter()
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?,
-    );
-    let evidence = profile::evidence_table_text(&table);
-    let projection = read_profile(&state, &doc_id).unwrap_or_default();
-    Ok(Json(ProfileResp {
-        traits: projection.traits,
-        hypotheses: projection.hypotheses,
-        evidence,
-        distilled_through: projection.distilled_through,
-    }))
-}
-
-#[derive(Deserialize)]
-pub struct ReviseProfileReq {
-    #[serde(default)]
-    traits: Vec<String>,
-    #[serde(default)]
-    hypotheses: Vec<String>,
-}
-
-/// User-initiated profile edit (§7.1: "editável a qualquer momento") — the
-/// same human-in-the-loop escape hatch `revise_objective` gives the
-/// objective. Overwrites `profile.json` wholesale; `distilled_through` is
-/// preserved as-is (a user edit is not a distillation, so it must not reset
-/// the ~30-event threshold `should_distill` tracks).
-pub async fn revise_profile(
-    State(state): State<AppState>,
-    Path(doc_id): Path<String>,
-    Json(body): Json<ReviseProfileReq>,
-) -> Result<Json<ProfileResp>, ApiError> {
-    let distilled_through = read_profile(&state, &doc_id)
-        .map(|p| p.distilled_through)
-        .unwrap_or(0);
-    let projection = ProfileProjection {
-        traits: body.traits,
-        hypotheses: body.hypotheses,
-        distilled_through,
-    };
-    state.store.write_doc_file(
-        &doc_id,
-        "profile.json",
-        &serde_json::to_string(&projection).unwrap_or_default(),
-    )?;
-
-    let event_log = state.store.event_log(&doc_id)?;
-    let table = tactic_outcomes(
-        event_log
-            .iter()
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?,
-    );
-    let evidence = profile::evidence_table_text(&table);
-    Ok(Json(ProfileResp {
-        traits: projection.traits,
-        hypotheses: projection.hypotheses,
-        evidence,
-        distilled_through: projection.distilled_through,
     }))
 }
 
