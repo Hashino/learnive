@@ -117,6 +117,7 @@ pub async fn generate_node(
             research_attempted: prep.research_attempted,
             scaffolding: prep.scaffolding,
             interleave_titles: prep.interleave_titles.clone(),
+            chapter_close: prep.chapter_close,
             ..Default::default()
         };
         let mut graded: Option<(String, GeneratedMove)> = None;

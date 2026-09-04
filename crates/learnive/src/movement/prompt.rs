@@ -203,6 +203,22 @@ fn review_addendum(review_mode: bool, move_type: MoveType) -> &'static str {
     }
 }
 
+/// S33-4: the chapter-close `integrate` pass is scoped to the chapter the
+/// learner just finished — its earlier nodes' material, already in the
+/// outline context — not the whole outline so far. Fired only for the
+/// `Integrate` move of a node whose `chapter_close` is true (`prepare`
+/// computes that from the outline shape: the last Learn-mode node child of
+/// a genuinely decomposed chapter).
+fn chapter_close_addendum(chapter_close: bool, move_type: MoveType) -> &'static str {
+    if !chapter_close || move_type != MoveType::Integrate {
+        return "";
+    }
+    " This node is the LAST node of a chapter the learner is finishing: aim \
+     this integration pass at combining the chapter's own material — what \
+     its earlier nodes taught, already in the context above — rather than \
+     the whole outline so far."
+}
+
 /// §S15: when this node is a prerequisite sub-node, every move prompt
 /// already sees `topic` (the whole document's subject) alongside
 /// `item_title` (this node's own, narrower concept) — with nothing telling
@@ -354,13 +370,14 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         String::new()
     };
     format!(
-        "{base}{integration}{interleave}{}{}{}{}{}",
+        "{base}{integration}{interleave}{}{}{}{}{}{}",
         review_addendum(ctx.review_mode, move_type),
         scope_addendum(
             ctx.parent_title.as_deref(),
             &ctx.item_title,
             ctx.review_mode
         ),
+        chapter_close_addendum(ctx.chapter_close, move_type),
         remediation_addendum(ctx, move_type),
         fade_addendum(ctx.scaffolding),
         grounding_correction_addendum(ctx.grounding_correction.as_deref()),

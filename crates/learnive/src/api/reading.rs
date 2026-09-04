@@ -855,6 +855,14 @@ pub(super) struct NodePrep {
     /// from `children_titles`' "combine what this node's own children
     /// taught".
     pub(super) interleave_titles: Vec<String>,
+    /// S33-4: this node is the LAST Learn-mode `Node` child of a `Chapter`
+    /// that was actually decomposed into MORE THAN ONE such child — the
+    /// template's cue to insert `integrate` between `explain` and `test`
+    /// (§8's integration, scoped to the chapter the learner just finished).
+    /// Computed from the outline shape, never guessed; false for a one-node
+    /// chapter (nothing to combine) and for a review node (a review
+    /// reactivates, it doesn't integrate).
+    pub(super) chapter_close: bool,
 }
 
 /// §14 resilience: reconstructs the ungraded moves a prior, interrupted
@@ -1579,6 +1587,25 @@ pub(super) async fn prepare(
         })
         .map(|i| i.title.clone())
         .collect();
+    // S33-4: the last of a decomposed chapter's Learn-mode node children
+    // closes that chapter — that, and only that, node integrates. `review_
+    // mode` wins by construction here (the guard above), matching
+    // `MoveContext::chapter_close`'s contract.
+    let chapter_close = !review_mode
+        && item.item_type == OutlineItemType::Node
+        && item
+            .parent_id
+            .as_deref()
+            .and_then(|pid| outline.items.iter().find(|i| i.id == pid))
+            .is_some_and(|p| p.item_type == OutlineItemType::Chapter)
+        && {
+            let mut siblings = outline.items.iter().filter(|i| {
+                i.parent_id == item.parent_id
+                    && i.item_type == OutlineItemType::Node
+                    && i.mode != NodeMode::Review
+            });
+            siblings.next_back().is_some_and(|last| last.id == item.id) && siblings.count() >= 1
+        };
     Ok(NodePrep {
         topic: outline.topic,
         title: item.title,
@@ -1596,6 +1623,7 @@ pub(super) async fn prepare(
         research_attempted,
         scaffolding,
         interleave_titles,
+        chapter_close,
     })
 }
 

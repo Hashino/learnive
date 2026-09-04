@@ -455,7 +455,10 @@ mod tests {
             graded("d", 7, Grade::Demonstrated),
             graded("e", 8, Grade::Demonstrated),
         ];
-        assert_eq!(due_review(events.clone().into_iter(), std::slice::from_ref(&ch)), None);
+        assert_eq!(
+            due_review(events.clone().into_iter(), std::slice::from_ref(&ch)),
+            None
+        );
         // Ten nodes past the close (total 12): level 2 due.
         for i in 0..5u64 {
             events.push(graded(&format!("y{i}"), 9 + i, Grade::Demonstrated));
@@ -486,7 +489,10 @@ mod tests {
             events.push(graded(&format!("x{i}"), 4 + i, Grade::Demonstrated));
         }
         events.push(graded("c1_review1", 13, Grade::Demonstrated));
-        assert_eq!(due_review(events.clone().into_iter(), std::slice::from_ref(&ch)), None);
+        assert_eq!(
+            due_review(events.clone().into_iter(), std::slice::from_ref(&ch)),
+            None
+        );
         events.push(graded("y0", 14, Grade::Demonstrated));
         assert_eq!(
             due_review(events.into_iter(), &[ch]),

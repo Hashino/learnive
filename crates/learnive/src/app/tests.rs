@@ -2817,6 +2817,91 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
 }
 
 #[tokio::test]
+async fn the_last_node_of_a_decomposed_chapter_integrates() {
+    // S33-4: `integrate` fires only at the close of a chapter that was
+    // actually decomposed into more than one atomic node — the last node's
+    // template is explain -> integrate -> test, every earlier node's is
+    // explain -> test. Computed by `prepare` from the outline shape, never
+    // guessed (and never for a review node). Demo mode adds the Rust-forced
+    // `research` interception up front (empty grounding, one attempt), so
+    // the full sequences are pinned exactly.
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"limits","objective_text":"Understand limits","nodes":[
+            {"id":"book1","title":"Calculus","action":"learn","item_type":"book","children":[
+                {"id":"c1","title":"Limits of functions","action":"learn","item_type":"chapter","children":[
+                    {"id":"n1","title":"intuition of a limit","action":"learn","item_type":"node","children":[]},
+                    {"id":"n2","title":"limit laws","action":"learn","item_type":"node","children":[]}
+                ]}
+            ]}
+        ]}"#,
+    ))
+    .await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+
+    generate_to_completion(&call, &doc_id, "n1").await;
+    // Demonstrate n1 — the sibling chain gates n2 on it (materialize's
+    // incoming_gate), so n2 is still locked until the answer lands.
+    let (status, body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/n1/answer"),
+        r#"{"answer":"I apply the concept to a new case like this..."}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ans: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ans["advance"], serde_json::json!(true));
+    generate_to_completion(&call, &doc_id, "n2").await;
+
+    let move_types = |node: &str| -> Vec<String> {
+        let log = state.store.event_log(&doc_id).unwrap();
+        log.iter()
+            .unwrap()
+            .filter(|e| e.node_id.as_deref() == Some(node))
+            .filter_map(|e| match &e.kind {
+                crate::events::EventKind::MoveGenerated { move_type, .. } => {
+                    Some(move_type.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // The Rust-forced `research` interception is filtered out: whether it
+    // fires depends on whether the demo fixture's background indexing has
+    // grounded the node yet (n1 hit empty grounding, n2 may not have) —
+    // the TEMPLATE is what this pins.
+    let template = |node: &str| -> Vec<String> {
+        move_types(node)
+            .into_iter()
+            .filter(|m| m != "research")
+            .collect()
+    };
+    assert_eq!(
+        template("n1"),
+        vec!["explain", "test"],
+        "a non-close node's template has no integrate"
+    );
+    assert_eq!(
+        template("n2"),
+        vec!["explain", "integrate", "test"],
+        "the decomposed chapter's LAST node closes it with integrate"
+    );
+}
+
+#[tokio::test]
 async fn a_chapter_that_cannot_be_split_or_placed_is_never_generated() {
     // S33-2: the chapter split is a MANDATORY structural step, not
     // best-effort. Two refusals, both terminal for the request and both
