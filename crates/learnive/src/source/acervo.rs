@@ -845,6 +845,85 @@ pub fn search_index_cache(
     Ok(scored)
 }
 
+/// Contiguous in-order section text for one chapter's page range — the
+/// grounding-coverage fix (2026-09-04, live: a chapter-node's explain came
+/// back banner-flagged as ungrounded while being faithful to its chapter).
+/// Root cause: `ground_node` handed generation AND the grounding-verification
+/// check only `search_index_cache`'s top-4 similarity chunks (~2.3k chars) of
+/// a chapter that is tens of thousands of characters — the k=4 budget dates
+/// from the atomic-node granularity and never followed the pivot to
+/// chapter-sized nodes (S33 follow-up). A model asked to explain a 17-page
+/// chapter from 4 passages fills the rest from training-data memory of the
+/// (famous) book — the checker then correctly flags every true claim that
+/// sat outside the passages: a false positive on faithful prose, a real
+/// positive only on drift.
+///
+/// So the unit of grounding is the chapter (§11's structural per-node source
+/// selection), delivered IN PAGE ORDER — contiguous section text the model
+/// can actually read, not scattered best-passages — capped at
+/// [`SECTION_TEXT_CHAR_BUDGET`] (~4k tokens) so a grounded move's prompt and
+/// its verification check (which must see the exact same text, §11.1) stay
+/// inside the free-tier TPM ceilings measured in
+/// `docs/S27g-chapter-matching-measurements.md`. Anchoring is per node, not
+/// per chapter: `anchor_page` (the page of the node title's own best-matching
+/// chunk, `Some` when the caller had a hit) starts the window where THIS
+/// node's material lives; without one the window starts at the range's first
+/// page. Whole-book fallback matches [`search_index_cache`]'s: a narrowing
+/// bug must never read as "no source coverage".
+pub fn pages_text_from_cache(
+    index_cache_dir: &Path,
+    content_hash: &str,
+    page_range: Option<(usize, Option<usize>)>,
+    anchor_page: Option<usize>,
+    max_chars: usize,
+) -> std::io::Result<Vec<(usize, String)>> {
+    let path = index_cache_dir.join(format!("{content_hash}.json"));
+    let json = fs::read(&path)?;
+    let cached: Vec<CachedChunk> = serde_json::from_slice(&json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let pool: Vec<CachedChunk> = match page_range {
+        Some((start, end)) => {
+            let scoped: Vec<CachedChunk> = cached
+                .iter()
+                .filter(|c| c.page >= start && end.is_none_or(|e| c.page <= e))
+                .cloned()
+                .collect();
+            if scoped.is_empty() { cached } else { scoped }
+        }
+        None => cached,
+    };
+    let Some(first) = pool.first() else {
+        return Ok(Vec::new());
+    };
+    let start = anchor_page
+        .filter(|a| pool.iter().any(|c| c.page >= *a))
+        .unwrap_or(first.page);
+    // Chunks arrive in file order = page order = in-page order (the builder
+    // appends per page, `chunk_text` in order) — so a stable group-by page
+    // needs no sorting.
+    let mut pages: Vec<(usize, String)> = Vec::new();
+    let mut used = 0usize;
+    for chunk in pool.iter().filter(|c| c.page >= start) {
+        if used + chunk.text.len() > max_chars && !pages.is_empty() {
+            break;
+        }
+        match pages.last_mut() {
+            Some((page, text)) if *page == chunk.page => text.push_str(&chunk.text),
+            _ => pages.push((chunk.page, chunk.text.clone())),
+        }
+        used += chunk.text.len();
+    }
+    Ok(pages)
+}
+
+/// Char ceiling on [`pages_text_from_cache`] — ~4k tokens of source text,
+/// the middle option the user picked (2026-09-04) between "top-4 chunks as
+/// always" (4.5% of a real chapter — the false-positive banner) and "the
+/// whole chapter" (a 50k+ char prompt that a free tier's ~8k TPM ceiling
+/// throttles into 429s). Deliberately a constant, not config: it is a
+/// model-economics knob, revisited when the default free pairing changes.
+pub const SECTION_TEXT_CHAR_BUDGET: usize = 16_000;
+
 fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
     entries
         .iter()
@@ -1834,6 +1913,73 @@ mod tests {
         assert!(
             !fallback_hits.is_empty(),
             "an out-of-bounds range must fall back to the whole book, not return nothing"
+        );
+    }
+
+    /// The grounding-coverage fix (2026-09-04): section text comes back
+    /// IN PAGE ORDER from the anchor page, inside the page range, up to the
+    /// char budget — with the same whole-book fallback on a bad range as
+    /// `search_index_cache`, and an empty cache yielding empty.
+    #[test]
+    fn pages_text_reads_in_order_from_the_anchor_within_budget() {
+        let (mut doc, _pages) = build_document(
+            &[
+                "apple banana orchard fruit",
+                "car truck engine highway",
+                "dog cat kennel leash",
+                "sun moon star galaxy",
+            ],
+            Some("Four Topics"),
+            None,
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "four.pdf");
+        let cache_dir = index_dir(&tmp);
+        let hash = content_hash(&fs::read(lib.root().join("four.pdf")).unwrap());
+        let pdf = read_pdf(&lib.root().join("four.pdf")).unwrap();
+        build_index_cache(&pdf, &hash, &cache_dir, &Embedder::Mock).expect("build cache");
+
+        // Anchored mid-range (page 3): page 3's text comes first, then page
+        // 4 — never page 1/2, which sit before the anchor.
+        let pages = pages_text_from_cache(&cache_dir, &hash, Some((1, Some(4))), Some(3), 10_000)
+            .expect("read");
+        let pages: Vec<usize> = pages.iter().map(|(p, _)| *p).collect();
+        assert_eq!(pages, vec![3, 4]);
+
+        // No anchor: the window starts at the range's first page.
+        let from_start =
+            pages_text_from_cache(&cache_dir, &hash, Some((2, None)), None, 10_000).expect("read");
+        assert_eq!(
+            from_start.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+
+        // Budget cuts the tail: a tiny cap still yields at least one page
+        // (never an empty grounding from a nonzero cache), and never more
+        // than fit.
+        let capped = pages_text_from_cache(&cache_dir, &hash, Some((1, Some(4))), Some(1), 10)
+            .expect("read");
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].0, 1);
+
+        // A range matching nothing falls back to the whole book, same as
+        // `search_index_cache` — a narrowing bug must never read as "no
+        // source coverage".
+        let fallback =
+            pages_text_from_cache(&cache_dir, &hash, Some((100, Some(200))), None, 10_000)
+                .expect("read");
+        assert_eq!(
+            fallback.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        // A missing cache is an Err, not empty — same contract as
+        // `search_index_cache` ("errors only on I/O/corruption; an
+        // empty/missing cache is the caller's job to have ruled out via
+        // `IndexCheck` first"). ground_node's internal-error path, never a
+        // silent skip.
+        assert!(
+            pages_text_from_cache(&cache_dir, "no-such-hash", None, None, 10_000).is_err(),
+            "a missing cache file must surface as an error, not empty coverage"
         );
     }
 

@@ -2767,25 +2767,43 @@ async fn ground_node(
     let hash = source::acervo::content_hash(&bytes);
 
     let page_range = chapter_page_range(outline, item);
-    let hits = source::search_index_cache(
+    // One k=1 similarity query, purely to ANCHOR the contiguous window: the
+    // page where this node's own topic best matches is where its section
+    // text starts reading from (a split chapter's second node should not be
+    // grounded in the first node's pages). The text itself comes from
+    // `pages_text_from_cache` in page order up to the char budget — see its
+    // doc for why the old top-4 budget stopped matching the chapter-sized
+    // node unit (2026-09-04).
+    let anchor = source::search_index_cache(
         &index_cache_dir,
         &hash,
         &embedder,
         &item.title,
-        4,
+        1,
         page_range,
     )
-    .map_err(|e| format!("could not search the index for {filename}: {e}"))?;
-    if hits.is_empty() {
+    .map_err(|e| format!("could not search the index for {filename}: {e}"))?
+    .into_iter()
+    .next()
+    .map(|(page, _, _)| page);
+    let pages = source::acervo::pages_text_from_cache(
+        &index_cache_dir,
+        &hash,
+        page_range,
+        anchor,
+        source::acervo::SECTION_TEXT_CHAR_BUDGET,
+    )
+    .map_err(|e| format!("could not read the section text of {filename}: {e}"))?;
+    if pages.is_empty() {
         return Err(format!(
             "internal error: \"{}\" produced no retrievable content — this should not happen after the acervo gate passed",
             expected.title
         ));
     }
 
-    Ok(hits
+    Ok(pages
         .iter()
-        .map(|(page, text, _score)| {
+        .map(|(page, text)| {
             format!(
                 "[id: {} | loc: p:{page} | {}]\n{}",
                 hash, expected.title, text
