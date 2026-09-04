@@ -607,6 +607,14 @@ async function streamMoveRequest(rec, id) {
         // "generating…" placeholder, not as document content.
         rec.controls.innerHTML =
           '<p class="muted">' + escapeHtml(data) + "</p>";
+      } else if (event === "status") {
+        // Live 2026-09-04: `prepare`'s pre-generation phases (library
+        // gate, chapter split, passage selection) can hold the stream for
+        // a minute+ on a cold cache while the static "generating…" text
+        // claimed content was already being written. The server now says
+        // what is actually running; same muted status slot as `research`.
+        rec.controls.innerHTML =
+          '<p class="muted">' + escapeHtml(data) + "</p>";
       } else if (event === "grounding_check") {
         // Bug found live 2026-09-01: §S21's post-stream grounding gate
         // (`movement::grounding`) always emits this status frame before its

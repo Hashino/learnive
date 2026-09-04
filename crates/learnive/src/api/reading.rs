@@ -5,6 +5,7 @@ use std::fs;
 use tokio::task::spawn_blocking;
 
 use super::generation::NODE_TAIL_BUDGET;
+use crate::locale::{Locale, pick};
 use crate::source;
 // ---------------------------------------------------------------------------
 // §S6 — reading interactions ("the document is the answer", §9). All three
@@ -1205,6 +1206,8 @@ pub(super) async fn prepare(
     state: &AppState,
     doc_id: &str,
     item_id: &str,
+    status: impl Fn(&str),
+    locale: Locale,
 ) -> Result<NodePrep, String> {
     let outline_json = state
         .store
@@ -1326,7 +1329,21 @@ pub(super) async fn prepare(
     // precondition, checked once against the whole reading list, before any
     // per-node lookup — see `ensure_document_grounded`'s doc comment for why
     // this replaced the original per-item version.
-    if let Err(reason) = ensure_document_grounded(state, doc_id, &outline).await {
+    if let Err(reason) = {
+        // UX feedback (live 2026-09-04): this phase is where a cold start
+        // silently spends its first minute(s) — library validation and,
+        // on a cold cache, index builds over every book — all before the
+        // content model is ever called. The "generating…" the client
+        // shows from POST time said nothing about it; these frames say
+        // what is actually running (SSE-on-POST carries non-token frames
+        // the same way `research`/`grounding_check` already do).
+        status(pick(
+            locale,
+            "checking the source library…",
+            "conferindo a biblioteca de fontes…",
+        ));
+        ensure_document_grounded(state, doc_id, &outline).await
+    } {
         if let Err(e) = event_log.append(
             Some(&item.id),
             EventKind::GenerationBlocked {
@@ -1383,6 +1400,11 @@ pub(super) async fn prepare(
         && item.expansion == ExpansionState::NotExpanded
         && item.resolved_page.is_some()
     {
+        status(pick(
+            locale,
+            "dividing the chapter into nodes…",
+            "dividindo o capítulo em nós…",
+        ));
         let _ = try_split_chapter(state, doc_id, &outline, &item).await;
         let outline_json = state
             .store
@@ -1486,6 +1508,11 @@ pub(super) async fn prepare(
         }
         return Err(reason);
     }
+    status(pick(
+        locale,
+        "selecting passages from the source…",
+        "selecionando trechos da fonte…",
+    ));
     let grounding = match ground_node(state, &outline, &item).await {
         Ok(text) => text,
         Err(reason) => {

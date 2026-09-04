@@ -72,13 +72,48 @@ pub async fn generate_node(
     let locale = crate::locale::Locale::from_header(&headers);
     // The fallible work that emits no tokens lives in `prepare`/`finalize`; the
     // generator only holds the `yield`s (async_stream does not rewrite `yield`
-    // through a nested macro).
+    // through a nested macro). `prepare`'s phases (library gate, chapter
+    // split, passage selection) report through `status` — forwarded to the
+    // client as `status` SSE frames via this channel while `prepare` itself
+    // runs on a task, because a `yield` cannot happen inside its callback.
+    // UX feedback (live 2026-09-04): a cold first generate used to show a
+    // bare "generating…" for a minute or more while nothing content-shaped
+    // was running yet.
     let stream = async_stream::stream! {
-        let prep = match prepare(&state, &doc_id, &item_id).await {
-            Ok(p) => p,
-            Err(e) => {
-                yield Ok::<Bytes, std::io::Error>(sse_frame("error", &e));
-                return;
+        let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let prepare_state = state.clone();
+        let prepare_doc_id = doc_id.clone();
+        let prepare_item_id = item_id.clone();
+        let mut prepare_task = tokio::spawn(async move {
+            prepare(
+                &prepare_state,
+                &prepare_doc_id,
+                &prepare_item_id,
+                |msg| {
+                    let _ = status_tx.send(msg.to_string());
+                },
+                locale,
+            )
+            .await
+        });
+        let prep = loop {
+            tokio::select! {
+                Some(msg) = status_rx.recv() => {
+                    yield Ok::<Bytes, std::io::Error>(sse_frame("status", &msg));
+                }
+                joined = &mut prepare_task => {
+                    break match joined {
+                        Ok(Ok(p)) => p,
+                        Ok(Err(e)) => {
+                            yield Ok(sse_frame("error", &e));
+                            return;
+                        }
+                        Err(e) => {
+                            yield Ok(sse_frame("error", &e.to_string()));
+                            return;
+                        }
+                    };
+                }
             }
         };
 
