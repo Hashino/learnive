@@ -1,21 +1,10 @@
 use super::{MoveContext, MoveType};
 use crate::ai::ChatMessage;
 use crate::engine::prompt::{
-    CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
+    EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
 };
 use crate::events::aggregate::ScaffoldingLevel;
 use crate::locale::language_directive;
-
-/// [`CITE_CONTRACT`], appended only when there is grounding to cite —
-/// otherwise the model would see an instruction about a SOURCES block that
-/// never shows up in the user message below it.
-fn cite_addendum(grounding: &str) -> &'static str {
-    if grounding.trim().is_empty() {
-        ""
-    } else {
-        CITE_CONTRACT
-    }
-}
 
 fn non_empty(s: &str) -> &str {
     if s.trim().is_empty() { "(none yet)" } else { s }
@@ -24,21 +13,60 @@ fn non_empty(s: &str) -> &str {
 /// §S21 post-generation grounding-verification call (`movement::
 /// grounding`) — a SEPARATE structured call from the move's own
 /// generation, run after a grounded move's content is fully generated, not
-/// an addendum to `generate_move_streamed`/`generate_move` above. Where
-/// [`CITE_CONTRACT`] only ever asks the model nicely to cite what it draws
-/// from SOURCES, this call checks whether GENERATED actually stays inside
-/// what SOURCE supports — closing the gap live QA confirmed empirically
-/// (2026-08-27: fed a real Wikipedia excerpt, the model fabricated a
-/// detailed mechanism absent from the source, with zero `<cite>` tags on
-/// anything). Segmented at claim granularity (a sentence/paragraph-level
-/// judgment call, not literal NLP claim extraction) — the model lists only
-/// substantive factual/mechanistic/numeric claims GENERATED states as fact
-/// that SOURCE does not support; pedagogical framing (transitions,
-/// analogies, examples not claimed to come from the source) is explicitly
-/// not flagged, so a clean, well-grounded move sees an empty list.
-pub fn verify_grounding(source_text: &str, generated_html: &str) -> Vec<ChatMessage> {
+/// an addendum to `generate_move_streamed`/`generate_move` above. It does
+/// TWO jobs on the texts it already holds side by side (2026-09-05,
+/// user decision: the model's own vocabulary no longer contains citation —
+/// the old `CITE_CONTRACT` is deleted — so this call is also where inline
+/// citations are assigned):
+///
+/// 1. **Verify** whether GENERATED stays inside what SOURCE supports —
+///    closing the gap live QA confirmed empirically (2026-08-27: fed a
+///    real Wikipedia excerpt, the model fabricated a detailed mechanism
+///    absent from the source). Segmented at claim granularity (a
+///    sentence/paragraph-level judgment call, not literal NLP claim
+///    extraction); pedagogical framing (transitions, analogies, examples
+///    not claimed to come from the source) is explicitly not flagged, so a
+///    clean, well-grounded move sees an empty list.
+/// 2. **Assign citations**: GENERATED's top-level blocks arrive numbered
+///    (`[1]`, `[2]`, … — `learnive_core::numbered_blocks`) and SOURCE's
+///    passages numbered (`[S1]`, `[S2]`, … — the caller's own selection
+///    formatting); the model maps block → passage and the server inserts
+///    the validated `<cite>` markers itself, so a citation can only point
+///    at a source the server actually selected. `with_citations` is false
+///    when the grounding text parsed to zero passages (format drift) —
+///    then only verification runs.
+pub fn verify_grounding(
+    source_text: &str,
+    generated_html: &str,
+    with_citations: bool,
+) -> Vec<ChatMessage> {
+    let citation_rules = if with_citations {
+        "\n\nASSIGN CITATIONS as you check: GENERATED's blocks are numbered \
+         [1], [2], ... and SOURCE's passages are numbered [S1], [S2], .... \
+         For every numbered block whose substantive content draws on one of \
+         the passages, add {\"b\":<block number>,\"s\":<passage number>,\
+         \"loc\":\"<that passage's own locator>\"} to \"citations\" — one \
+         entry per block per passage, only blocks that genuinely draw on a \
+         passage. Each passage's header line reads [S<n> | <locator>] <title>; \
+         \"loc\" is exactly the <locator> from that header, character for \
+         character — for the passage headed \"[S3 | p:41] Downey, Functions\" \
+         a correct entry is {\"b\":2,\"s\":3,\"loc\":\"p:41\"}. Never put a \
+         word, a page title, or a topic name in \"loc\" — it is always a \
+         short locator like p:41. Blocks that repeat common background \
+         knowledge rather than a passage's own content get no citation."
+    } else {
+        "\n\nCitations cannot be assigned here (no numbered SOURCE passages), \
+         so omit \"citations\" entirely."
+    };
+    let shape_note = if with_citations {
+        "An empty unsupported_claims array means every claim in GENERATED \
+         checks out; omit \"citations\" (or leave it empty) when no block \
+         qualifies."
+    } else {
+        "An empty array means every claim in GENERATED checks out."
+    };
     vec![
-        ChatMessage::system(
+        ChatMessage::system(format!(
             "You are a fact-checker, not a tutor. Compare GENERATED against \
              SOURCE below and list every substantive factual, mechanistic, or \
              numeric claim in GENERATED that SOURCE does not state or clearly \
@@ -48,15 +76,16 @@ pub fn verify_grounding(source_text: &str, generated_html: &str) -> Vec<ChatMess
              restatements or paraphrases of what SOURCE actually says. Only \
              flag a claim that states a specific fact, mechanism, or figure \
              as though SOURCE supports it when SOURCE does not contain it. \
-             Quote or closely paraphrase each flagged claim, kept short. \
-             Respond ONLY with JSON: {\"unsupported_claims\":[\"...\"]} — an \
-             empty array means every claim in GENERATED checks out."
-                .to_string(),
-        ),
+             Quote or closely paraphrase each flagged claim, kept short.\
+             {citation_rules}\n\n\
+             Respond ONLY with JSON: {{\"unsupported_claims\":[\"...\"],\
+             \"citations\":[{{\"b\":1,\"s\":1,\"loc\":\"...\"}}]}} — {shape_note}"
+        )),
         ChatMessage::user(format!(
             "SOURCE (the only material GENERATED may draw substantive claims \
              from):\n{source_text}\n\n\
-             GENERATED (verify this against SOURCE above):\n{generated_html}"
+             GENERATED (verify this against SOURCE above; top-level blocks \
+             numbered [N]):\n{generated_html}"
         )),
     ]
 }
@@ -484,14 +513,13 @@ fn remediation_addendum(ctx: &MoveContext, move_type: MoveType) -> String {
 /// prose contract, no JSON envelope — flags are fixed by the caller from
 /// the type, not emitted here.
 pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
-    let cite = cite_addendum(&ctx.grounding);
     let lang = language_directive(ctx.locale);
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
              for a living document. {}\n\n{}\n\n{}\n\n{lang}\n\n\
              {PROSE_HTML_CONTRACT}\n\n\
-             {ISLAND_CONTRACT}\n\n{cite}",
+             {ISLAND_CONTRACT}",
             purpose(move_type, ctx),
             continuity_note(),
             topic_scope_note()
@@ -536,21 +564,12 @@ pub fn generate_move(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage>
         MoveType::Test => EXERCISE_HTML_CONTRACT,
         _ => PROSE_HTML_CONTRACT,
     };
-    // The exercise runs unsanitized in its own sandbox with no click handler
-    // (§4.4) — citing there would be inert markup at best. Every other
-    // structured move lands in the sanitized app origin, same as the
-    // streamed path, so it gets the same addendum.
-    let cite = if move_type == MoveType::Test {
-        ""
-    } else {
-        cite_addendum(&ctx.grounding)
-    };
     let lang = language_directive(ctx.locale);
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
              for a living document. {}\n\n{}\n\n{}\n\n{lang}\n\n\
-             {contract}\n\n{cite}\n\n\
+             {contract}\n\n\
              Respond ONLY with the Move JSON contract: \
              {{\"html\":\"...\",\"interactive\":true|false,\"graded\":true|\
              false,\"reference_solution\":\"...\",\
@@ -872,12 +891,23 @@ mod tests {
     /// GENERATED distinctly and asks for the flat unsupported-claims JSON
     /// shape — this is a SEPARATE structured call from a move's own
     /// generation, so it must not accidentally reuse the Move JSON
-    /// envelope's field names.
+    /// envelope's field names. With `with_citations` (the normal grounded
+    /// path) it must also state the block/passage numbering contract and
+    /// the b/s/loc citation shape; without it (grounding that parsed to no
+    /// passages) it must ask for citations to be omitted entirely.
     #[test]
     fn verify_grounding_prompt_names_source_and_generated_distinctly() {
-        let messages = verify_grounding("Plants use chlorophyll.", "<p>Plants use magic.</p>");
+        let messages =
+            verify_grounding("Plants use chlorophyll.", "<p>Plants use magic.</p>", false);
         assert!(messages[0].content.contains("unsupported_claims"));
         assert!(messages[1].content.contains("Plants use chlorophyll."));
         assert!(messages[1].content.contains("Plants use magic."));
+        assert!(!messages[0].content.contains("ASSIGN CITATIONS"));
+
+        let citing = verify_grounding("[S1 | p:3] Source\nChlorophyll.", "[1] <p>Magic.</p>", true);
+        assert!(citing[0].content.contains("ASSIGN CITATIONS"));
+        assert!(citing[0].content.contains("\"b\""));
+        assert!(citing[1].content.contains("[S1 | p:3] Source"));
+        assert!(citing[1].content.contains("[1] <p>Magic.</p>"));
     }
 }

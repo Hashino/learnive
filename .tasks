@@ -1,18 +1,14 @@
+entry without curriculum generation
 investigate OAuth with Anthropic and OpenAI
+more legible data
 prefer exercises extracted from source
-mechanical moves explain->test->(schedule spaced repetition)->loop
 better annotation: google docs style
-does initial "generating..." mean checking chapter?
 manual opening of split view pdf viewer
 prefer owned books for reading list generation
 bug: creating note scrolls to top
 reload mid generation restarts generation
 close reader button appearing when closed
-determistic citations at top of node
 check library at start of session
 configurable data dir
-fix 18 failing tests
-console error: thread 'tokio-rt-worker' (1733803) panicked at /home/hashino/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pdf-extract-0.12.0/src/lib.rs:1801:81: index out of bounds: the len is 0 but the index is 0
 change default data dir to sensible (OS specific) appdata dir
 reloading mid acervo checking breaks app
-closing app mid cold start starts generating without grounding

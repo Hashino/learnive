@@ -1804,6 +1804,88 @@ async fn ask_answer_renders_math_before_storing() {
     assert!(!ask_html.contains("$\\frac"));
 }
 
+/// S21 (2026-09-05): the node's own `<h1>` title is server-owned — the
+/// model never emits one (PROSE_HTML_CONTRACT). The first move that
+/// contributes content gets the outline item's title prepended, and it
+/// flows through `tag_move_html` like the prose it titles, so it lands in
+/// the frozen content layer with a real block id (renders the same on
+/// reload, addressable like any block).
+#[tokio::test]
+async fn node_opens_with_a_server_owned_h1_title() {
+    use crate::ai::{Ai, MockProvider, Models, Provider};
+
+    let scripted = Provider::Mock(MockProvider::scripted(|req| {
+        let text = req
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.contains("Write short, atomic explanatory prose") {
+            // Deliberately model-shaped output: its own heading, no h1 —
+            // the server owns that one.
+            return "<h2>A heading the model chose</h2><p>Explanation prose.</p>".to_string();
+        }
+        crate::api::demo_responder(req)
+    }));
+    let ai = Ai::new(scripted, Models::single("h1-title-demo"));
+    let state = test_state_with_ai(ai);
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    let (_, body) = call(authed("POST", "/api/documents", r#"{"topic":"fractions"}"#)).await;
+    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let doc_id = created["doc_id"].as_str().unwrap().to_string();
+    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
+    let title = created["items"][0]["title"].as_str().unwrap().to_string();
+
+    let (status, gen_body) = call(authed(
+        "POST",
+        &format!("/api/documents/{doc_id}/nodes/{node0}/generate"),
+        "",
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{gen_body}");
+    assert!(
+        gen_body.contains("event: move_paused") || gen_body.contains("event: done"),
+        "expected a settled move, got: {gen_body}"
+    );
+
+    let (_, body) = call(authed(
+        "GET",
+        &format!("/api/documents/{doc_id}/nodes/{node0}"),
+        "",
+    ))
+    .await;
+    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content_html = view["content_html"].as_str().unwrap();
+
+    let h1_pos = content_html.find("<h1").unwrap_or_else(|| {
+        panic!("server-owned <h1> must open the node's content; got: {content_html}")
+    });
+    assert!(
+        content_html[h1_pos..].contains(&title),
+        "h1 must carry the outline item's title ({title}): {content_html}"
+    );
+    // Escaped, never trusted as HTML: the raw title is inserted through
+    // `escape_html`, so nothing the title carried could open a tag here.
+    // Tagged like any other block (the first move's own prefix).
+    assert!(
+        content_html[h1_pos..].contains("data-block-id=\""),
+        "h1 must flow through tag_move_html and get a block id"
+    );
+    // It precedes the model's own first heading.
+    let model_heading = content_html.find("A heading the model chose").unwrap();
+    assert!(h1_pos < model_heading);
+}
+
 #[tokio::test]
 async fn objective_endpoints_work_in_demo_mode() {
     // §S4, exercised through the real router + demo_responder — the

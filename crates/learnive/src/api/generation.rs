@@ -244,6 +244,24 @@ pub async fn generate_node(
 
             let generated = match move_type.render() {
                 MoveRender::Streamed => {
+                    // S21 (2026-09-05, user decision): on a fresh node the
+                    // server-owned <h1> title is the user's FIRST visual —
+                    // emitted as the very first token frame, before the
+                    // model's first token, so the title is on screen while
+                    // the prose streams in under it. The settled move
+                    // carries the same title (the prepend below, which also
+                    // block-tags it), and `move_settled` replaces the
+                    // streamed buffer wholesale (`node.js`'s `live`), so
+                    // nothing duplicates.
+                    if content_html.is_empty() {
+                        yield Ok(sse_frame(
+                            "token",
+                            &format!(
+                                "<h1>{}</h1>\n",
+                                super::reading::escape_html(&prep.title)
+                            ),
+                        ));
+                    }
                     let mut tokens = match movement::generate_move_stream(&ai, move_type, &ctx)
                         .await
                     {
@@ -311,6 +329,29 @@ pub async fn generate_node(
                     crate::locale::pick(locale, checking_en, checking_pt),
                 ));
                 movement::grounding::verify(&ai, move_type, &ctx, generated).await
+            } else {
+                generated
+            };
+
+            // S21 (2026-09-05): the node's own <h1> title is server-owned —
+            // the model's HTML vocabulary never includes it
+            // (PROSE_HTML_CONTRACT). Prepended once, on the first move that
+            // contributes content (empty `content_html` ⇒ a fresh node, or
+            // an interrupted attempt that never settled a move — the resume
+            // machinery replays persisted content, which already carries
+            // the h1). Rides the move through `tag_move_html`, so it gets a
+            // block id and reaches the client in the same `move_settled`
+            // frame as the prose it titles — that settle-frame copy is also
+            // what makes the streamed first-frame title (above) permanent.
+            let generated = if content_html.is_empty() && !generated.graded {
+                GeneratedMove {
+                    html: format!(
+                        "<h1>{}</h1>\n{}",
+                        super::reading::escape_html(&prep.title),
+                        generated.html
+                    ),
+                    ..generated
+                }
             } else {
                 generated
             };

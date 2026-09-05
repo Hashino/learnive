@@ -1,25 +1,37 @@
 //! §S21 post-generation grounding-verification gate — PLAN.md's "Ajuste
 //! pós-S27 (2026-08-26)" point 2 (search "checagem de fundamentação
-//! pós-geração"). [`CITE_CONTRACT`](crate::engine::prompt::CITE_CONTRACT)
-//! only ever asked the model nicely to cite what it draws from SOURCES;
-//! nothing checked that it actually did, or that what it wrote is even true
-//! of the source it was given. Live QA (2026-08-27, Groq `gpt-oss-120b`)
-//! confirmed the gap empirically, not hypothetically: fed a real Wikipedia
-//! excerpt on photosynthesis, the model fabricated a detailed photosystem
-//! I/II mechanism absent from the source, with zero `<cite>` tags on
-//! anything, fabricated or genuine — exactly the §16 "grounding alucinado"
-//! risk.
+//! pós-geração"). Generation prompts used to carry a cite contract asking
+//! the model to wrap grounded claims in `<cite>` markers; nothing checked
+//! that it actually did, or that what it wrote is even true of the source
+//! it was given. Live QA (2026-08-27, Groq `gpt-oss-120b`) confirmed the
+//! gap empirically, not hypothetically: fed a real Wikipedia excerpt on
+//! photosynthesis, the model fabricated a detailed photosystem I/II
+//! mechanism absent from the source, with zero `<cite>` tags on anything,
+//! fabricated or genuine — exactly the §16 "grounding alucinado" risk.
 //!
-//! This module is the mechanical safety net: after a grounded move's
-//! content is fully generated (streaming itself unchanged — §14, TTFT stays
-//! the metric; this runs AFTER the stream already closed), a SEPARATE
-//! fast-tier structured call ([`prompt::verify_grounding`]) compares the
-//! finished HTML against the exact source text the prompt saw
-//! (`MoveContext.grounding`, unchanged — not a fresh retrieval) and lists
-//! any unsupported claims. Unsupported → the move lands anyway, NEVER
-//! dropped, but with a visible "grounding unconfirmed" banner prepended to
-//! its HTML — the same never-fail-silently principle already used for S27's
-//! existence verification and citation resolution.
+//! This module is the mechanical safety net, and since 2026-09-05 (user
+//! decision) also the citation mechanism: the model's vocabulary no longer
+//! contains citation at all (the cite contract is deleted), and this gate
+//! does both jobs in ONE structured call it was already making:
+//!
+//! 1. **Verify** — after a grounded move's content is fully generated
+//!    (streaming itself unchanged — §14, TTFT stays the metric; this runs
+//!    AFTER the stream already closed), a fast-tier structured call
+//!    ([`prompt::verify_grounding`]) compares the finished HTML against
+//!    the exact source text the prompt saw (`MoveContext.grounding`,
+//!    unchanged — not a fresh retrieval) and lists any unsupported claims.
+//!    Unsupported → the move lands anyway, NEVER dropped, but with a
+//!    visible "grounding unconfirmed" banner prepended to its HTML — the
+//!    same never-fail-silently principle already used for S27's existence
+//!    verification and citation resolution.
+//! 2. **Assign citations** — the same call receives GENERATED's blocks
+//!    numbered ([`learnive_core::numbered_blocks`]) and the selection's
+//!    passages re-keyed (`[S1]`, `[S2]`, …) and maps block → passage; the
+//!    server inserts the validated `<cite>` markers itself
+//!    ([`learnive_core::insert_block_citations`]). Every `b`/`s`/`loc`
+//!    triple is checked against the server's own selection before
+//!    insertion — a citation can only point at a source the server
+//!    selected, never one the model invented.
 //!
 //! **Cut down to a single check call, 2026-09-01 (live QA).** This used to
 //! also attempt one corrective regeneration plus a re-check on top of the
@@ -45,11 +57,11 @@
 //! (patch the banner in without blocking the move at all — not yet built,
 //! floated live 2026-09-01) could still want the addendum shape.
 //!
-//! Scope: the six move types with locked sections that receive
-//! `CITE_CONTRACT` today — `explain`/`ask`/`confront`/`integrate`/
-//! `revisit`/`plan` ([`in_scope`]). A no-op (returns `generated` completely
-//! unchanged) for any other type or when `ctx.grounding` is empty, so no
-//! other call site's behavior changes because this gate exists.
+//! Scope: the streamed move types with grounded prose — `explain`/
+//! `integrate`/`revisit`/`respond` ([`in_scope`]). A no-op (returns
+//! `generated` completely unchanged) for any other type or when
+//! `ctx.grounding` is empty, so no other call site's behavior changes
+//! because this gate exists.
 
 use super::{EngineError, GeneratedMove, MoveContext, MoveType, parse, prompt, repair_messages};
 use crate::ai::{Ai, Tier};
@@ -70,6 +82,99 @@ fn in_scope(move_type: MoveType) -> bool {
     )
 }
 
+/// One SOURCE passage of the selection, parsed out of `MoveContext::
+/// grounding`'s `[id: … | loc: … | title]` header lines (both producers —
+/// `api::reading::ground_node` and `grounding_for` — format passages that
+/// way).
+struct Passage {
+    id: String,
+    loc: String,
+    title: String,
+    text: String,
+}
+
+/// Splits the grounding text into its passages. A line starting with
+/// `[id: ` and carrying ` | loc: ` opens a new passage; everything else
+/// accumulates into the current one. Returns an empty `Vec` when nothing
+/// parses (format drift) — the caller then degrades to verification only,
+/// no citation mapping.
+fn parse_passages(grounding: &str) -> Vec<Passage> {
+    let mut out: Vec<Passage> = Vec::new();
+    for line in grounding.lines() {
+        let t = line.trim();
+        if t.starts_with("[id: ") && t.contains(" | loc: ") && t.ends_with(']') {
+            let inner = &t[1..t.len() - 1];
+            let mut parts = inner.splitn(3, " | ");
+            let (Some(id_part), Some(loc_part), Some(title)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            out.push(Passage {
+                id: id_part.strip_prefix("id: ").unwrap_or(id_part).to_string(),
+                loc: loc_part
+                    .strip_prefix("loc: ")
+                    .unwrap_or(loc_part)
+                    .to_string(),
+                title: title.to_string(),
+                text: String::new(),
+            });
+        } else if let Some(last) = out.last_mut() {
+            if !last.text.is_empty() {
+                last.text.push('\n');
+            }
+            last.text.push_str(line);
+        }
+    }
+    // The blank line separating two passages accumulates into the previous
+    // one's text — drop the trailing whitespace it leaves, keep internal
+    // blank lines (real paragraph breaks in the extracted page text).
+    for p in &mut out {
+        p.text = p.text.trim_end().to_string();
+    }
+    out
+}
+
+/// Re-keys the parsed passages for the check prompt: `[S1 | p:41] title`
+/// header lines, passage text below. Short keys — the model maps against
+/// `S1`, never against a raw content hash, and the server resolves the key
+/// back to the real id at insertion time.
+fn format_passages(passages: &[Passage]) -> String {
+    passages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| format!("[S{} | {}] {}\n{}", i + 1, p.loc, p.title, p.text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Validates the model's citation mapping against the server's own
+/// selection: a reference survives only if its passage number exists, its
+/// locator copies that passage's OWN locator exactly, and it isn't a
+/// duplicate. Block placement (`b`) is validated by
+/// `learnive_core::insert_block_citations` itself (out-of-range blocks are
+/// dropped there). Returns `(block, source_id, locator)` triples ready for
+/// insertion.
+fn validated_citations(
+    cites: &[parse::RawCitation],
+    passages: &[Passage],
+) -> Vec<(usize, String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for c in cites {
+        let Some(p) = c.s.checked_sub(1).and_then(|i| passages.get(i)) else {
+            continue;
+        };
+        if p.loc != c.loc {
+            continue;
+        }
+        if seen.insert((c.b, c.s, c.loc.clone())) {
+            out.push((c.b, p.id.clone(), c.loc.clone()));
+        }
+    }
+    out
+}
+
 /// Runs the gate. Always returns a usable [`GeneratedMove`] — the caller
 /// never sees an `Err` and never needs a retry loop of its own. Two
 /// DIFFERENT failure shapes are deliberately kept apart, not conflated into
@@ -78,11 +183,19 @@ fn in_scope(move_type: MoveType) -> bool {
 /// CHECK ITSELF failing to run (provider error, timeout, an unparseable
 /// response even after JSON-repair) is infrastructure trouble, not a verdict
 /// about the content — it degrades to passing `generated` through
-/// unflagged, logged the same fire-and-forget way this module's caller
-/// already logs event-log/progressive-write failures. The banner is baked
-/// into the FROZEN content layer (§4.3) the moment it's returned, so there
-/// is no un-flagging it later — a transient hiccup must never leave a
-/// permanent "this may be fabricated" mark on correctly-grounded content.
+/// unflagged (and uncited), logged the same fire-and-forget way this
+/// module's caller already logs event-log/progressive-write failures. The
+/// banner is baked into the FROZEN content layer (§4.3) the moment it's
+/// returned, so there is no un-flagging it later — a transient hiccup must
+/// never leave a permanent "this may be fabricated" mark on
+/// correctly-grounded content.
+///
+/// Citation assignment rides the same call: when the grounding text parses
+/// into passages, the model's block→passage mapping is validated and the
+/// `<cite>` markers are inserted server-side. The check failing costs the
+/// citations too — they degrade together, by design: the check call is the
+/// only place citations come from, and no recovery call is spent on them
+/// (§12.2).
 pub async fn verify(
     ai: &Ai,
     move_type: MoveType,
@@ -93,14 +206,53 @@ pub async fn verify(
         return generated;
     }
 
-    let unsupported = match check(ai, &ctx.grounding, &generated.html).await {
-        Ok(claims) => claims,
+    let passages = parse_passages(&ctx.grounding);
+    let with_citations = !passages.is_empty();
+    let (source_view, generated_view) = if with_citations {
+        (
+            format_passages(&passages),
+            learnive_core::numbered_blocks(&generated.html),
+        )
+    } else {
+        (ctx.grounding.clone(), generated.html.clone())
+    };
+
+    let verdict = match check(ai, &source_view, &generated_view, with_citations).await {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("grounding check failed: {e}");
             return generated;
         }
     };
-    if unsupported.is_empty() {
+
+    let mut generated = generated;
+    if with_citations {
+        // One stderr line per checked move: free-tier QA lives or dies on
+        // being able to tell "the model never cited" from "everything it
+        // cited was invalid" without re-running a paid call.
+        let valid = validated_citations(&verdict.citations, &passages);
+        eprintln!(
+            "grounding check: claims={}, citations received={}, valid={}, passages={} [{}], raw={:?}",
+            verdict.unsupported_claims.len(),
+            verdict.citations.len(),
+            valid.len(),
+            passages.len(),
+            passages
+                .iter()
+                .map(|p| p.loc.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            verdict.citations,
+        );
+        if !valid.is_empty() {
+            let refs: Vec<(usize, &str, &str)> = valid
+                .iter()
+                .map(|(b, id, loc)| (*b, id.as_str(), loc.as_str()))
+                .collect();
+            generated.html = learnive_core::insert_block_citations(&generated.html, &refs);
+        }
+    }
+    if verdict.unsupported_claims.is_empty() {
         return generated;
     }
 
@@ -119,16 +271,17 @@ async fn check(
     ai: &Ai,
     source_text: &str,
     generated_html: &str,
-) -> Result<Vec<String>, EngineError> {
-    let messages = prompt::verify_grounding(source_text, generated_html);
+    with_citations: bool,
+) -> Result<parse::GroundingVerdict, EngineError> {
+    let messages = prompt::verify_grounding(source_text, generated_html, with_citations);
     let text = collect(ai, Tier::Fast, messages.clone()).await?;
-    if let Ok(claims) = parse::grounding_verdict(&text) {
-        return Ok(claims);
+    if let Ok(verdict) = parse::grounding_verdict(&text) {
+        return Ok(verdict);
     }
     let repair = repair_messages(
         messages,
         &text,
-        "expected JSON {\"unsupported_claims\":[...]}",
+        "expected JSON {\"unsupported_claims\":[...],\"citations\":[...]}",
     );
     let text = collect(ai, Tier::Fast, repair).await?;
     parse::grounding_verdict(&text)
@@ -306,5 +459,141 @@ mod tests {
         let result = verify(&ai, MoveType::Respond, &ctx, generated).await;
         assert!(result.html.contains("data-grounding-unconfirmed"));
         assert!(result.html.contains("A fabricated mechanism."));
+    }
+
+    /// 2026-09-05: the same check call assigns citations, and the server
+    /// inserts the `<cite>` markers itself — validated against the
+    /// selection (here: passage `S1` carries loc `p:1`, id `s1`), so the
+    /// model only ever gets credit for sources the server itself chose.
+    #[tokio::test]
+    async fn citation_mapping_from_the_check_is_inserted_server_side() {
+        let ai = mock_ai(r#"{"unsupported_claims":[],"citations":[{"b":1,"s":1,"loc":"p:1"}]}"#);
+        let ctx = grounded_ctx();
+        let generated = stub_move("<p>Photosynthesis converts light into chemical energy.</p>");
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(
+            result.html.contains(
+                r#"<p>Photosynthesis converts light into chemical energy.<cite data-source-id="s1" data-locator="p:1"></cite></p>"#
+            ),
+            "cite must be inserted into the cited block: {}",
+            result.html
+        );
+        assert!(!result.html.contains("data-grounding-unconfirmed"));
+    }
+
+    /// References that don't survive validation — a locator the passage
+    /// doesn't own, a passage number out of range — are dropped, never
+    /// inserted: an invented citation cannot reach the document.
+    #[tokio::test]
+    async fn invalid_citation_references_never_reach_the_document() {
+        let ai = mock_ai(
+            r#"{"unsupported_claims":[],"citations":[
+                {"b":1,"s":1,"loc":"p:999"},
+                {"b":1,"s":7,"loc":"p:1"},
+                {"b":1,"s":1,"loc":"p:1"}]}"#,
+        );
+        let ctx = grounded_ctx();
+        let generated = stub_move("<p>A supported claim.</p>");
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(result.html.contains(r#"data-locator="p:1""#));
+        assert!(!result.html.contains("p:999"));
+        // Exactly one cite survives: the only reference that validated.
+        assert_eq!(result.html.matches("<cite").count(), 1);
+    }
+
+    /// A flagged move can carry citations too — the banner prepends to the
+    /// content, the cites sit in their blocks; neither replaces the other.
+    #[tokio::test]
+    async fn flagged_move_still_carries_its_valid_citations() {
+        let ai = mock_ai(
+            r#"{"unsupported_claims":["a fabricated mechanism"],"citations":[{"b":1,"s":1,"loc":"p:1"}]}"#,
+        );
+        let ctx = grounded_ctx();
+        let generated = stub_move("<p>A fabricated mechanism.</p>");
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(result.html.contains("data-grounding-unconfirmed"));
+        assert!(result.html.contains(r#"data-locator="p:1""#));
+        assert!(result.html.contains("A fabricated mechanism."));
+    }
+
+    /// Grounding that parses to no passages (format drift) degrades to
+    /// verification only: the check still runs against the raw text, no
+    /// citation machinery fires.
+    #[tokio::test]
+    async fn unparsable_grounding_still_verifies_but_never_cites() {
+        let ai = mock_ai(r#"{"unsupported_claims":[],"citations":[{"b":1,"s":1,"loc":"p:1"}]}"#);
+        let ctx = MoveContext {
+            grounding: "plain text with no passage headers at all".to_string(),
+            ..Default::default()
+        };
+        let generated = stub_move("<p>Some claim.</p>");
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(!result.html.contains("<cite"));
+        assert_eq!(result.html, "<p>Some claim.</p>");
+    }
+
+    /// The passage parser reads both producers' header format
+    /// (`ground_node`'s chapter form and `grounding_for`'s similarity
+    /// form) and accumulates non-header lines into the current passage.
+    #[test]
+    fn parse_passages_reads_both_selection_formats() {
+        let grounding = "[id: hash1 | loc: p:41 | Stewart — Cálculo]\npage 41 text\nmore text\n\n\
+                         [id: wiki1 | loc: p:3 — chap:2 | Photosynthesis — Overview]\nwiki text";
+        let passages = parse_passages(grounding);
+        assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].id, "hash1");
+        assert_eq!(passages[0].loc, "p:41");
+        assert_eq!(passages[0].title, "Stewart — Cálculo");
+        assert_eq!(passages[0].text, "page 41 text\nmore text");
+        assert_eq!(passages[1].loc, "p:3 — chap:2");
+        assert_eq!(passages[1].text, "wiki text");
+
+        let rekeyed = format_passages(&passages);
+        assert!(rekeyed.starts_with("[S1 | p:41] Stewart — Cálculo"));
+        assert!(rekeyed.contains("[S2 | p:3 — chap:2] Photosynthesis — Overview"));
+    }
+
+    /// Citation validation: only refs whose locator copies the passage's
+    /// own and whose passage number exists survive; duplicates collapse.
+    #[test]
+    fn validated_citations_filters_against_the_selection() {
+        let passages = parse_passages(
+            "[id: hash1 | loc: p:41 | A]\ntext\n\n[id: hash1 | loc: p:42 | A]\nmore",
+        );
+        let cites = vec![
+            parse::RawCitation {
+                b: 2,
+                s: 1,
+                loc: "p:41".into(),
+            }, // ok
+            parse::RawCitation {
+                b: 1,
+                s: 2,
+                loc: "p:41".into(),
+            }, // loc belongs to S1, not S2
+            parse::RawCitation {
+                b: 1,
+                s: 9,
+                loc: "p:41".into(),
+            }, // no such passage
+            parse::RawCitation {
+                b: 2,
+                s: 1,
+                loc: "p:41".into(),
+            }, // duplicate
+            parse::RawCitation {
+                b: 3,
+                s: 2,
+                loc: "p:42".into(),
+            }, // ok
+        ];
+        let valid = validated_citations(&cites, &passages);
+        assert_eq!(
+            valid,
+            vec![
+                (2, "hash1".to_string(), "p:41".to_string()),
+                (3, "hash1".to_string(), "p:42".to_string()),
+            ]
+        );
     }
 }

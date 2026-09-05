@@ -115,13 +115,44 @@ struct RawGroundingVerdict {
     /// is no separate boolean to fall out of sync with the list.
     #[serde(default)]
     unsupported_claims: Vec<String>,
+    /// The citation mapping (2026-09-05: the same call assigns citations —
+    /// the model's own vocabulary no longer contains them). Empty or
+    /// omitted when nothing cited / the caller asked for verification only.
+    #[serde(default)]
+    citations: Vec<RawCitation>,
+}
+
+/// One block→passage citation from the verification call's mapping:
+/// `b` is GENERATED's 1-based block number (`learnive_core::numbered_blocks`),
+/// `s` the 1-based SOURCE passage number, `loc` the passage's own locator
+/// copied back. All three are validated by the caller before anything is
+/// inserted — a citation can only land on a source the server itself
+/// selected.
+#[derive(Debug, Deserialize)]
+pub struct RawCitation {
+    pub b: usize,
+    pub s: usize,
+    pub loc: String,
+}
+
+/// The grounding-verification call's full verdict (§S21,
+/// `movement::grounding`): the unsupported-claims list plus the citation
+/// mapping.
+#[derive(Debug)]
+pub struct GroundingVerdict {
+    pub unsupported_claims: Vec<String>,
+    pub citations: Vec<RawCitation>,
 }
 
 /// Parses the grounding-verification call's verdict (§S21,
-/// `movement::grounding`). Empty `Vec` means every claim checked out.
-pub fn grounding_verdict(text: &str) -> Result<Vec<String>, EngineError> {
+/// `movement::grounding`). Empty `unsupported_claims` means every claim
+/// checked out; empty `citations` means nothing was mapped.
+pub fn grounding_verdict(text: &str) -> Result<GroundingVerdict, EngineError> {
     let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
     let raw: RawGroundingVerdict =
         serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
-    Ok(raw.unsupported_claims)
+    Ok(GroundingVerdict {
+        unsupported_claims: raw.unsupported_claims,
+        citations: raw.citations,
+    })
 }

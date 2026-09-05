@@ -38,6 +38,14 @@ use crate::locale::{Locale, language_directive};
 /// [`ISLAND_CONTRACT`] makes — the model commits to literal markers, the
 /// server does the rest.
 ///
+/// On citations: the model emits NONE (2026-09-05, user decision — the old
+/// `CITE_CONTRACT` is deleted). Citations are server machinery now: the
+/// post-generation grounding-verification call
+/// (`movement::grounding`) maps each block to the source passage that
+/// supports it, and the server inserts the validated `<cite>` markers
+/// itself — a citation can only ever point at a source the server
+/// selected, never one the model invented.
+///
 /// Written as one flat literal on purpose: this constant is interpolated
 /// *into* other `format!` strings, so a `{PLACEHOLDER}` for a second
 /// constant would never be expanded and would ship to the model verbatim
@@ -47,6 +55,9 @@ HTML rules (the content is sanitized — anything that violates them disappears 
 - Use ONLY static semantic HTML: <h2>-<h4>, <p>, <ul>/<ol>/<li>, <table>/<tr>/\
 <td>, <code>/<pre>, <blockquote>, <strong>/<em>, <div>, <span>, <a href> (only \
 http(s), mailto: or #) and <img> (only src https: or data:image/).\n\
+- NEVER emit <h1> and never write a heading that restates the node's concept \
+title: the server adds the node's own <h1> title itself, so yours would \
+duplicate it.\n\
 - Layout: shape the page with <div>/<span>, but ONLY with these class values \
 (any other class is stripped on render): \"callout\" an aside worth pausing on; \
 \"callout key\" the central idea of the section; \"callout warning\" a common \
@@ -90,23 +101,17 @@ inside a <p> or other block. Everything outside it still obeys the HTML \
 rules above. Use this sparingly, only when it teaches better than prose — \
 most content needs no island at all.";
 
-/// Addendum to [`PROSE_HTML_CONTRACT`] for any call site that received
-/// grounding passages (§10/§4.3) — appended only when `sources_block` is
-/// non-empty, so a call with no grounding never sees it. The sole exception
-/// to "do not generate id/data-* attributes" above: `<cite>` is how a
-/// grounded claim points back at the passage it came from, and the client
-/// sanitizer (`assets/core.js`) allowlists exactly this tag/attribute pair.
-pub const CITE_CONTRACT: &str = "\
-Grounding: you are given SOURCES below (real, openly-licensed passages). \
-Ground your explanation in them and CITE where you rely on one: wrap the \
-specific claim in <cite data-source-id=\"ID\" data-locator=\"LOC\">…</cite>, \
-using ONLY an ID and LOC that appear verbatim in a SOURCES entry. Never \
-invent a source id or locator; if nothing fits, write the sentence without a \
-<cite>. This is the sole exception to the \"no data-* attributes\" rule. \
-SOURCES are supporting context, not the assignment — if a passage is \
-tangential to what this move is actually teaching or testing, ignore it \
-rather than bending the content to fit it.";
-
+/// The grounding addendum that used to ride in every grounded call's
+/// system message (§10/§4.3). **Deleted 2026-09-05 (user decision):**
+/// the model no longer emits `<cite>` markers at all — it had to be asked,
+/// and live QA kept catching it not bothering (2026-08-27: eight-cite
+/// sections next to zero-cite ones, fabricated mechanisms uncited either
+/// way). Citations are server machinery now: `movement::grounding`'s
+/// verification call maps each numbered block to the passage that supports
+/// it and `learnive_core::insert_block_citations` inserts the validated
+/// markers. Kept as this stub comment so the slot in the contract's
+/// history stays legible.
+///
 /// Contract for the exercise block: it runs isolated in an `<iframe sandbox>`
 /// (§4.4) — NO same-origin, cannot see the token or the page DOM — so it is
 /// NOT sanitized and may use JS/CSS/SVG freely. In exchange it must return the
@@ -454,13 +459,16 @@ pub fn propose_chapter_split(chapter_title: &str, signal_text: &str) -> Vec<Chat
     ]
 }
 
-/// Formats retrieved passages into a user-message block the model can cite
-/// from. Empty string when there is no grounding (index still filling, §14).
+/// Formats retrieved passages into a user-message block. The model no
+/// longer cites them itself (2026-09-05 — citations are server-inserted
+/// from the verification call's mapping); the passages are here as the
+/// substantive ground the move must draw on. Empty string when there is no
+/// grounding (index still filling, §14).
 pub fn sources_block(sources: &str) -> String {
     if sources.trim().is_empty() {
         String::new()
     } else {
-        format!("\n\nSOURCES (cite by the exact id/locator shown):\n{sources}")
+        format!("\n\nSOURCES (the source passages this move must draw on):\n{sources}")
     }
 }
 

@@ -62,6 +62,125 @@ fn escape_text(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;")
 }
 
+/// The top-level element children of `inner_html`, as `(tag_name, html)` in
+/// document order — the same walk [`ensure_block_ids`] uses for its block
+/// numbering, so a block index minted by one of these helpers means the same
+/// element in the other. Bare text runs are NOT elements and don't consume an
+/// index (they have no tag for a citation to attach to).
+fn top_level_elements(inner_html: &str) -> Vec<(String, String)> {
+    let wrapped = format!(r#"<div id="__lv_root">{inner_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let root_sel = Selector::parse("#__lv_root").expect("static selector");
+    let root = frag
+        .select(&root_sel)
+        .next()
+        .expect("wrapper div always present");
+
+    root.children()
+        .filter_map(|child| {
+            ElementRef::wrap(child).map(|el| (el.value().name().to_string(), el.html()))
+        })
+        .collect()
+}
+
+/// Numbers a move's top-level element blocks (`[1] …`, `[2] …`, one per
+/// line) — the form `movement::grounding`'s post-generation verification
+/// prompt presents GENERATED in, so the model's citation mapping can
+/// reference block numbers instead of quoting HTML back. The numbering is
+/// the same walk [`ensure_block_ids`] uses, and matches
+/// [`insert_block_citations`]'s block numbers exactly: `[N]` here is the
+/// Nth top-level element there.
+pub fn numbered_blocks(inner_html: &str) -> String {
+    top_level_elements(inner_html)
+        .iter()
+        .enumerate()
+        .map(|(i, (_, html))| format!("[{}] {}", i + 1, html))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Appends empty `<cite data-source-id data-locator></cite>` markers at the
+/// end of the named top-level blocks (`citations` entries are
+/// `(block_number, source_id, locator)`, 1-based against
+/// [`numbered_blocks`]' numbering). The markers are EMPTY on purpose — the
+/// locator renders from the attribute (`app.css`'s `.prose cite::before`),
+/// the same shape the model used to be asked to emit; now the server emits
+/// them itself from the verification call's mapping, so a citation can only
+/// ever point at a source the server itself selected. Block numbers outside
+/// the document are silently dropped (the caller validates source/locator;
+/// this validates placement). Bare text runs are wrapped in a synthetic
+/// `<p>` exactly like [`ensure_block_ids`] does, so nothing is lost between
+/// this pass and the block-id pass that follows it. Reserializes via
+/// `scraper`, like every other helper here.
+pub fn insert_block_citations(inner_html: &str, citations: &[(usize, &str, &str)]) -> String {
+    let elements = top_level_elements(inner_html);
+    let mut markers: Vec<Vec<String>> = vec![Vec::new(); elements.len()];
+    for (b, id, loc) in citations {
+        if let Some(slot) = markers.get_mut(b.checked_sub(1).unwrap_or(usize::MAX)) {
+            slot.push(format!(
+                r#"<cite data-source-id="{id}" data-locator="{loc}"></cite>"#
+            ));
+        }
+    }
+
+    let wrapped = format!(r#"<div id="__lv_root">{inner_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let root_sel = Selector::parse("#__lv_root").expect("static selector");
+    let root = frag
+        .select(&root_sel)
+        .next()
+        .expect("wrapper div always present");
+
+    let mut out = String::new();
+    let mut n = 0;
+    for child in root.children() {
+        match child.value() {
+            Node::Element(_) => {
+                let cited = &markers[n];
+                n += 1;
+                let el = ElementRef::wrap(child).expect("element node wraps");
+                if cited.is_empty() {
+                    out.push_str(&el.html());
+                } else {
+                    let name = el.value().name();
+                    let html = el.html();
+                    let close = format!("</{name}");
+                    // rfind, not find: nested children close before their
+                    // parent, so the LAST `</name` in the serialized element
+                    // is this element's own closing tag.
+                    match html.rfind(&close) {
+                        Some(pos) => {
+                            out.push_str(&html[..pos]);
+                            for m in cited {
+                                out.push_str(m);
+                            }
+                            out.push_str(&html[pos..]);
+                        }
+                        // Void element (no closing tag): marker after it.
+                        None => {
+                            out.push_str(&html);
+                            for m in cited {
+                                out.push_str(m);
+                            }
+                        }
+                    }
+                }
+                out.push('\n');
+            }
+            Node::Text(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(r#"<p>{}</p>"#, escape_text(trimmed)));
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// Reconstructs just the frozen prose blocks from a node's stored
 /// `content.html` — every top-level element that carries `data-block-id`
 /// but not `data-exercise-id`, in document order, re-serialized. Used to
@@ -263,6 +382,66 @@ mod tests {
         let out = ensure_block_ids(inner, "b");
         assert!(out.contains(r#"<p data-block-id="b1">Lead-in text.</p>"#));
         assert!(out.contains(r#"<p data-block-id="b2">Then a real paragraph.</p>"#));
+    }
+
+    #[test]
+    fn numbered_blocks_numbers_elements_in_order_and_skips_bare_text() {
+        let inner = "Lead-in text.<p>First.</p><div>Nested <em>markup</em>.</div>";
+        let numbered = numbered_blocks(inner);
+        assert!(numbered.starts_with("[1] <p>First.</p>"));
+        assert!(numbered.contains("[2] <div>Nested <em>markup</em>.</div>"));
+        // The bare text run consumed no number: the citation mapping counts
+        // elements only, and there is no element for a cite to attach to.
+        assert!(!numbered.contains("Lead-in"));
+    }
+
+    #[test]
+    fn numbered_and_insert_block_numbers_agree() {
+        let inner = "<p>One.</p><h3>Two.</h3><p>Three.</p>";
+        let count = numbered_blocks(inner).matches("[").count();
+        let out = insert_block_citations(inner, &[(2, "hash1", "p:7")]);
+        // Block 2 is the <h3>: its citation lands inside it, blocks 1/3
+        // untouched.
+        assert!(out.contains("<h3>Two.<cite"));
+        assert!(out.contains(r#"data-locator="p:7""#));
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn insert_block_citations_appends_empty_cite_before_the_blocks_close_tag() {
+        let inner = r#"<p>Claim one.</p><p>Nested <strong>text</strong> here.</p>"#;
+        let out = insert_block_citations(inner, &[(2, "abc123", "p:42")]);
+        assert!(
+            out.contains(r#"<p>Nested <strong>text</strong> here.<cite data-source-id="abc123" data-locator="p:42"></cite></p>"#),
+            "cite must sit before the block's own closing tag: {out:?}"
+        );
+        // Empty inner text: the locator renders from the attribute
+        // (`app.css`'s `.prose cite::before`).
+        assert!(out.contains(r#"></cite>"#));
+        assert!(out.contains("<p>Claim one.</p>"));
+    }
+
+    #[test]
+    fn insert_block_citations_drops_out_of_range_blocks_and_keeps_the_rest() {
+        let inner = "<p>Only.</p>";
+        let out =
+            insert_block_citations(inner, &[(5, "h", "p:1"), (0, "h", "p:2"), (1, "h", "p:3")]);
+        assert!(out.contains(r#"data-locator="p:3""#));
+        assert!(!out.contains(r#"p:1"#));
+        assert!(!out.contains(r#"p:2"#));
+    }
+
+    #[test]
+    fn insert_block_citations_keeps_bare_text_and_orders_multiple_cites() {
+        let inner = "Loose text.<p>Both pages.</p>";
+        let out = insert_block_citations(inner, &[(1, "h1", "p:10"), (1, "h1", "p:11")]);
+        assert!(
+            out.contains("<p>Loose text.</p>"),
+            "bare text preserved: {out:?}"
+        );
+        let one = out.find(r#"p:10"#).unwrap();
+        let two = out.find(r#"p:11"#).unwrap();
+        assert!(one < two, "same-block citations keep their given order");
     }
 
     #[test]

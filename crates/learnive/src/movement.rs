@@ -884,6 +884,18 @@ mod tests {
         assert!(sys.contains("figure data-interactive"));
     }
 
+    /// 2026-09-05: citation left the model's vocabulary (server-inserted
+    /// from the verification call's mapping) and the node title became a
+    /// server-owned `<h1>` — the prose contract must say so, and must no
+    /// longer carry any cite instruction.
+    #[test]
+    fn prose_contract_bans_h1_and_model_citations() {
+        let ctx = MoveContext::default();
+        let sys = &prompt::generate_move_streamed(MoveType::Explain, &ctx)[0].content;
+        assert!(sys.contains("NEVER emit <h1>"));
+        assert!(!sys.contains("<cite"));
+    }
+
     #[test]
     fn test_prompt_carries_exercise_contract_and_forces_graded() {
         let ctx = MoveContext::default();
@@ -1134,9 +1146,9 @@ mod tests {
     /// on real source text (PLAN.md's S21/S27), without waiting for the
     /// pivot's ingestion pipeline (PDF extraction, the acervo gate) to
     /// exist. Feeds a real excerpt as `ctx.grounding` — the exact field
-    /// `movement::prompt`'s `CITE_CONTRACT` keys off to require inline
-    /// `<cite>` tags — and prints the resulting HTML for a human to judge:
-    /// quality of the rewrite, whether citations look sane, whether
+    /// the move prompts render into their SOURCES block — and prints the
+    /// resulting HTML for a human to judge:
+    /// quality of the rewrite, whether
     /// anything reads as unsupported by the excerpt. No oracle to assert
     /// against — this is eyeball QA, not a regression test. This test
     /// never fabricates or embeds source text itself; point it at a file
