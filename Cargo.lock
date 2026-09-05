@@ -2604,6 +2604,7 @@ dependencies = [
  "ego-tree 0.9.0",
  "getopts",
  "html5ever 0.29.1",
+ "indexmap",
  "precomputed-hash",
  "selectors 0.26.0",
  "tendril 0.4.3",

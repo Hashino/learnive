@@ -141,6 +141,7 @@ pub async fn generate_node(
             item_title: prep.title.clone(),
             outline_context: prep.context.clone(),
             grounding: prep.grounding.clone(),
+            grounding_index: prep.grounding_index.clone(),
             objective: prep.objective.clone(),
             children_titles: prep.children_titles.clone(),
             review_mode: prep.review_mode,
@@ -308,19 +309,19 @@ pub async fn generate_node(
                 }
             };
 
-            // §S21: post-generation grounding-verification gate, run for
-            // BOTH render paths above — right after the move's content is
-            // fully settled and before it's used any further (event log, §S6
-            // progressive persistence below). `applies` is the same
-            // cheap grounded/in-scope check `verify` makes internally;
-            // checked again here only to gate the status frame, so a plain
-            // ungrounded/out-of-scope move never emits one. `verify` itself
-            // never errors this request — a verification failure degrades
-            // to the visible "grounding unconfirmed" banner (never a silent
-            // drop, same principle as S27's existence verification) rather
-            // than propagating. One check call only (2026-09-01, no more
-            // corrective regeneration — see `movement::grounding`'s module
-            // doc).
+            // §S21 (LEAN shape, 2026-09-05): post-generation grounding
+            // gate, run for BOTH render paths above — right after the
+            // move's content is fully settled and before it's used any
+            // further (event log, §S6 progressive persistence below).
+            // `applies` is the same cheap grounded/in-scope check `verify`
+            // makes internally; checked again here only to gate the status
+            // frame, so a plain ungrounded/out-of-scope move never emits
+            // one. `verify` never errors this request: citations are
+            // mechanical (local embedder, zero tokens), and only blocks
+            // below the similarity floor reach the one small adjudication
+            // call — whose failure degrades to honest per-block doubt
+            // (`data-unverified`, orange cite) rather than propagating.
+            // See `movement::grounding`'s module doc.
             let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
                 let checking_en = "Checking grounding…";
                 let checking_pt = "Verificando fundamentação…";

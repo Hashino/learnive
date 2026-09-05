@@ -99,26 +99,56 @@ pub fn numbered_blocks(inner_html: &str) -> String {
         .join("\n")
 }
 
+/// The visible text of each top-level element block, in the SAME order and
+/// numbering as [`numbered_blocks`] / [`insert_block_citations`] (entry N is
+/// block N). Whitespace-collapsed plain text, no markup — the form the
+/// mechanical citer embeds (`movement::grounding`) to pick a block's cited
+/// page by similarity. Entries can be empty (a block with no text).
+pub fn block_texts(inner_html: &str) -> Vec<String> {
+    top_level_elements(inner_html)
+        .iter()
+        .map(|(_, html)| {
+            let frag = Html::parse_fragment(html);
+            let mut parts: Vec<String> = Vec::new();
+            for node in frag.tree.nodes() {
+                if let Node::Text(text) = node.value() {
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        parts.push(t.to_string());
+                    }
+                }
+            }
+            parts.join(" ")
+        })
+        .collect()
+}
+
 /// Appends empty `<cite data-source-id data-locator></cite>` markers at the
 /// end of the named top-level blocks (`citations` entries are
-/// `(block_number, source_id, locator)`, 1-based against
-/// [`numbered_blocks`]' numbering). The markers are EMPTY on purpose — the
-/// locator renders from the attribute (`app.css`'s `.prose cite::before`),
-/// the same shape the model used to be asked to emit; now the server emits
-/// them itself from the verification call's mapping, so a citation can only
-/// ever point at a source the server itself selected. Block numbers outside
-/// the document are silently dropped (the caller validates source/locator;
-/// this validates placement). Bare text runs are wrapped in a synthetic
-/// `<p>` exactly like [`ensure_block_ids`] does, so nothing is lost between
-/// this pass and the block-id pass that follows it. Reserializes via
-/// `scraper`, like every other helper here.
-pub fn insert_block_citations(inner_html: &str, citations: &[(usize, &str, &str)]) -> String {
+/// `(block_number, source_id, locator, unverified)`, 1-based against
+/// [`numbered_blocks`]' numbering; `unverified` stamps the marker with
+/// `data-unverified="true"` — the orange, warning-glyph styling for a
+/// citation the support check could not confirm). The markers are EMPTY on
+/// purpose — the locator renders from the attribute (`app.css`'s
+/// `.prose cite::before`), and the SERVER emits them itself: a citation can
+/// only ever point at a source the server itself selected. Block numbers
+/// outside the document are silently dropped (the caller validates
+/// source/locator; this validates placement). Bare text runs are wrapped in
+/// a synthetic `<p>` exactly like [`ensure_block_ids`] does, so nothing is
+/// lost between this pass and the block-id pass that follows it.
+/// Reserializes via `scraper`, like every other helper here.
+pub fn insert_block_citations(inner_html: &str, citations: &[(usize, &str, &str, bool)]) -> String {
     let elements = top_level_elements(inner_html);
     let mut markers: Vec<Vec<String>> = vec![Vec::new(); elements.len()];
-    for (b, id, loc) in citations {
+    for (b, id, loc, unverified) in citations {
+        let flag = if *unverified {
+            r#" data-unverified="true""#
+        } else {
+            ""
+        };
         if let Some(slot) = markers.get_mut(b.checked_sub(1).unwrap_or(usize::MAX)) {
             slot.push(format!(
-                r#"<cite data-source-id="{id}" data-locator="{loc}"></cite>"#
+                r#"<cite data-source-id="{id}" data-locator="{loc}"{flag}></cite>"#
             ));
         }
     }
@@ -399,7 +429,7 @@ mod tests {
     fn numbered_and_insert_block_numbers_agree() {
         let inner = "<p>One.</p><h3>Two.</h3><p>Three.</p>";
         let count = numbered_blocks(inner).matches("[").count();
-        let out = insert_block_citations(inner, &[(2, "hash1", "p:7")]);
+        let out = insert_block_citations(inner, &[(2, "hash1", "p:7", false)]);
         // Block 2 is the <h3>: its citation lands inside it, blocks 1/3
         // untouched.
         assert!(out.contains("<h3>Two.<cite"));
@@ -410,7 +440,7 @@ mod tests {
     #[test]
     fn insert_block_citations_appends_empty_cite_before_the_blocks_close_tag() {
         let inner = r#"<p>Claim one.</p><p>Nested <strong>text</strong> here.</p>"#;
-        let out = insert_block_citations(inner, &[(2, "abc123", "p:42")]);
+        let out = insert_block_citations(inner, &[(2, "abc123", "p:42", false)]);
         assert!(
             out.contains(r#"<p>Nested <strong>text</strong> here.<cite data-source-id="abc123" data-locator="p:42"></cite></p>"#),
             "cite must sit before the block's own closing tag: {out:?}"
@@ -424,8 +454,14 @@ mod tests {
     #[test]
     fn insert_block_citations_drops_out_of_range_blocks_and_keeps_the_rest() {
         let inner = "<p>Only.</p>";
-        let out =
-            insert_block_citations(inner, &[(5, "h", "p:1"), (0, "h", "p:2"), (1, "h", "p:3")]);
+        let out = insert_block_citations(
+            inner,
+            &[
+                (5, "h", "p:1", false),
+                (0, "h", "p:2", false),
+                (1, "h", "p:3", false),
+            ],
+        );
         assert!(out.contains(r#"data-locator="p:3""#));
         assert!(!out.contains(r#"p:1"#));
         assert!(!out.contains(r#"p:2"#));
@@ -434,7 +470,8 @@ mod tests {
     #[test]
     fn insert_block_citations_keeps_bare_text_and_orders_multiple_cites() {
         let inner = "Loose text.<p>Both pages.</p>";
-        let out = insert_block_citations(inner, &[(1, "h1", "p:10"), (1, "h1", "p:11")]);
+        let out =
+            insert_block_citations(inner, &[(1, "h1", "p:10", false), (1, "h1", "p:11", false)]);
         assert!(
             out.contains("<p>Loose text.</p>"),
             "bare text preserved: {out:?}"

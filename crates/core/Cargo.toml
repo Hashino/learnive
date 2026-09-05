@@ -7,5 +7,9 @@ edition = "2024"
 # §4.3 anchoring can run identically on server and client.
 [dependencies]
 pulldown-latex = "0.8"
-scraper = "0.21"
+# `deterministic` makes attribute serialization order-preserving (IndexMap):
+# without it scraper stores attributes in a HashMap, and every parse→serialize
+# round trip (block ids, citation markers, `prose_blocks_only` on read)
+# reorders them nondeterministically.
+scraper = { version = "0.21", features = ["deterministic"] }
 serde = { version = "1", features = ["derive"] }

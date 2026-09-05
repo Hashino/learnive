@@ -279,16 +279,18 @@ pub struct MoveContext {
     /// concepts must be told APART). Empty when there is nothing nearby
     /// yet demonstrated to mix in.
     pub interleave_titles: Vec<String>,
-    /// §S21 post-generation grounding-verification gate (`movement::
-    /// grounding`): set ONLY on the single corrective-regeneration attempt
-    /// after the gate's own structured check flagged claims in the FIRST
-    /// attempt as unsupported by `grounding` above — names those claims so
-    /// the retry can revise or drop them instead of blindly regenerating
-    /// from scratch. `None` on every first-pass call and for every move
-    /// type outside the gate's scope. Drives `prompt::
-    /// grounding_correction_addendum`, applied in `purpose()` the same way
-    /// `remediation_addendum`/`fade_addendum` are.
-    pub grounding_correction: Option<Vec<String>>,
+    /// §S21 post-generation grounding gate (`movement::grounding`), LEAN
+    /// shape (2026-09-05, user decision): citations are MECHANICAL —
+    /// `grounding::verify` embeds each settled block and cites the page
+    /// whose index vector best matches — and only blocks whose best
+    /// similarity falls below [`grounding::MECHANICAL_FLOOR`] go to the
+    /// model, as a small adjudication call ("is this paragraph supported
+    /// by this page?"). This field carries what the mechanical citer
+    /// needs: the SAME book's page-index cache the grounding text was
+    /// read from. `None` whenever the node's grounding didn't come from a
+    /// chapter page window (no source pointer, corpus fallback) — then no
+    /// citations are inserted and no check runs.
+    pub grounding_index: Option<grounding::GroundingIndex>,
 }
 
 /// A generated move (§6 ABI): HTML + the two invariant flags + tactics.

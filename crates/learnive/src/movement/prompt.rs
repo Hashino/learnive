@@ -10,83 +10,50 @@ fn non_empty(s: &str) -> &str {
     if s.trim().is_empty() { "(none yet)" } else { s }
 }
 
-/// §S21 post-generation grounding-verification call (`movement::
-/// grounding`) — a SEPARATE structured call from the move's own
-/// generation, run after a grounded move's content is fully generated, not
-/// an addendum to `generate_move_streamed`/`generate_move` above. It does
-/// TWO jobs on the texts it already holds side by side (2026-09-05,
-/// user decision: the model's own vocabulary no longer contains citation —
-/// the old `CITE_CONTRACT` is deleted — so this call is also where inline
-/// citations are assigned):
+/// §S21 post-generation grounding gate, LEAN shape (2026-09-05, user
+/// decision): citations are assigned MECHANICALLY by the server
+/// (`movement::grounding` — embed each settled block, cite the best-matching
+/// page from the book's own index), so the model never sees the whole move
+/// and never maps citations. This is the only model call left in the gate —
+/// and it only fires when at least one block's best similarity fell below
+/// `MECHANICAL_FLOOR` (nothing to adjudicate ⇒ zero tokens). Each suspect
+/// paragraph arrives with the text of the page the mechanical citer picked
+/// for it; the model judges ONLY whether that paragraph's substance is
+/// actually supported by that page. A failed paragraph keeps its citation,
+/// stamped `data-unverified` (orange + warning glyph, `app.css`) — the
+/// reader sees exactly which pointer is doubtful, not a whole-move banner.
 ///
-/// 1. **Verify** whether GENERATED stays inside what SOURCE supports —
-///    closing the gap live QA confirmed empirically (2026-08-27: fed a
-///    real Wikipedia excerpt, the model fabricated a detailed mechanism
-///    absent from the source). Segmented at claim granularity (a
-///    sentence/paragraph-level judgment call, not literal NLP claim
-///    extraction); pedagogical framing (transitions, analogies, examples
-///    not claimed to come from the source) is explicitly not flagged, so a
-///    clean, well-grounded move sees an empty list.
-/// 2. **Assign citations**: GENERATED's top-level blocks arrive numbered
-///    (`[1]`, `[2]`, … — `learnive_core::numbered_blocks`) and SOURCE's
-///    passages numbered (`[S1]`, `[S2]`, … — the caller's own selection
-///    formatting); the model maps block → passage and the server inserts
-///    the validated `<cite>` markers itself, so a citation can only point
-///    at a source the server actually selected. `with_citations` is false
-///    when the grounding text parsed to zero passages (format drift) —
-///    then only verification runs.
-pub fn verify_grounding(
-    source_text: &str,
-    generated_html: &str,
-    with_citations: bool,
-) -> Vec<ChatMessage> {
-    let citation_rules = if with_citations {
-        "\n\nASSIGN CITATIONS as you check: GENERATED's blocks are numbered \
-         [1], [2], ... and SOURCE's passages are numbered [S1], [S2], .... \
-         For every numbered block whose substantive content draws on one of \
-         the passages, add {\"b\":<block number>,\"s\":<passage number>,\
-         \"loc\":\"<that passage's own locator>\"} to \"citations\" — one \
-         entry per block per passage, only blocks that genuinely draw on a \
-         passage. Each passage's header line reads [S<n> | <locator>] <title>; \
-         \"loc\" is exactly the <locator> from that header, character for \
-         character — for the passage headed \"[S3 | p:41] Downey, Functions\" \
-         a correct entry is {\"b\":2,\"s\":3,\"loc\":\"p:41\"}. Never put a \
-         word, a page title, or a topic name in \"loc\" — it is always a \
-         short locator like p:41. Blocks that repeat common background \
-         knowledge rather than a passage's own content get no citation."
-    } else {
-        "\n\nCitations cannot be assigned here (no numbered SOURCE passages), \
-         so omit \"citations\" entirely."
-    };
-    let shape_note = if with_citations {
-        "An empty unsupported_claims array means every claim in GENERATED \
-         checks out; omit \"citations\" (or leave it empty) when no block \
-         qualifies."
-    } else {
-        "An empty array means every claim in GENERATED checks out."
-    };
+/// The prompt is deliberately SMALL: per suspect, the paragraph and its one
+/// page — never the whole move or the whole chapter window. That is what
+/// makes it survive the free-tier reasoning burn that truncated the old
+/// dual-task call.
+///
+/// `suspects` entries: `(paragraph number, paragraph text, cited page text)`
+/// — paragraph numbers are the block numbers the server will stamp, 1-based.
+pub fn verify_support(suspects: &[(usize, &str, &str)]) -> Vec<ChatMessage> {
+    let mut body = String::new();
+    for (n, paragraph, source) in suspects {
+        body.push_str(&format!(
+            "PARAGRAPH [{n}]:\n{paragraph}\n\nSOURCE PAGE for [{n}] (the page \
+             its citation points at):\n{source}\n\n"
+        ));
+    }
     vec![
-        ChatMessage::system(format!(
-            "You are a fact-checker, not a tutor. Compare GENERATED against \
-             SOURCE below and list every substantive factual, mechanistic, or \
-             numeric claim in GENERATED that SOURCE does not state or clearly \
-             imply. Do NOT flag: pedagogical framing, transitions, analogies, \
-             or examples not presented as coming from SOURCE; common \
-             background knowledge SOURCE assumes the reader has; \
-             restatements or paraphrases of what SOURCE actually says. Only \
-             flag a claim that states a specific fact, mechanism, or figure \
-             as though SOURCE supports it when SOURCE does not contain it. \
-             Quote or closely paraphrase each flagged claim, kept short.\
-             {citation_rules}\n\n\
-             Respond ONLY with JSON: {{\"unsupported_claims\":[\"...\"],\
-             \"citations\":[{{\"b\":1,\"s\":1,\"loc\":\"...\"}}]}} — {shape_note}"
-        )),
-        ChatMessage::user(format!(
-            "SOURCE (the only material GENERATED may draw substantive claims \
-             from):\n{source_text}\n\n\
-             GENERATED (verify this against SOURCE above; top-level blocks \
-             numbered [N]):\n{generated_html}"
-        )),
+        ChatMessage::system(
+            "You are a fact-checker, not a tutor. For each PARAGRAPH below, \
+             decide whether its substantive factual, mechanistic, or numeric \
+             claims are stated or clearly implied by its own SOURCE PAGE. Do \
+             NOT flag: pedagogical framing, transitions, analogies, or \
+             examples not presented as coming from the source; common \
+             background knowledge the source assumes; restatements or \
+             paraphrases of what the source says. Only flag a paragraph that \
+             states a specific fact, mechanism, or figure as though the \
+             source supports it when the source does not contain it.\n\n\
+             Respond ONLY with JSON: {\"unsupported\":[<paragraph numbers \
+             that failed>]} — an empty array means every paragraph checks \
+             out. Example: {\"unsupported\":[2]}",
+        ),
+        ChatMessage::user(body),
     ]
 }
 
@@ -329,30 +296,6 @@ fn interleave_addendum(interleave_titles: &[String]) -> String {
     )
 }
 
-/// §S21 grounding-verification corrective regeneration
-/// (`movement::grounding`, §8.2-style escalation): fires ONLY when
-/// `MoveContext::grounding_correction` is set, which happens only on the
-/// single retry after the gate's own check flagged claims in the FIRST
-/// attempt as unsupported by `MoveContext.grounding`. Names the flagged
-/// claims so the retry can revise or drop them, rather than blindly
-/// regenerating and risking the same drift again — same reasoning as
-/// `remediation_addendum` naming the specific missed problem instead of
-/// just saying "try again".
-fn grounding_correction_addendum(correction: Option<&[String]>) -> String {
-    match correction {
-        None | Some([]) => String::new(),
-        Some(claims) => format!(
-            " GROUNDING CORRECTION: a prior attempt at this exact move stated \
-             claims that SOURCES below do NOT support: {}. Rewrite this move \
-             so every substantive factual, mechanistic, or numeric claim is \
-             either actually stated in SOURCES or removed/reframed as general \
-             framing — do not restate any of the flagged claims as fact, and \
-             do not invent a citation to cover one.",
-            claims.join("; ")
-        ),
-    }
-}
-
 fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
     let base: String = match move_type {
         MoveType::Explain => "Write short, atomic explanatory prose for this concept. Do \
@@ -399,7 +342,7 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         String::new()
     };
     format!(
-        "{base}{integration}{interleave}{}{}{}{}{}{}",
+        "{base}{integration}{interleave}{}{}{}{}{}",
         review_addendum(ctx.review_mode, move_type),
         scope_addendum(
             ctx.parent_title.as_deref(),
@@ -409,7 +352,6 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
         chapter_close_addendum(ctx.chapter_close, move_type),
         remediation_addendum(ctx, move_type),
         fade_addendum(ctx.scaffolding),
-        grounding_correction_addendum(ctx.grounding_correction.as_deref()),
     )
 }
 
@@ -847,33 +789,6 @@ mod tests {
         assert!(test_sys.contains("DIFFERENT instance"));
     }
 
-    /// §S21: `grounding_correction_addendum` only fires when the caller set
-    /// `grounding_correction` to a non-empty list — a normal first-pass move
-    /// (`None`, the overwhelming common case) and a degenerate `Some(vec![])`
-    /// must both see none of this framing, same withhold convention as
-    /// `remediation_addendum`.
-    #[test]
-    fn grounding_correction_addendum_only_fires_with_flagged_claims() {
-        let bare = MoveContext::default();
-        let sys = &generate_move_streamed(MoveType::Explain, &bare)[0].content;
-        assert!(!sys.contains("GROUNDING CORRECTION"));
-
-        let empty = MoveContext {
-            grounding_correction: Some(Vec::new()),
-            ..Default::default()
-        };
-        let sys = &generate_move_streamed(MoveType::Explain, &empty)[0].content;
-        assert!(!sys.contains("GROUNDING CORRECTION"));
-
-        let flagged = MoveContext {
-            grounding_correction: Some(vec!["photosystem II makes plastocyanin".to_string()]),
-            ..Default::default()
-        };
-        let sys = &generate_move_streamed(MoveType::Explain, &flagged)[0].content;
-        assert!(sys.contains("GROUNDING CORRECTION"));
-        assert!(sys.contains("photosystem II makes plastocyanin"));
-    }
-
     /// S33: a `revisit` move is told to reactivate, not re-teach — the
     /// scheduled-review move must be active retrieval, not a rerun of the
     /// lesson (the failure that motivated the template: an L1-chosen
@@ -887,27 +802,30 @@ mod tests {
         assert!(!sys.contains("counter-argument"));
     }
 
-    /// §S21: the verification call's own prompt names both SOURCE and
-    /// GENERATED distinctly and asks for the flat unsupported-claims JSON
-    /// shape — this is a SEPARATE structured call from a move's own
-    /// generation, so it must not accidentally reuse the Move JSON
-    /// envelope's field names. With `with_citations` (the normal grounded
-    /// path) it must also state the block/passage numbering contract and
-    /// the b/s/loc citation shape; without it (grounding that parsed to no
-    /// passages) it must ask for citations to be omitted entirely.
+    /// §S21 (lean): the adjudication call's prompt is per-suspect-paragraph —
+    /// each suspect arrives with its own SOURCE PAGE, numbered by its block
+    /// number, and the JSON shape is the flat `{"unsupported":[N]}` list,
+    /// never the old Move-envelope or citation-mapping field names.
     #[test]
-    fn verify_grounding_prompt_names_source_and_generated_distinctly() {
-        let messages =
-            verify_grounding("Plants use chlorophyll.", "<p>Plants use magic.</p>", false);
-        assert!(messages[0].content.contains("unsupported_claims"));
-        assert!(messages[1].content.contains("Plants use chlorophyll."));
-        assert!(messages[1].content.contains("Plants use magic."));
-        assert!(!messages[0].content.contains("ASSIGN CITATIONS"));
-
-        let citing = verify_grounding("[S1 | p:3] Source\nChlorophyll.", "[1] <p>Magic.</p>", true);
-        assert!(citing[0].content.contains("ASSIGN CITATIONS"));
-        assert!(citing[0].content.contains("\"b\""));
-        assert!(citing[1].content.contains("[S1 | p:3] Source"));
-        assert!(citing[1].content.contains("[1] <p>Magic.</p>"));
+    fn verify_support_prompt_pairs_each_paragraph_with_its_page() {
+        let messages = verify_support(&[
+            (
+                2,
+                "Plants use chlorophyll.",
+                "Chlorophyll is the green pigment.",
+            ),
+            (5, "Plants use magic.", "Wands and spells."),
+        ]);
+        assert!(messages[0].content.contains("\"unsupported\""));
+        assert!(!messages[0].content.contains("unsupported_claims"));
+        assert!(!messages[0].content.contains("citations"));
+        let user = &messages[1].content;
+        assert!(user.contains("PARAGRAPH [2]:"));
+        assert!(user.contains("Plants use chlorophyll."));
+        assert!(user.contains("SOURCE PAGE for [2]"));
+        assert!(user.contains("Chlorophyll is the green pigment."));
+        assert!(user.contains("PARAGRAPH [5]:"));
+        assert!(user.contains("Wands and spells."));
+        assert!(user.find("PARAGRAPH [2]:") < user.find("PARAGRAPH [5]:"));
     }
 }

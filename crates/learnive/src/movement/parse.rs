@@ -108,51 +108,30 @@ pub fn generated_move(move_type: MoveType, text: &str) -> Result<GeneratedMove, 
 }
 
 #[derive(Deserialize)]
-struct RawGroundingVerdict {
-    /// Claim text the model quotes/paraphrases from GENERATED, one entry
-    /// per unsupported claim (`movement::grounding`'s verification call).
-    /// An empty (or omitted) array is the "fully supported" verdict — there
-    /// is no separate boolean to fall out of sync with the list.
+struct RawSupportVerdict {
+    /// The 1-based numbers of the suspect PARAGRAPHS the model judged NOT
+    /// supported by their cited page (`movement::grounding`'s lean
+    /// adjudication call, 2026-09-05). An empty (or omitted) array is the
+    /// "every paragraph checks out" verdict — there is no separate boolean
+    /// to fall out of sync with the list.
     #[serde(default)]
-    unsupported_claims: Vec<String>,
-    /// The citation mapping (2026-09-05: the same call assigns citations —
-    /// the model's own vocabulary no longer contains them). Empty or
-    /// omitted when nothing cited / the caller asked for verification only.
-    #[serde(default)]
-    citations: Vec<RawCitation>,
+    unsupported: Vec<usize>,
 }
 
-/// One block→passage citation from the verification call's mapping:
-/// `b` is GENERATED's 1-based block number (`learnive_core::numbered_blocks`),
-/// `s` the 1-based SOURCE passage number, `loc` the passage's own locator
-/// copied back. All three are validated by the caller before anything is
-/// inserted — a citation can only land on a source the server itself
-/// selected.
-#[derive(Debug, Deserialize)]
-pub struct RawCitation {
-    pub b: usize,
-    pub s: usize,
-    pub loc: String,
-}
-
-/// The grounding-verification call's full verdict (§S21,
-/// `movement::grounding`): the unsupported-claims list plus the citation
-/// mapping.
+/// The grounding adjudication call's verdict (§S21 lean,
+/// `movement::grounding`): which suspect paragraphs failed support.
 #[derive(Debug)]
-pub struct GroundingVerdict {
-    pub unsupported_claims: Vec<String>,
-    pub citations: Vec<RawCitation>,
+pub struct SupportVerdict {
+    pub unsupported: Vec<usize>,
 }
 
-/// Parses the grounding-verification call's verdict (§S21,
-/// `movement::grounding`). Empty `unsupported_claims` means every claim
-/// checked out; empty `citations` means nothing was mapped.
-pub fn grounding_verdict(text: &str) -> Result<GroundingVerdict, EngineError> {
+/// Parses the adjudication call's verdict (§S21 lean). Empty `unsupported`
+/// means every suspect paragraph checked out.
+pub fn support_verdict(text: &str) -> Result<SupportVerdict, EngineError> {
     let json = extract_json(text).ok_or_else(|| EngineError::Parse("no JSON".to_string()))?;
-    let raw: RawGroundingVerdict =
+    let raw: RawSupportVerdict =
         serde_json::from_str(json).map_err(|e| EngineError::Parse(e.to_string()))?;
-    Ok(GroundingVerdict {
-        unsupported_claims: raw.unsupported_claims,
-        citations: raw.citations,
+    Ok(SupportVerdict {
+        unsupported: raw.unsupported,
     })
 }

@@ -794,6 +794,11 @@ pub(super) struct NodePrep {
     /// Retrieved source passages formatted for the prompt (§10). Empty when the
     /// index has nothing relevant yet (acquisition may still be running, §14).
     pub(super) grounding: String,
+    /// The §S21-lean mechanical-citation inputs for [`Self::grounding`]
+    /// (`movement::grounding::GroundingIndex`) — `None` when the grounding
+    /// came from the similarity fallback rather than a chapter page window,
+    /// in which case the gate inserts no citations and checks nothing.
+    pub(super) grounding_index: Option<crate::movement::grounding::GroundingIndex>,
     /// The document's current objective text (§S4) — empty for a pre-S4
     /// document with no `objective.json`, same graceful-degradation
     /// convention as `grounding`.
@@ -1513,8 +1518,8 @@ pub(super) async fn prepare(
         "selecting passages from the source…",
         "selecionando trechos da fonte…",
     ));
-    let grounding = match ground_node(state, &outline, &item).await {
-        Ok(text) => text,
+    let grounded = match ground_node(state, &outline, &item).await {
+        Ok(sel) => sel,
         Err(reason) => {
             // S27m minimum floor (PLAN.md, 2026-08-29): nothing is persisted
             // to the frozen content layer — `prepare` returning `Err` here
@@ -1638,7 +1643,8 @@ pub(super) async fn prepare(
         title: item.title,
         context,
         node_id: item.id,
-        grounding,
+        grounding: grounded.text,
+        grounding_index: grounded.index,
         objective,
         children_titles,
         review_mode,
@@ -2723,13 +2729,27 @@ async fn mark_chapter_expanded(
 /// documents, or a spawned sub-node under a plain `Node` parent) is
 /// deliberately untouched: falls through to the old unscoped-similarity
 /// [`grounding_for`], exactly as it behaved before S27m.
+/// What [`ground_node`] resolved for one node: the formatted passage text
+/// the move prompts see, plus — when that text came from a chapter's page
+/// window — everything the §S21-lean mechanical citer needs to match blocks
+/// against the SAME book's page index (`movement::grounding`). `index` is
+/// `None` on the similarity-fallback path (no source pointer), where the
+/// gate then inserts no citations and checks nothing.
+pub(super) struct GroundedSelection {
+    pub(super) text: String,
+    pub(super) index: Option<crate::movement::grounding::GroundingIndex>,
+}
+
 async fn ground_node(
     state: &AppState,
     outline: &Outline,
     item: &OutlineItem,
-) -> Result<String, String> {
+) -> Result<GroundedSelection, String> {
     let Some(ptr) = engine::resolve_grounding_source(outline, item) else {
-        return Ok(grounding_for(state, &item.title).await);
+        return Ok(GroundedSelection {
+            text: grounding_for(state, &item.title).await,
+            index: None,
+        });
     };
 
     let expected = source::ExpectedItem {
@@ -2801,16 +2821,24 @@ async fn ground_node(
         ));
     }
 
-    Ok(pages
-        .iter()
-        .map(|(page, text)| {
-            format!(
-                "[id: {} | loc: p:{page} | {}]\n{}",
-                hash, expected.title, text
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+    Ok(GroundedSelection {
+        text: pages
+            .iter()
+            .map(|(page, text)| {
+                format!(
+                    "[id: {} | loc: p:{page} | {}]\n{}",
+                    hash, expected.title, text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        index: Some(crate::movement::grounding::GroundingIndex {
+            embedder,
+            dir: index_cache_dir,
+            content_hash: hash,
+            page_range,
+        }),
+    })
 }
 
 /// Retrieves grounding passages for a concept and formats them so the model can
