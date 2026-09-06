@@ -3,7 +3,12 @@
 Vendored copy of `pdf-extract` 0.12.0 (upstream:
 https://github.com/jrmuizel/pdf-extract, MIT), pinned via
 `[patch.crates-io]` in the workspace root `Cargo.toml`. Source is otherwise
-untouched; the only change is in `src/lib.rs`, `Processor::process_stream`.
+untouched but for two things: the bugfix in `src/lib.rs`
+(`Processor::process_stream`, below) and a mechanical warnings cleanup
+(2026-09-06, no behavior change — `_` prefixes on bindings only read by the
+compiled-out `dlog!`, explicit lifetimes, `#[allow(dead_code)]` on
+upstream-parsed data shapes this crate's paths never read, `NAMES` const
+renamed to convention).
 
 ## The bug
 

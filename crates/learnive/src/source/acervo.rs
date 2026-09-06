@@ -1946,7 +1946,7 @@ mod tests {
         let (tmp, lib) = place_in_library(&mut doc, "four.pdf");
         let cache_dir = index_dir(&tmp);
         let hash = content_hash(&fs::read(lib.root().join("four.pdf")).unwrap());
-        let pdf = read_pdf(&lib.root().join("four.pdf")).unwrap();
+        let pdf = read_pdf(lib.root().join("four.pdf")).unwrap();
         build_index_cache(&pdf, &hash, &cache_dir, &Embedder::Mock).expect("build cache");
 
         // Anchored mid-range (page 3): page 3's text comes first, then page

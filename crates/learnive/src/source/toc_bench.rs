@@ -52,7 +52,11 @@ mod tests {
     // part of S27o (2026-08-31) — this bench now calls that copy instead of
     // keeping its own, so the two can never silently drift apart again.
 
-    fn flatten(entries: &[OutlineEntry], depth: usize, out: &mut Vec<(usize, String, usize)>) {
+    /// One flattened TOC entry: `(depth, title, page)` — the shape the
+    /// similarity matcher and the bench's preload both speak.
+    type FlatToc = Vec<(usize, String, usize)>;
+
+    fn flatten(entries: &[OutlineEntry], depth: usize, out: &mut FlatToc) {
         for e in entries {
             out.push((depth, e.title.clone(), e.page));
             flatten(&e.children, depth + 1, out);
@@ -254,7 +258,7 @@ mod tests {
         let ai = crate::api::build_ai(&config, &secret);
 
         // Preload every library book's TOC once (local, no API).
-        let mut tocs: Vec<(String, Vec<(usize, String, usize)>)> = Vec::new();
+        let mut tocs: Vec<(String, FlatToc)> = Vec::new();
         for (name, path) in library_pdfs() {
             let outline = crate::source::pdf::read_outline_for_test(&path);
             let mut flat = Vec::new();
