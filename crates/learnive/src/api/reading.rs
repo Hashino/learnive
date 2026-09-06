@@ -2836,7 +2836,6 @@ async fn ground_node(
             embedder,
             dir: index_cache_dir,
             content_hash: hash,
-            page_range,
         }),
     })
 }

@@ -83,7 +83,7 @@ pub mod toc_confirm;
 pub use acervo::{
     AcervoReport, CachedChunk, CandidateMatch, ExpectedItem, IdentityCheck, IndexCheck, ItemReport,
     MatchConfidence, PageMapCheck, PresenceCheck, TextLayerCheck, TocCheck, build_index_cache,
-    resolve_matched_filename, search_index_cache, validate_acervo,
+    load_index_cache, resolve_matched_filename, search_index_cache, validate_acervo,
 };
 pub use bibliography::{
     BibliographyCache, BibliographyClient, Catalog, Identifier, ProposedItem, VerificationOutcome,

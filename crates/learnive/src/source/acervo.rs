@@ -791,6 +791,23 @@ pub fn build_index_cache(
     Ok(path)
 }
 
+/// Reads one PDF's page-index cache back into memory (`build_index_cache`'s
+/// on-disk shape). The one read/parse both cache consumers share —
+/// `search_index_cache` (ranked similarity) and the grounding gate's
+/// mechanical citer (whole-pool scan over an allowed page set) — so the
+/// file format is parsed in exactly one place. Errors only on I/O or
+/// corruption; an empty/missing cache is the caller's job to have ruled
+/// out via [`IndexCheck`] first.
+pub fn load_index_cache(
+    index_cache_dir: &Path,
+    content_hash: &str,
+) -> std::io::Result<Vec<CachedChunk>> {
+    let path = index_cache_dir.join(format!("{content_hash}.json"));
+    let json = fs::read(&path)?;
+    serde_json::from_slice(&json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Reads one PDF's cache back and ranks its chunks by cosine similarity to
 /// `query`, page number carried along (S27m piece 2, PLAN.md). Scoped to
 /// exactly this source by construction — the cache file already is one
@@ -817,10 +834,7 @@ pub fn search_index_cache(
     k: usize,
     page_range: Option<(usize, Option<usize>)>,
 ) -> std::io::Result<Vec<(usize, String, f32)>> {
-    let path = index_cache_dir.join(format!("{content_hash}.json"));
-    let json = fs::read(&path)?;
-    let cached: Vec<CachedChunk> = serde_json::from_slice(&json)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let cached = load_index_cache(index_cache_dir, content_hash)?;
     let pool: Vec<CachedChunk> = match page_range {
         Some((start, end)) => {
             let scoped: Vec<CachedChunk> = cached
@@ -877,10 +891,7 @@ pub fn pages_text_from_cache(
     anchor_page: Option<usize>,
     max_chars: usize,
 ) -> std::io::Result<Vec<(usize, String)>> {
-    let path = index_cache_dir.join(format!("{content_hash}.json"));
-    let json = fs::read(&path)?;
-    let cached: Vec<CachedChunk> = serde_json::from_slice(&json)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let cached = load_index_cache(index_cache_dir, content_hash)?;
     let pool: Vec<CachedChunk> = match page_range {
         Some((start, end)) => {
             let scoped: Vec<CachedChunk> = cached

@@ -6,12 +6,15 @@
 //!    arithmetic over the index): after a grounded move's content is fully
 //!    generated, each text-bearing block is embedded with the LOCAL offline
 //!    embedder (`retrieval::Embedder`, model2vec — no network, no 429, no
-//!    truncation) and matched by cosine against the SAME book's page-index
-//!    cache the grounding text was read from. The best page becomes the
-//!    block's `<cite data-source-id data-locator>` — inserted by
-//!    [`learnive_core::insert_block_citations`], so by construction a
-//!    citation can only point at a page the server's own index selected,
-//!    never one a model invented.
+//!    truncation) and matched by cosine against the grounding selection's
+//!    OWN pages — the same page set the move's grounding text was read
+//!    from, never a wider structural chapter range (a sparse TOC can leave
+//!    that range hundreds of pages past the chapter's real end; live
+//!    2026-09-05, blocks cited pages the model never read). The best page
+//!    becomes the block's `<cite data-source-id data-locator>` — inserted
+//!    by [`learnive_core::insert_block_citations`], so by construction a
+//!    citation can only point at a page the server itself selected AND the
+//!    move actually read, never one a model invented.
 //! 2. **Only the doubtful blocks reach the model.** A block whose best
 //!    similarity falls below [`MECHANICAL_FLOOR`] (its top page may be
 //!    coincidence, not derivation) goes into ONE small adjudication call
@@ -62,16 +65,22 @@ pub const MECHANICAL_FLOOR: f32 = 0.5;
 const MIN_BLOCK_CHARS: usize = 40;
 
 /// What the mechanical citer needs to match blocks against a book's page
-/// index: the same cache dir / content hash / page window the node's
-/// grounding text was read from (`api::reading::ground_node` owns all three
-/// and threads them through `prepare`). `Embedder` is the local offline
-/// embedder — cloning this struct is cheap.
+/// index: the same cache dir / content hash the node's grounding text was
+/// read from (`api::reading::ground_node` owns both and threads them
+/// through `prepare`). The page pool itself is NOT carried here on purpose:
+/// it is the grounding selection's own page set, parsed from
+/// `ctx.grounding`'s passage headers at gate time — a citation must point
+/// at a page the model actually read, which is a narrower (and more honest)
+/// contract than any structural chapter range (live 2026-09-05: sparse TOC
+/// confirmation left the structural range hundreds of pages past the
+/// chapter's real end, and blocks cited pages the grounding never
+/// contained). `Embedder` is the local offline embedder — cloning this
+/// struct is cheap.
 #[derive(Clone)]
 pub struct GroundingIndex {
     pub embedder: Embedder,
     pub dir: std::path::PathBuf,
     pub content_hash: String,
-    pub page_range: Option<(usize, Option<usize>)>,
 }
 
 impl std::fmt::Debug for GroundingIndex {
@@ -79,7 +88,6 @@ impl std::fmt::Debug for GroundingIndex {
         f.debug_struct("GroundingIndex")
             .field("dir", &self.dir)
             .field("content_hash", &self.content_hash)
-            .field("page_range", &self.page_range)
             .finish_non_exhaustive()
     }
 }
@@ -176,10 +184,28 @@ pub async fn verify(
     let blocks = learnive_core::block_texts(&generated.html);
     let passages = parse_passages(&ctx.grounding);
 
+    // The citer's pool is EXACTLY the grounding selection's own pages — the
+    // `[id: … | loc: p:N]` headers above — never a wider structural range:
+    // a citation must point at a page the model actually read. (Live
+    // 2026-09-05: a sparsely confirmed TOC left the structural chapter range
+    // hundreds of pages past the chapter's real end, and blocks cited pages
+    // the grounding text never contained.)
+    let allowed: std::collections::HashSet<usize> = passages
+        .iter()
+        .filter_map(|p| p.loc.strip_prefix("p:").and_then(|n| n.parse().ok()))
+        .collect();
+    let Ok(chunks) = crate::source::load_index_cache(&index.dir, &index.content_hash) else {
+        return generated;
+    };
+    let pool: Vec<&crate::source::CachedChunk> = chunks
+        .iter()
+        .filter(|c| allowed.contains(&c.page))
+        .collect();
+
     // Layer 1 — mechanical citation: embed each text-bearing block, cite its
-    // best-matching page. Every score is kept for the stderr diagnostic, so
-    // MECHANICAL_FLOOR can be tuned against real distributions instead of
-    // guesses.
+    // best-matching page within the pool. Every score is kept for the stderr
+    // diagnostic, so MECHANICAL_FLOOR can be tuned against real distributions
+    // instead of guesses.
     let mut cites: Vec<(usize, String, String, bool)> = Vec::new();
     let mut suspects: Vec<Suspect> = Vec::new();
     let mut scores: Vec<String> = Vec::new();
@@ -188,17 +214,12 @@ pub async fn verify(
             continue;
         }
         let block_no = i + 1;
-        let Ok(mut hits) = crate::source::search_index_cache(
-            &index.dir,
-            &index.content_hash,
-            &index.embedder,
-            text,
-            1,
-            index.page_range,
-        ) else {
-            continue;
-        };
-        let Some((page, _, score)) = hits.pop() else {
+        let query = index.embedder.embed(text);
+        let Some((page, score)) = pool
+            .iter()
+            .map(|c| (c.page, crate::retrieval::cosine(&query, &c.vector)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        else {
             continue;
         };
         let loc = format!("p:{page}");
@@ -361,7 +382,6 @@ mod tests {
                 embedder: Embedder::Mock,
                 dir: dir.path().to_path_buf(),
                 content_hash: "hash1".to_string(),
-                page_range: None,
             }),
             ..Default::default()
         };
@@ -490,6 +510,47 @@ mod tests {
             "trusted block must keep its clean cite: {}",
             result.html
         );
+    }
+
+    /// A block whose best match lives on a page OUTSIDE the grounding
+    /// selection must cite the best IN-selection page instead: the citer's
+    /// pool is the selection itself, never a wider index or structural
+    /// range (live 2026-09-05 — a sparse TOC left the structural range
+    /// hundreds of pages past the chapter's real end, and blocks cited
+    /// pages the move never read).
+    #[tokio::test]
+    async fn citations_cannot_escape_the_grounding_selection() {
+        let a_text =
+            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
+        let b_text = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
+        let (_dir, ctx) =
+            grounded_fixture(&[("1", a_text), ("2", "The stroma surrounds the grana.")]);
+        // Sneak page 3 into the INDEX cache only — same content hash — with
+        // text that matches block B perfectly. The selection (and so the
+        // allowed pool) still holds only pages 1-2.
+        let index = ctx.grounding_index.as_ref().unwrap();
+        let cache_path = index.dir.join(format!("{}.json", index.content_hash));
+        let mut chunks: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+        chunks.push(serde_json::json!({
+            "page": 3,
+            "text": b_text,
+            "vector": Embedder::Mock.embed(b_text),
+        }));
+        std::fs::write(&cache_path, serde_json::to_string(&chunks).unwrap()).unwrap();
+
+        let ai = mock_ai(r#"{"unsupported":[]}"#);
+        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(
+            !result.html.contains("p:3"),
+            "a cite must never point outside the selection: {}",
+            result.html
+        );
+        // Both blocks still cited: B's best IN-selection page is a poor
+        // match (suspect), the adjudication clears it, the cite stays clean.
+        assert_eq!(result.html.matches("<cite").count(), 2, "{}", result.html);
+        assert!(!result.html.contains("data-unverified"), "{}", result.html);
     }
 
     /// The adjudication prompt pairs each suspect with the text of the page
