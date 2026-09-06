@@ -927,13 +927,24 @@ pub fn pages_text_from_cache(
     Ok(pages)
 }
 
-/// Char ceiling on [`pages_text_from_cache`] — ~4k tokens of source text,
-/// the middle option the user picked (2026-09-04) between "top-4 chunks as
-/// always" (4.5% of a real chapter — the false-positive banner) and "the
-/// whole chapter" (a 50k+ char prompt that a free tier's ~8k TPM ceiling
-/// throttles into 429s). Deliberately a constant, not config: it is a
-/// model-economics knob, revisited when the default free pairing changes.
-pub const SECTION_TEXT_CHAR_BUDGET: usize = 16_000;
+/// Char ceiling on [`pages_text_from_cache`] — the middle option the user
+/// picked (2026-09-04) between "top-4 chunks as always" (4.5% of a real
+/// chapter — the false-positive banner) and "the whole chapter" (a 50k+
+/// char prompt that a free tier's ~8k TPM ceiling throttles into 429s).
+/// Deliberately a constant, not config: it is a model-economics knob,
+/// revisited when the default free pairing changes.
+///
+/// Sized by measurement, twice. The 2026-09-04 value (16,000) assumed
+/// ~4 chars/token; the real free-tier pairing tokenizes denser — measured
+/// 2026-09-06 (Groq `gpt-oss-20b` via OpenCode Zen, 8k TPM): a structured
+/// `test`-move prompt carrying a 16k-char window totalled 25,610 chars and
+/// the provider refused it with `Requested 8,830-9,205` — over the 8,000
+/// ceiling **per request**, i.e. unfixable by backoff. 10,000 chars keeps
+/// the heaviest call (structured move prompt + completion allowance)
+/// under the ceiling with margin. The gate (`movement::grounding`) turns
+/// the thinner window into visible `data-unverified` suspects rather than
+/// silent drift: generation and check still see the SAME pages (§11.1).
+pub const SECTION_TEXT_CHAR_BUDGET: usize = 10_000;
 
 fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
     entries

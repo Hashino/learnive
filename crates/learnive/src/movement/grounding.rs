@@ -48,7 +48,7 @@
 
 use super::{EngineError, GeneratedMove, MoveContext, MoveType, parse, prompt, repair_messages};
 use crate::ai::{Ai, Tier};
-use crate::engine::collect;
+use crate::engine::collect_within;
 use crate::retrieval::Embedder;
 
 /// Best-similarity floor below which a block's top page match is treated as
@@ -58,6 +58,13 @@ use crate::retrieval::Embedder;
 /// tune this number against telemetry (same discipline as the retriever's
 /// own `min_score`, PLAN.md).
 pub const MECHANICAL_FLOOR: f32 = 0.5;
+
+/// Response ceiling for the adjudication call: the verdict is a tiny JSON
+/// array, but the cap must still absorb reasoning burn on the free tier
+/// (same precedent as `engine`'s `TOC_PAGE_MAX_TOKENS`/`CHAPTER_SPLIT_MAX_TOKENS`).
+/// Bounded so the TPM accounting that sizes `SECTION_TEXT_CHAR_BUDGET` can
+/// treat this call as small by construction.
+const ADJUDICATION_MAX_TOKENS: u32 = 1000;
 
 /// Blocks shorter than this get no citation and no check: a heading or a
 /// one-liner has no substantive claim to point a page at, and its embedding
@@ -321,12 +328,12 @@ async fn check(
     suspects: &[(usize, &str, &str)],
 ) -> Result<parse::SupportVerdict, EngineError> {
     let messages = prompt::verify_support(suspects);
-    let text = collect(ai, Tier::Fast, messages.clone()).await?;
+    let text = collect_within(ai, Tier::Fast, messages.clone(), ADJUDICATION_MAX_TOKENS).await?;
     if let Ok(verdict) = parse::support_verdict(&text) {
         return Ok(verdict);
     }
     let repair = repair_messages(messages, &text, "expected JSON {\"unsupported\":[...]}");
-    let text = collect(ai, Tier::Fast, repair).await?;
+    let text = collect_within(ai, Tier::Fast, repair, ADJUDICATION_MAX_TOKENS).await?;
     parse::support_verdict(&text)
 }
 

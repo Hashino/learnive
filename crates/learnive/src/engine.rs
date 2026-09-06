@@ -1118,6 +1118,19 @@ pub(crate) async fn collect(
     Ok(ai.complete(tier, messages).await?)
 }
 
+/// [`collect`] with an explicit response ceiling — same trade as
+/// `Ai::complete_within`, for the small structured calls whose budget the
+/// TPM math in `source::acervo::SECTION_TEXT_CHAR_BUDGET` has to be able to
+/// trust.
+pub(crate) async fn collect_within(
+    ai: &Ai,
+    tier: Tier,
+    messages: Vec<ChatMessage>,
+    max_tokens: u32,
+) -> Result<String, EngineError> {
+    Ok(ai.complete_within(tier, messages, Some(max_tokens)).await?)
+}
+
 /// Injects `data-exercise-id`/`data-rubric-id`/`data-block-id` into the first
 /// `<form>` (wrapping the exercise in one if there is none). The block id
 /// reuses `exercise_id` verbatim — no separate numbering scheme — so the
