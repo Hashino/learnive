@@ -225,20 +225,28 @@ pub fn propose_objective(topic: &str) -> Vec<ChatMessage> {
 /// the book's own confirmed table of contents (S27k) by lenient
 /// containment, the exact same "propose, then verify against reality"
 /// pattern S27d already uses for the book itself. An optional list of
-/// within-work chapters/sections the curriculum actually needs from this
-/// item, one object per entry — `{"number":"..." or null,"name":"..."}` —
-/// empty when the whole work is in scope. `number` is the chapter/section
-/// number AS YOU RECALL IT, however the book prints it (a bare "4", a
-/// two-level "4.10", or a deeper "2.2.1" — whatever hierarchy the real book
-/// actually uses); `null` when you aren't genuinely confident of it, since a
-/// wrong number is checked against the real book next and a confident-sounding
-/// wrong guess is worse than admitting you don't know. `name` is always
-/// required: a short plain-language name for the chapter/section (the real
-/// title if you know it, otherwise the subject it covers, e.g. "recursion in
-/// C") — this is what `source::match_chapter` falls back to whenever the
-/// number is absent or doesn't match anything in the real book (a different
-/// edition's numbering, or your guess was wrong), so name it as if number
-/// might not be there at all.
+/// within-work CHAPTERS the curriculum actually needs from this item, one
+/// object per entry — `{"number":"..." or null,"name":"..."}` — empty when
+/// the whole work is in scope. CHAPTERS only, never sub-sections: the unit
+/// below a chapter is derived structurally from the book's own table of
+/// contents at generation time (S33-2), so a section in the proposal would
+/// duplicate, not refine. `number` is the chapter's number AS THE BOOK
+/// PRINTS IT — a bare unit like "4", never a two-level "4.10" or deeper
+/// (when the objective needs a section inside a chapter, list that
+/// containing CHAPTER); `null` when you aren't genuinely confident of it,
+/// since a wrong number is checked against the real book next and a
+/// confident-sounding wrong guess is worse than admitting you don't know.
+/// `name` is always required: the chapter's real title as the book's table
+/// of contents prints it, or the subject the chapter covers, e.g. "recursion
+/// in C", when you know the section but not the chapter title — this is
+/// what `source::match_chapter` falls back to whenever the number is absent
+/// or doesn't match anything in the real book (a different edition's
+/// numbering, or your guess was wrong), so name it as if number might not
+/// be there at all. And across DIFFERENT works in the same list, never
+/// cover the same topic twice — each chapter carries a distinct slice of
+/// the path; a free model was observed proposing the same limits material
+/// as chapters of two different calculus books, redundant coverage the
+/// learner then reads twice.
 ///
 /// `rejected` names titles a prior round of this same cold start proposed
 /// that then failed S27d's existence verification (bounded one-round retry,
@@ -269,24 +277,31 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
          by the next step.\n\n\
          `chapters`: when the learner needs the WHOLE work, leave this an \
          empty array. When only PART of a work is actually in scope for \
-         this objective, list the specific chapters/sections needed, in the \
-         order they should be learned (a prerequisite path within the work — \
-         basics before the thing that depends on them). Each entry is \
+         this objective, list the specific CHAPTERS needed, in the order \
+         they should be learned (a prerequisite path within the work — \
+         basics before the thing that depends on them). CHAPTERS only — \
+         never sub-sections: a chapter is the unit this curriculum is \
+         built from, and if what the learner needs is one section inside a \
+         chapter, list the CHAPTER CONTAINING IT, not the section. Across \
+         DIFFERENT works in this list, never cover the same topic twice — \
+         if two works both cover a topic, keep that topic in exactly one \
+         of them (whichever suits the learner better) and leave it out of \
+         the other's `chapters`; redundant coverage makes the learner read \
+         the same material in two books. Each entry is \
          {\"number\":\"...\" or null,\"name\":\"...\"}: `number` is the \
-         chapter/section number exactly as you recall the real book \
-         printing it — a bare \"4\", a two-level \"4.10\", or a deeper \
-         \"2.2.1\", whatever depth the real book actually uses — or `null` \
-         when you are not genuinely confident of it (a wrong number is \
-         checked against the real book next, so a confident-sounding wrong \
-         guess is worse than admitting you don't know). `name` is always \
-         required: a short plain-language name for the chapter/section (the \
-         real title when you know it, otherwise the subject it covers, e.g. \
-         \"recursion in C\") — this is what resolution falls back to \
-         whenever `number` is absent or turns out wrong, so name it as if \
-         `number` might not be there at all. Do not pad this with a full \
-         chapter-by-chapter syllabus either — only the chapters this \
-         specific objective actually needs from this work, nothing \
-         broader.\n\n\
+         chapter's number exactly as the real book prints it — a bare unit \
+         like \"4\" or \"12\", never a two-level \"4.10\" or deeper — or \
+         `null` when you are not genuinely confident of it (a wrong number \
+         is checked against the real book next, so a confident-sounding \
+         wrong guess is worse than admitting you don't know). `name` is \
+         always required: the chapter's real title as the book's own table \
+         of contents prints it (or the subject the chapter covers, e.g. \
+         \"recursion in C\", when you know the section but not the chapter \
+         title) — this is what resolution falls back to whenever `number` \
+         is absent or turns out wrong, so name it as if `number` might not \
+         be there at all. Do not pad this with a full chapter-by-chapter \
+         syllabus either — only the chapters this specific objective \
+         actually needs from this work, nothing broader.\n\n\
          Err toward INCLUDING a foundational work whenever you are unsure \
          the learner already has it: this list is a proposal, not a \
          commitment — the learner reviews it themselves and marks each \
@@ -334,7 +349,7 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
         )),
         ChatMessage::assistant(
             r#"[{"title":"Pré-Cálculo","authors":["Iezzi, Gelson","Murakami, Carlos"],"year":2013,"edition":"9","identifier":null,"kind":"book","chapters":[]},
-                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","chapters":[{"number":"2.2","name":"O limite de uma função"},{"number":"2.3","name":"Calculando limites usando as propriedades dos limites"}]}]"#,
+                {"title":"Cálculo, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","chapters":[{"number":"2","name":"Limits and Derivatives"}]}]"#,
         ),
         ChatMessage::user(request(
             "recursion in C",
@@ -342,13 +357,13 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
         )),
         ChatMessage::assistant(
             // Deliberately mixes confidence levels: a null number for a
-            // chapter the model isn't sure of, a top-level number for one it
-            // is, and — the exact K&R 2nd ed. counter-example this whole
-            // redesign is built around — recursion named at SECTION
-            // granularity ("4.10") inside a chapter ("4") whose own title
-            // never says "recursion", demonstrating why `name` always
-            // carries real information rather than just echoing the number.
-            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":null,"name":"basic C syntax and control flow"},{"number":"2","name":"Types, Operators, and Expressions"},{"number":"4","name":"Functions and Program Structure"},{"number":"4.10","name":"Recursion"}]}]"#,
+            // chapter the model isn't sure of, numbered chapters elsewhere.
+            // Recursion lives at section 4.10 in K&R 2nd ed., whose chapter
+            // title never says "recursion" — the entry names the CONTAINING
+            // chapter, demonstrating both the chapters-only contract and
+            // why `name` carries real information rather than just echoing
+            // the number.
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W.","Ritchie, Dennis M."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":null,"name":"basic C syntax and control flow"},{"number":"2","name":"Types, Operators, and Expressions"},{"number":"4","name":"Functions and Program Structure"}]}]"#,
         ),
         ChatMessage::user(request(topic, objective)),
     ]

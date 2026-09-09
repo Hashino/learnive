@@ -159,10 +159,12 @@ pub struct OutlineItem {
 /// plausible and will reappear, and a second same-day revision on top of
 /// that: the model no longer proposes a bare subject string, it proposes a
 /// structured `{number, name}` pair). `engine::prompt::propose_outline`'s
-/// `chapters` field lets the model name within-work subjects the objective
-/// actually needs — each carrying an optional hierarchical `number` (e.g.
-/// `"4.10"`) alongside the `name` — and `parse::outline_tree` turns each
-/// into a `Chapter` child. What's still true from the reasoning this
+/// `chapters` field lets the model name the within-work chapters the
+/// objective actually needs — each carrying an optional bare chapter
+/// `number` (e.g. `"4"`; sections are never proposed, the contract is
+/// chapters-only and `parse::outline_tree` promotes any section-shaped
+/// number that slips through) alongside the `name` — and
+/// `parse::outline_tree` turns each into a `Chapter` child. What's still true from the reasoning this
 /// comment used to make — a chapter can only be VERIFIED against a real PDF
 /// table of contents, not a bibliographic catalog — is why `Chapter` still
 /// isn't confirmed structure at proposal time: the model's `number`/`name`
@@ -782,8 +784,11 @@ pub struct ProposedOutlineNode {
     /// alone.
     #[serde(default)]
     pub item_type: OutlineItemType,
-    /// The proposed chapter/section NUMBER (S27g, revised 2026-08-30) as the
-    /// model recalled it — e.g. `"4"`, `"4.10"`, `"2.2.1"` — `None` for a
+    /// The proposed chapter NUMBER (S27g, revised 2026-08-30; chapters-only
+    /// contract 2026-09-06) as the model recalled it — a bare unit like
+    /// `"4"`, never a section-shaped `"4.10"` (the prompt forbids it and
+    /// `parse::outline_tree` promotes any that slip through by truncating at
+    /// the first '.') — `None` for a
     /// `Book`/`Article` (only a `Chapter` child ever carries one) or for a
     /// `Chapter` the model wasn't confident enough about to number. Never
     /// treated as verified structure on its own: `source::match_chapter`
@@ -1639,16 +1644,17 @@ mod tests {
     }
 
     /// S27g (introduced 2026-08-29 as `topics`, reversed to number+name
-    /// 2026-08-30): a non-empty `chapters` array becomes `Chapter`-typed
-    /// `children`, each carrying `number` on `chapter_number` and `name` as
-    /// its own `title`, with no bibliography of its own (it inherits the
-    /// parent's, `resolve_grounding_source`) — a blank `name` is dropped
-    /// rather than materialized as an empty-titled chapter, and a missing or
-    /// blank `number` becomes `None`, never an empty string.
+    /// 2026-08-30; chapters-only contract 2026-09-06): a non-empty
+    /// `chapters` array becomes `Chapter`-typed children, each carrying
+    /// `number` on `chapter_number` and `name` as its own `title`, with no
+    /// bibliography of its own (it inherits the parent's,
+    /// `resolve_grounding_source`) — a blank `name` is dropped rather than
+    /// materialized as an empty-titled chapter, and a missing or blank
+    /// `number` becomes `None`, never an empty string.
     #[test]
     fn parse_outline_tree_chapters_become_chapter_children() {
         let nodes = parse::outline_tree(
-            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":"4","name":"functions in C"},{"number":"4.10","name":"recursion in C"},{"number":"  ","name":"  "}]},
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":"4","name":"functions in C"},{"number":"2.2.1","name":"recursion in C"},{"number":"  ","name":"  "}]},
                 {"title":"Calculus, Volume 1","authors":["Stewart, James"],"year":2015,"edition":"8","identifier":null,"kind":"book","chapters":[]}]"#,
         )
         .unwrap();
@@ -1660,12 +1666,38 @@ mod tests {
         assert_eq!(nodes[0].children[0].item_type, OutlineItemType::Chapter);
         assert_eq!(nodes[0].children[0].chapter_number.as_deref(), Some("4"));
         assert!(nodes[0].children[0].bibliography.is_none());
+        // The model slipped a section-shaped "2.2.1" through despite the
+        // chapters-only contract; promotion truncates at the first '.' and
+        // keeps the name, so resolution still lands on chapter 2.
         assert_eq!(nodes[0].children[1].title, "recursion in C");
-        assert_eq!(nodes[0].children[1].chapter_number.as_deref(), Some("4.10"));
+        assert_eq!(nodes[0].children[1].chapter_number.as_deref(), Some("2"));
 
         // An empty `chapters` array materializes no children at all — the
         // "whole work is in scope" case stays exactly like before S27g.
         assert!(nodes[1].children.is_empty());
+    }
+
+    /// Chapters-only enforcement, mechanical half (2026-09-06): after
+    /// promotion, two chapter proposals of the SAME book that collapse onto
+    /// the same number are the same chapter proposed twice — first entry
+    /// wins, the duplicate is dropped rather than materialized as two nodes
+    /// over one chapter (logged to stderr, never silent). Numberless
+    /// entries dedup by name instead.
+    #[test]
+    fn parse_outline_tree_promotes_and_dedups_chapter_numbers() {
+        let nodes = parse::outline_tree(
+            r#"[{"title":"The C Programming Language","authors":["Kernighan, Brian W."],"year":1988,"edition":"2nd","identifier":null,"kind":"book","chapters":[{"number":"4","name":"Functions and Program Structure"},{"number":"4.10","name":"recursion"},{"number":null,"name":"Types, Operators, and Expressions"},{"number":"5","name":"types, operators, and expressions"}]}]"#,
+        )
+        .unwrap();
+        let kids = &nodes[0].children;
+        // "4.10" promoted onto the already-proposed "4" -> dropped; the "5"
+        // entry re-proposes the numberless one's name -> dropped. First
+        // entry wins both times, number or not.
+        assert_eq!(kids.len(), 2);
+        assert_eq!(kids[0].title, "Functions and Program Structure");
+        assert_eq!(kids[0].chapter_number.as_deref(), Some("4"));
+        assert_eq!(kids[1].title, "Types, Operators, and Expressions");
+        assert_eq!(kids[1].chapter_number.as_deref(), None);
     }
 
     #[test]

@@ -46,7 +46,14 @@ pub fn ask_decision(text: &str) -> Result<AskDecision, EngineError> {
 ///
 /// `chapters`, when non-empty, becomes `Chapter`-typed `children` under this
 /// item, each carrying the proposed `number` on [`ProposedOutlineNode::
-/// chapter_number`] and the proposed `name` as its own `title` — see
+/// chapter_number`] and the proposed `name` as its own `title`. The prompt's
+/// contract is CHAPTERS ONLY (never sub-sections) and no repeated topic
+/// across works, but a free model still slips — so `outline_tree` enforces
+/// the mechanical half of both rules with zero tokens
+/// ([`promote_chapter_number`] for section-shaped numbers, a first-entry-
+/// wins dedup within one book's `chapters`); cross-work coverage judgment
+/// stays with the model, there is no mechanical way to tell two books'
+/// limits chapters are the same material — see
 /// `OutlineItemType::Chapter`'s doc comment for why `Chapter` is the right
 /// type for an unresolved chapter proposal (not `Node`: it hasn't been
 /// matched against the real book's contents yet, and `Node` claims a
@@ -88,19 +95,43 @@ pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
                     SourceKind::Book => OutlineItemType::Book,
                     SourceKind::Article => OutlineItemType::Article,
                 };
-                let children = raw
-                    .chapters
-                    .into_iter()
-                    .filter(|c| !c.name.trim().is_empty())
-                    .map(|c| ProposedOutlineNode {
+                let mut children = Vec::new();
+                let mut seen_numbers = std::collections::HashSet::new();
+                let mut seen_names = std::collections::HashSet::new();
+                for c in raw.chapters {
+                    if c.name.trim().is_empty() {
+                        continue;
+                    }
+                    let number = promote_chapter_number(c.number);
+                    let name_key = c.name.trim().to_lowercase();
+                    // First entry wins — a duplicate is EITHER an equal
+                    // (promoted) number OR an equal name: the same book
+                    // proposing a chapter twice, under two numbers or under
+                    // number+nameless repeat, would materialize two nodes
+                    // over one chapter either way. Both sets update on every
+                    // entry, so a dropped one's number/name still counts for
+                    // the comparisons after it.
+                    let duplicate = match &number {
+                        Some(n) => !seen_numbers.insert(n.clone()),
+                        None => false,
+                    } || !seen_names.insert(name_key.clone());
+                    if duplicate {
+                        eprintln!(
+                            "outline: dropped duplicate chapter proposal {:?} (same book already proposes it)",
+                            c.name.trim()
+                        );
+                        continue;
+                    }
+                    seen_names.insert(name_key);
+                    children.push(ProposedOutlineNode {
                         title: c.name,
                         children: Vec::new(),
                         item_type: OutlineItemType::Chapter,
-                        chapter_number: c.number.filter(|n| !n.trim().is_empty()),
+                        chapter_number: number,
                         bibliography: None,
                         verification: None,
-                    })
-                    .collect();
+                    });
+                }
                 ProposedOutlineNode {
                     title: raw.item.title.clone(),
                     children,
@@ -112,6 +143,30 @@ pub fn outline_tree(text: &str) -> Option<Vec<ProposedOutlineNode>> {
             })
             .collect(),
     )
+}
+
+/// The prompt's contract is chapter-only numbers ("4"), but a free model
+/// still slips a section-shaped one through ("4.10", "2.2.1"). Promotion is
+/// deterministic and zero-token: truncate at the first '.', keep the proposed
+/// name (match_chapter resolves by number first, name fallback, so a promoted
+/// number plus the section's name still lands on the right chapter), and log
+/// the rewrite to stderr so QA sees it — never a silent rewrite. `None` in /
+/// `None` out; a blank string also stays `None`.
+fn promote_chapter_number(number: Option<String>) -> Option<String> {
+    let n = number?;
+    let n = n.trim();
+    if n.is_empty() {
+        return None;
+    }
+    match n.split_once('.') {
+        Some((head, _)) if !head.trim().is_empty() => {
+            eprintln!(
+                "outline: promoted section-shaped chapter number {n:?} -> {head:?} (chapters-only contract)"
+            );
+            Some(head.to_string())
+        }
+        _ => Some(n.to_string()),
+    }
 }
 
 /// Extracts the first JSON block (`{...}` or `[...]`) from the text, tolerating
