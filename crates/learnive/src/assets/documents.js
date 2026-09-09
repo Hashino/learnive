@@ -25,7 +25,7 @@ el("startForm").addEventListener("submit", async (e) => {
   const topic = el("topic").value.trim();
   if (!topic) return;
   pendingTopic = topic;
-  el("startForm").hidden = true;
+  el("startEntry").hidden = true;
   el("startStatus").textContent = t("status.objective");
   try {
     const objResp = await postJson("/api/objective/propose", { topic });
@@ -47,7 +47,7 @@ el("startForm").addEventListener("submit", async (e) => {
     renderOutlineTree();
     el("prereqConfirm").hidden = false;
   } catch (err) {
-    el("startForm").hidden = false;
+    el("startEntry").hidden = false;
     el("startStatus").innerHTML =
       '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
@@ -55,7 +55,7 @@ el("startForm").addEventListener("submit", async (e) => {
 
 el("prereqBackBtn").addEventListener("click", () => {
   el("prereqConfirm").hidden = true;
-  el("startForm").hidden = false;
+  el("startEntry").hidden = false;
 });
 
 el("prereqConfirmBtn").addEventListener("click", async () => {
@@ -205,6 +205,279 @@ async function createLivingDocument(objective_text, nodes) {
       '<span class="error">' + t("error.failed") + escapeHtml(String(err)) + "</span>";
   }
 }
+
+// --- Manual cold start (2026-09-09): pick from the library ------------
+// The second cold-start path: instead of the model proposing a reading
+// list, the learner picks works straight from the local library, orders
+// them, marks the skip/review/learn disposition, and the outline is
+// exactly that selection. Zero model calls anywhere in this path — even
+// the chapter lists come from data already on disk (a user-confirmed TOC
+// or the PDF's own bookmarks; `GET /api/library/{hash}/toc`).
+let manualLibrary = [];
+// hashes of the checked works, in click order (the initial study order)
+let manualSelected = [];
+// The confirmed selection as ConfirmedNode-shaped nodes (plus client-only
+// fields, stripped in `manualNodeToPayload` before the create call).
+let manualTree = [];
+
+el("manualStartBtn").addEventListener("click", async () => {
+  el("startEntry").hidden = true;
+  el("libraryPicker").hidden = false;
+  await loadLibrary();
+});
+
+async function loadLibrary() {
+  const list = el("libraryList");
+  list.innerHTML = '<li class="muted">' + escapeHtml(t("manual.loading")) + "</li>";
+  try {
+    const resp = await api("/api/library");
+    if (!resp.ok) throw new Error(await resp.text());
+    manualLibrary = (await resp.json()).entries || [];
+    // A re-check keeps what's still there and forgets what vanished.
+    const known = new Set(manualLibrary.map((e) => e.hash));
+    manualSelected = manualSelected.filter((h) => known.has(h));
+    renderLibraryList();
+  } catch (err) {
+    list.innerHTML =
+      '<li class="muted"><span class="error">' + t("error.failed") + " " + escapeHtml(String(err)) + "</span></li>";
+  }
+}
+
+function renderLibraryList() {
+  const list = el("libraryList");
+  if (!manualLibrary.length) {
+    list.innerHTML = '<li class="muted">' + escapeHtml(t("manual.empty")) + "</li>";
+    el("libraryContinueBtn").disabled = true;
+    return;
+  }
+  const chosen = new Set(manualSelected);
+  list.innerHTML = manualLibrary
+    .map((e) => {
+      const meta =
+        escapeHtml(e.filename) +
+        (e.authors ? " · " + escapeHtml(e.authors) : "") +
+        " · " +
+        e.pages +
+        "p" +
+        (e.toc === "unavailable"
+          ? " · " + escapeHtml(t("manual.tocUnavailable"))
+          : "");
+      return (
+        '<li><label class="library-row">' +
+        '<input type="checkbox" data-hash="' +
+        e.hash +
+        '"' +
+        (chosen.has(e.hash) ? " checked" : "") +
+        ">" +
+        '<span class="library-title">' +
+        escapeHtml(e.title) +
+        "</span>" +
+        '<span class="muted">' +
+        meta +
+        "</span>" +
+        "</label></li>"
+      );
+    })
+    .join("");
+  list.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    box.addEventListener("change", () => {
+      const hash = box.dataset.hash;
+      if (box.checked) {
+        if (!manualSelected.includes(hash)) manualSelected.push(hash);
+      } else {
+        manualSelected = manualSelected.filter((h) => h !== hash);
+      }
+      el("libraryContinueBtn").disabled = manualSelected.length === 0;
+    });
+  });
+  el("libraryContinueBtn").disabled = manualSelected.length === 0;
+}
+
+el("libraryBackBtn").addEventListener("click", () => {
+  el("libraryPicker").hidden = true;
+  el("startEntry").hidden = false;
+});
+
+el("libraryRecheckBtn").addEventListener("click", () => loadLibrary());
+
+el("libraryContinueBtn").addEventListener("click", async () => {
+  const picked = manualSelected
+    .map((h) => manualLibrary.find((e) => e.hash === h))
+    .filter(Boolean);
+  manualTree = picked.map((e) => ({
+    id: "w" + e.hash.slice(0, 12),
+    title: e.title,
+    action: "learn",
+    item_type: "book",
+    bibliography: {
+      title: e.title,
+      authors: (e.authors || "")
+        .split(/[,;]\s*/)
+        .map((a) => a.trim())
+        .filter(Boolean),
+      year: null,
+      edition: null,
+      identifier: null,
+      kind: "book",
+    },
+    // verification stays null on purpose: `Verified` means checked against
+    // external catalogs, and a locally present file needs no external check
+    // — the acervo gate validates presence for real after creation.
+    verification: null,
+    chapter_number: null,
+    children: [],
+    // client-only, stripped before create:
+    hash: e.hash,
+    toc: e.toc,
+  }));
+  el("libraryPicker").hidden = true;
+  el("manualConfirm").hidden = false;
+  el("manualTree").innerHTML =
+    '<li class="muted">' + escapeHtml(t("manual.loadingChapters")) + "</li>";
+  // Chapter tiers come from data already on disk; a book with neither a
+  // confirmed TOC nor bookmarks simply stays whole-work — the picker
+  // screen already said so (`manual.tocUnavailable`).
+  await Promise.all(
+    manualTree.map(async (w) => {
+      if (w.toc === "unavailable") return;
+      try {
+        const resp = await api("/api/library/" + w.hash + "/toc");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        w.children = (data.entries || []).map((en, i) => ({
+          id: w.id + "c" + i,
+          title: en.title,
+          action: "learn",
+          item_type: "chapter",
+          chapter_number: en.number,
+          children: [],
+        }));
+      } catch {
+        // leave the work whole — a missing chapter tier never blocks
+      }
+    }),
+  );
+  renderManualConfirm();
+});
+
+// One row of the manual confirmation tree: optional reorder arrows (works
+// only — chapters keep their book's order), then the same 3-segment
+// skip/review/learn toggle markup the proposed path renders
+// (`renderOutlineNode`'s classes, so the styling is shared).
+function manualRowHtml(node, withReorder) {
+  const segments = ["skip", "review", "learn"]
+    .map(
+      (a) =>
+        '<button type="button" class="prereq-toggle-seg' +
+        (node.action === a ? " active" : "") +
+        '" data-action="' +
+        a +
+        '" aria-pressed="' +
+        (node.action === a) +
+        '">' +
+        t("prereq.action." + a) +
+        "</button>",
+    )
+    .join("");
+  const reorder = withReorder
+    ? '<span class="manual-reorder">' +
+      '<button type="button" class="reorder-btn" data-dir="up" title="' +
+      escapeHtml(t("manual.up")) +
+      '" aria-label="' +
+      escapeHtml(t("manual.up")) +
+      '">↑</button>' +
+      '<button type="button" class="reorder-btn" data-dir="down" title="' +
+      escapeHtml(t("manual.down")) +
+      '" aria-label="' +
+      escapeHtml(t("manual.down")) +
+      '">↓</button>' +
+      "</span>"
+    : "";
+  return (
+    '<div class="prereq-row">' +
+    reorder +
+    '<span class="prereq-title">' +
+    escapeHtml(node.title) +
+    "</span>" +
+    '<div class="prereq-toggle" data-id="' +
+    node.id +
+    '" role="group">' +
+    segments +
+    "</div>" +
+    "</div>"
+  );
+}
+
+function renderManualConfirm() {
+  el("manualTree").innerHTML = manualTree
+    .map((w) => {
+      const chapters = (w.children || []).map((c) => "<li>" + manualRowHtml(c, false) + "</li>");
+      return (
+        "<li>" +
+        manualRowHtml(w, true) +
+        (chapters.length ? "<ul>" + chapters.join("") + "</ul>" : "") +
+        "</li>"
+      );
+    })
+    .join("");
+  el("manualTree").querySelectorAll(".prereq-toggle-seg").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".prereq-toggle").dataset.id;
+      const node = findPrereqNode(manualTree, id);
+      if (node) cascadePrereqAction(node, btn.dataset.action);
+      renderManualConfirm();
+    });
+  });
+  // Array position IS the prerequisite chain (same convention as the
+  // proposed list), so the arrows literally reorder the curriculum.
+  el("manualTree").querySelectorAll(".reorder-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const li = btn.closest("li");
+      const id = li.querySelector(".prereq-toggle").dataset.id;
+      const from = manualTree.findIndex((w) => w.id === id);
+      const to = btn.dataset.dir === "up" ? from - 1 : from + 1;
+      if (from < 0 || to < 0 || to >= manualTree.length) return;
+      [manualTree[from], manualTree[to]] = [manualTree[to], manualTree[from]];
+      renderManualConfirm();
+    });
+  });
+}
+
+el("manualBackBtn").addEventListener("click", () => {
+  el("manualConfirm").hidden = true;
+  el("libraryPicker").hidden = false;
+});
+
+// Strips the client-only fields (hash/toc) and hands the server the exact
+// ConfirmedNode shape `create_document` materializes verbatim — same
+// round-trip contract the proposed path uses, just built client-side.
+function manualNodeToPayload(n) {
+  return {
+    id: n.id,
+    title: n.title,
+    action: n.action,
+    children: (n.children || []).map(manualNodeToPayload),
+    item_type: n.item_type,
+    bibliography: n.bibliography || undefined,
+    verification: null,
+    chapter_number: n.chapter_number || undefined,
+  };
+}
+
+el("manualConfirmBtn").addEventListener("click", async () => {
+  const nodes = manualTree.map(manualNodeToPayload);
+  // topic/name/objective: there was no typed topic, so the selection IS
+  // the subject. objective_text stays empty — `create_document` falls
+  // back to the topic, and the objective stays revisable later (§5).
+  const titles = manualTree.map((w) => w.title).join(", ");
+  pendingTopic = titles.length > 300 ? titles.slice(0, 300) + "…" : titles;
+  pendingName = manualTree.length === 1 ? manualTree[0].title : pendingTopic;
+  pendingObjectiveText = "";
+  // createLivingDocument hides all of #coldstart on success (the manual
+  // screens live inside it); on error they stay visible behind the shared
+  // #startStatus error line.
+  await createLivingDocument(pendingObjectiveText, nodes);
+});
 
 // --- Documents: resume, switch, rename (§S12) -------------------------
 // The app used to always cold-start: documents were persisted under
@@ -411,7 +684,9 @@ el("newDocBtn").addEventListener("click", () => {
   el("doc").hidden = true;
   el("acervoGate").hidden = true;
   el("coldstart").hidden = false;
-  el("startForm").hidden = false;
+  el("startEntry").hidden = false;
+  el("libraryPicker").hidden = true;
+  el("manualConfirm").hidden = true;
   el("prereqConfirm").hidden = true;
   el("startStatus").textContent = "";
   el("topic").value = "";

@@ -107,7 +107,20 @@ impl MockSource {
 /// the router-test harness already relied on, instead of a third
 /// hand-rolled copy.
 pub(crate) fn write_book_pdf(path: &std::path::Path, title: &str, author: &str) {
-    use lopdf::{Document, Object, Stream, dictionary};
+    write_book_pdf_with_chapters(path, title, author, &[]);
+}
+
+/// The chaptered variant: same fixture shape, plus top-level bookmarks
+/// (`chapters`: title + 1-based page) so flows that read a book's embedded
+/// outline — the manual cold start's chapter picker, the acervo TOC screen
+/// against a fixture library — have real structure to show.
+pub(crate) fn write_book_pdf_with_chapters(
+    path: &std::path::Path,
+    title: &str,
+    author: &str,
+    chapters: &[(&str, usize)],
+) {
+    use lopdf::{Bookmark, Document, Object, Stream, dictionary};
 
     const PAGE_COUNT: usize = 8;
 
@@ -151,6 +164,20 @@ pub(crate) fn write_book_pdf(path: &std::path::Path, title: &str, author: &str) 
         "Pages" => pages_id,
     });
     doc.trailer.set("Root", catalog_id);
+    // Bookmarks after the trailer's Root is set — `catalog_mut` reads it.
+    for (chapter_title, page) in chapters {
+        let target = page_ids[(*page - 1).min(PAGE_COUNT - 1)];
+        doc.add_bookmark(
+            Bookmark::new((*chapter_title).to_string(), [0.0, 0.0, 0.0], 0, target),
+            None,
+        );
+    }
+    if !chapters.is_empty() {
+        let outlines_id = doc.build_outline().expect("bookmarks were added");
+        doc.catalog_mut()
+            .expect("catalog exists")
+            .set("Outlines", outlines_id);
+    }
     doc.trailer.set("Info", info_id);
     doc.save(path).expect("save book pdf fixture");
 }
@@ -179,13 +206,21 @@ pub(crate) fn write_book_pdf(path: &std::path::Path, title: &str, author: &str) 
 /// already there.
 pub(crate) fn seed_demo_library(data_dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     let library = LocalPdfSource::open(data_dir)?;
-    for (filename, (title, author)) in [
-        ("demo-foundations.pdf", DEMO_BOOK_1),
-        ("demo-document.pdf", DEMO_BOOK_2),
+    for (filename, (title, author), chapters) in [
+        (
+            "demo-foundations.pdf",
+            DEMO_BOOK_1,
+            &[("1 First Ideas", 2usize), ("2 Later Ideas", 4)][..],
+        ),
+        (
+            "demo-document.pdf",
+            DEMO_BOOK_2,
+            &[("1 Getting Started", 2), ("2 Going Further", 5)][..],
+        ),
     ] {
         let path = library.root().join(filename);
         if !path.exists() {
-            write_book_pdf(&path, title, author);
+            write_book_pdf_with_chapters(&path, title, author, chapters);
         }
     }
     Ok(())

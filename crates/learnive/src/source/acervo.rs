@@ -1055,6 +1055,73 @@ fn looks_like_numbered_heading(line: &str) -> bool {
 /// gets overwritten the next time validation runs — the store is a derived
 /// cache, rebuildable from the library directory like every other index in
 /// this module family, never the source of truth.
+/// One row of [`library_listing`] — the manual cold start's library screen
+/// (2026-09-09). Everything the picker needs to offer a work without a
+/// document existing yet: the content hash the rest of the file-scoped API
+/// (`/api/library/{hash}/toc`, later `/api/library/{hash}/pdf`) is keyed by,
+/// display metadata from the PDF's own `/Info` dictionary, and which TOC
+/// tier the chapter picker can expect (same cascade `get_acervo_toc` uses —
+/// a user-confirmed TOC outranks embedded bookmarks; no heuristic/LLM tier
+/// here, the manual path stays zero-token).
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryListingEntry {
+    pub hash: String,
+    pub filename: String,
+    pub title: String,
+    pub authors: Option<String>,
+    pub pages: usize,
+    /// `"confirmed"` | `"embedded"` | `"unavailable"` — what
+    /// `GET /api/library/{hash}/toc` would return as its `source`.
+    pub toc: &'static str,
+}
+
+/// Scans the local library the same way [`load_candidates`] does (one
+/// `read_pdf_cached` per file — repeat visits hit the pdftext cache) but for
+/// BROWSING, not matching: no expected items, no verdicts. Unreadable files
+/// are skipped, same one-bad-file-must-not-sink-the-batch stance as
+/// candidate loading. Sorted by filename (the scan's own order), which keeps
+/// the picker's rows stable across re-checks.
+pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<LibraryListingEntry>> {
+    let data_dir = data_dir.as_ref();
+    let library = crate::source::LocalPdfSource::open(data_dir)?;
+    let cache_dir = pdftext_cache_dir_for(&library);
+    let toc_confirm = TocConfirmStore::open(data_dir)?;
+    let mut out = Vec::new();
+    for entry in library.scan()? {
+        let path = library.root().join(&entry.filename);
+        let Ok((hash, pdf)) = super::pdf::read_pdf_cached(&path, &cache_dir) else {
+            continue;
+        };
+        let toc = if toc_confirm.get(&hash).is_some() {
+            "confirmed"
+        } else if !pdf.outline.is_empty() {
+            "embedded"
+        } else {
+            "unavailable"
+        };
+        out.push(LibraryListingEntry {
+            title: pdf
+                .meta_title
+                .clone()
+                .unwrap_or_else(|| filename_stem(&entry.filename)),
+            authors: pdf.meta_author.clone(),
+            pages: pdf.pages.page_count,
+            hash,
+            filename: entry.filename,
+            toc,
+        });
+    }
+    Ok(out)
+}
+
+fn filename_stem(filename: &str) -> String {
+    std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
+        .to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct LibraryFileIndex {
     dir: PathBuf,

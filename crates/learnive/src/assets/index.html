@@ -124,10 +124,15 @@
            document (§5 versioned revision), not gated here. -->
       <section id="coldstart" class="card">
         <h1 data-i18n="coldstart.title">What are we learning?</h1>
-        <form id="startForm">
-          <textarea id="topic" rows="3" autofocus></textarea>
-          <p><button type="submit" data-i18n="start.button">Start</button></p>
-        </form>
+        <!-- Both entry paths (model-proposed vs. picked-from-library) hide
+             and show together — #startEntry is the unit the flow toggles. -->
+        <div id="startEntry">
+          <form id="startForm">
+            <textarea id="topic" rows="3" autofocus></textarea>
+            <p><button type="submit" data-i18n="start.button">Start</button></p>
+          </form>
+          <p><button type="button" id="manualStartBtn" data-i18n="manual.start">I already know what I want to learn</button></p>
+        </div>
 
         <!-- §S15/§S16 (unified 2026-08-19): the confirmation screen shown
              before a single token of content generates — ONE ordered tree,
@@ -149,6 +154,34 @@
           <p>
             <button type="button" id="prereqConfirmBtn" data-i18n="prereq.confirm">Confirm</button>
             <button type="button" id="prereqBackBtn" data-i18n="coldstart.back">Back</button>
+          </p>
+        </div>
+
+        <!-- Manual cold start (2026-09-09), screen 1 of 2: pick works
+             straight from the local library. Zero model calls anywhere in
+             this path — the outline is exactly what the learner picks. -->
+        <div id="libraryPicker" hidden>
+          <h2 data-i18n="manual.libraryTitle">Your library</h2>
+          <p class="muted" data-i18n="manual.libraryHint">Choose the books and articles for this curriculum.</p>
+          <ul id="libraryList" class="library-list"></ul>
+          <p>
+            <button type="button" id="libraryContinueBtn" data-i18n="manual.continue">Continue</button>
+            <button type="button" id="libraryBackBtn" data-i18n="coldstart.back">Back</button>
+            <button type="button" id="libraryRecheckBtn" data-i18n="manual.recheck">Re-check</button>
+          </p>
+        </div>
+
+        <!-- Manual cold start, screen 2 of 2: same learn/review/skip
+             confirmation as the proposed path, plus reordering — array
+             position IS the prerequisite chain, so the arrows reorder the
+             curriculum. -->
+        <div id="manualConfirm" hidden>
+          <h2 data-i18n="manual.confirmTitle">Your reading list</h2>
+          <p class="muted" data-i18n="manual.confirmHint">The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.</p>
+          <ul id="manualTree" class="prereq-tree"></ul>
+          <p>
+            <button type="button" id="manualConfirmBtn" data-i18n="prereq.confirm">Confirm</button>
+            <button type="button" id="manualBackBtn" data-i18n="coldstart.back">Back</button>
           </p>
         </div>
 

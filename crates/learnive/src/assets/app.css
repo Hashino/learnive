@@ -869,6 +869,47 @@ body.source-resizing #askBar {
   color: var(--nord0);
 }
 
+/* Manual cold start (2026-09-09): the library picker and the reorderable
+   confirmation screen. The confirm tree itself reuses `.prereq-tree`'s
+   toggle styling verbatim (manualRowHtml emits the same classes); only the
+   picker rows and the reorder arrows need their own rules. */
+.library-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+.library-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  cursor: pointer;
+}
+.library-row input[type="checkbox"] {
+  flex: none;
+  align-self: center;
+}
+.library-row .library-title {
+  font-weight: 600;
+}
+.library-row .muted {
+  font-size: 0.85em;
+  word-break: break-word;
+}
+.manual-reorder {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-right: 0.35rem;
+  flex: none;
+}
+.reorder-btn {
+  font-size: 0.75em;
+  line-height: 1.1;
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
+
 /* S27f: acervo gate ("what's missing"), PDF<->item matching, and TOC
    confirmation — deliberately reuses `.card`/`.muted`/`.error`/`.link-btn`
    for everything generic (see `#acervoGate` in index.html); only the parts

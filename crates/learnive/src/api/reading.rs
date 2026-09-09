@@ -83,6 +83,158 @@ pub async fn get_source_asset(
         .into_response())
 }
 
+// -- GET /api/library, GET /api/library/{hash}/toc — the manual cold start --
+//
+// The second cold-start path (2026-09-09, user request): instead of the
+// model proposing a reading list, the learner picks works straight from the
+// local library. Both handlers are read-only and strictly zero-token — the
+// picker's chapter tier comes from data already on disk (a user-confirmed
+// TOC, else the PDF's own embedded bookmarks), never from a heuristic+LLM
+// deduction pass: §15's rule that recovery must not cost a model call
+// applies a fortiori to a flow whose entire point is skipping the model.
+
+/// One row of [`library_list`].
+#[derive(serde::Serialize)]
+pub struct LibraryListResp {
+    pub entries: Vec<source::acervo::LibraryListingEntry>,
+}
+
+/// Lists the local library for the manual cold start's picker screen. No
+/// document scope — this is the one endpoint that answers "what could I
+/// study?" directly. Sorted by filename (the scan's own order), so the
+/// picker's rows are stable across the screen's re-check button.
+pub async fn library_list(
+    State(state): State<AppState>,
+) -> Result<Json<LibraryListResp>, ApiError> {
+    let data_dir = state.data_dir.to_string();
+    let entries = spawn_blocking(move || source::acervo::library_listing(&data_dir))
+        .await
+        .map_err(|e| ApiError::Internal(format!("library listing task failed: {e}")))?
+        .map_err(|e| ApiError::Internal(format!("could not scan the local library: {e}")))?;
+    Ok(Json(LibraryListResp { entries }))
+}
+
+/// One chapter the manual path can offer for a book.
+#[derive(serde::Serialize)]
+pub struct LibraryTocEntryResp {
+    /// Printed chapter/section number split off the bookmark title
+    /// (`toc_confirm::split_printed_number`) when the embedded outline
+    /// carries one — `match_chapter` tries it first, so a chapter picked
+    /// here resolves to its page without any name-fuzzying.
+    pub number: Option<String>,
+    pub title: String,
+    pub page: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+pub struct LibraryTocResp {
+    pub hash: String,
+    pub filename: String,
+    /// Same tier labels as the document-scoped acervo TOC endpoint —
+    /// `"confirmed"` | `"embedded"` | `"unavailable"` — but with NO
+    /// heuristic tier: a book with neither a confirmed TOC nor embedded
+    /// bookmarks simply offers no chapter picking (`entries: []`), and the
+    /// client falls back to whole-work selection.
+    pub source: &'static str,
+    pub entries: Vec<LibraryTocEntryResp>,
+}
+
+/// The chapter list one library book offers the manual cold start's second
+/// screen, keyed by content hash — file-scoped like every other library
+/// route, deliberately NOT document-scoped: the whole point of this flow is
+/// picking from a library that no document references yet. Resolution order
+/// mirrors `get_acervo_toc`: a user-confirmed TOC (S27k store) wins, then
+/// the PDF's own embedded bookmarks (flattened, printed numbers split off),
+/// then nothing — never the heuristic+LLM deduction pass (zero-token rule
+/// in the module comment above).
+pub async fn library_toc(
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Json<LibraryTocResp>, ApiError> {
+    let data_dir = state.data_dir.to_string();
+    let result = spawn_blocking(move || -> Result<LibraryTocResp, ApiError> {
+        // hash -> filename: the LibraryFileIndex first (populated by any
+        // past acervo validation), else a fresh scan matching by hash —
+        // this flow runs BEFORE any document exists, so the index may not
+        // know the file yet.
+        let io = |e: std::io::Error| ApiError::Internal(e.to_string());
+        let filename = match source::acervo::LibraryFileIndex::open(
+            std::path::Path::new(&data_dir).join("index"),
+        )
+        .ok()
+        .and_then(|ix| ix.get(&hash))
+        {
+            Some(record) => record.filename,
+            None => {
+                source::acervo::library_listing(&data_dir)
+                    .map_err(io)?
+                    .into_iter()
+                    .find(|e| e.hash == hash)
+                    .ok_or_else(|| ApiError::NotFound(format!("no library PDF has hash {hash}")))?
+                    .filename
+            }
+        };
+        let library = source::LocalPdfSource::open(&data_dir).map_err(io)?;
+        let path = library.root().join(&filename);
+        let cache_dir = source::pdftext_cache_dir(&data_dir);
+        let (hash2, pdf) = source::read_pdf_cached(&path, &cache_dir)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let toc_confirm = source::toc_confirm::TocConfirmStore::open(&data_dir).map_err(io)?;
+        if let Some(confirmed) = toc_confirm.get(&hash2) {
+            return Ok(LibraryTocResp {
+                hash: hash2,
+                filename,
+                source: "confirmed",
+                entries: confirmed
+                    .entries
+                    .into_iter()
+                    .map(|e| LibraryTocEntryResp {
+                        number: e.number,
+                        title: e.title,
+                        page: e.page,
+                    })
+                    .collect(),
+            });
+        }
+        let mut entries = Vec::new();
+        if !pdf.outline.is_empty() {
+            flatten_library_outline(&pdf.outline, &mut entries);
+        }
+        Ok(LibraryTocResp {
+            hash: hash2,
+            filename,
+            source: if entries.is_empty() {
+                "unavailable"
+            } else {
+                "embedded"
+            },
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("library TOC task panicked: {e}")))?;
+    Ok(Json(result?))
+}
+
+/// The embedded-outline flatten [`get_acervo_toc`] does for the document TOC
+/// screen, plus `split_printed_number` so each entry carries its printed
+/// number separately. All depths, document order — the acervo editor's own
+/// flatten made "flat chapter list" the established shape.
+fn flatten_library_outline(
+    entries: &[source::pdf::OutlineEntry],
+    out: &mut Vec<LibraryTocEntryResp>,
+) {
+    for e in entries {
+        let (number, title) = source::toc_confirm::split_printed_number(&e.title);
+        out.push(LibraryTocEntryResp {
+            number,
+            title,
+            page: Some(e.page),
+        });
+        flatten_library_outline(&e.children, out);
+    }
+}
+
 /// Meta companion to [`get_library_pdf`] (S27n): title/authors for the
 /// source panel's header, read straight from the persisted
 /// `LibraryFileIndex` record — no PDF re-parse at request time, since
@@ -1896,6 +2048,18 @@ pub(super) async fn ensure_document_grounded(
             )
             .await?;
         }
+        // S34-A, one layer down (found live 2026-09-09, manual cold start):
+        // the index build below lived ONLY on the fresh path — but the
+        // gate-report panel (read-only GET, auto-opened right after create)
+        // memoizes the same verdict this function keys on, so a brand-new
+        // library's first `/generate` always took THIS path and returned
+        // before any index existed; `ground_node` then died one layer down
+        // on `search_index_cache`'s missing cache file. Same fix as the
+        // structural passes above: the build is a function of the REPORT
+        // (which items came back `IndexCheck::Missing`), not of whether
+        // this call re-ran the validation — do it here exactly as the
+        // fresh path does.
+        build_missing_indexes(state, &report).await?;
         return Ok(());
     }
     let gate_started = std::time::Instant::now();
@@ -1982,6 +2146,36 @@ pub(super) async fn ensure_document_grounded(
     )
     .await?;
 
+    let builds = build_missing_indexes(state, &report).await?;
+    if builds == 0 {
+        eprintln!(
+            "acervo gate: full validation passed in {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
+            gate_started.elapsed().as_secs_f32()
+        );
+    } else {
+        eprintln!(
+            "acervo gate: validation + {} index build(s) took {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
+            builds,
+            gate_started.elapsed().as_secs_f32()
+        );
+    }
+    Ok(())
+}
+
+/// Builds the retrieval index for every report item whose `IndexCheck` came
+/// back `Missing` — the one expensive follow-through the read-only gate
+/// report deliberately never does itself (`IndexCheck`'s doc). Shared by
+/// BOTH paths of [`ensure_document_grounded`] since the live find above:
+/// the memo-hit path used to skip it, and the report panel memoizes first.
+///
+/// The fresh path already holds `library`/`manual` open, but re-opening
+/// them here is nearly free (a directory handle + tiny record files) and
+/// keeps the helper self-contained for the memo path, which may not have
+/// opened them at all.
+async fn build_missing_indexes(
+    state: &AppState,
+    report: &source::acervo::AcervoReport,
+) -> Result<usize, String> {
     let missing_index: Vec<&source::ExpectedItem> = report
         .items
         .iter()
@@ -1989,11 +2183,7 @@ pub(super) async fn ensure_document_grounded(
         .map(|r| &r.expected)
         .collect();
     if missing_index.is_empty() {
-        eprintln!(
-            "acervo gate: full validation passed in {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
-            gate_started.elapsed().as_secs_f32()
-        );
-        return Ok(());
+        return Ok(0);
     }
 
     let Some(embedder) = (match &state.retriever {
@@ -2002,15 +2192,22 @@ pub(super) async fn ensure_document_grounded(
     }) else {
         return Err("no embedding model is loaded — cannot index the library".to_string());
     };
+    let library = source::LocalPdfSource::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open local library: {e}"))?;
+    let manual = source::ManualMatchStore::open(state.data_dir.as_ref())
+        .map_err(|e| format!("could not open manual-match store: {e}"))?;
+    let index_cache_dir = std::path::PathBuf::from(state.data_dir.as_ref())
+        .join("index")
+        .join("library");
 
     for item in &missing_index {
         // An ambiguous match (more than one plausible candidate file) is
         // already surfaced by the S27f matching screen; `report.all_pass()`
-        // above only proves a candidate was FOUND for presence purposes,
-        // not that it's uniquely resolved — this can legitimately skip
-        // here, and `ground_node` below will then correctly report the gap
-        // as an internal inconsistency instead of silently indexing the
-        // wrong file.
+        // only proves a candidate was FOUND for presence purposes, not
+        // that it's uniquely resolved — this can legitimately skip here,
+        // and `ground_node` below will then correctly report the gap as an
+        // internal inconsistency instead of silently indexing the wrong
+        // file.
         let Some(filename) = source::resolve_matched_filename(&library, &manual, item)
             .map_err(|e| format!("could not scan the local library: {e}"))?
         else {
@@ -2023,13 +2220,7 @@ pub(super) async fn ensure_document_grounded(
         source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
             .map_err(|e| format!("could not index {filename}: {e}"))?;
     }
-
-    eprintln!(
-        "acervo gate: validation + {} index build(s) took {:.1}s (memoized until the library, manual matches, TOC, or expected items change)",
-        missing_index.len(),
-        gate_started.elapsed().as_secs_f32()
-    );
-    Ok(())
+    Ok(missing_index.len())
 }
 
 /// The gate's two STRUCTURAL passes — the parts whose input is the outline
@@ -2963,4 +3154,199 @@ pub(super) async fn finalize(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    const TOKEN: &str = "testtoken";
+    const HOST: &str = "127.0.0.1:7420";
+    const ORIGIN: &str = "http://127.0.0.1:7420";
+
+    fn test_state() -> (tempfile::TempDir, AppState) {
+        use arc_swap::ArcSwap;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = dir.path().to_path_buf();
+        let state = AppState {
+            token: Arc::from(TOKEN),
+            allowed_origins: Arc::new(HashSet::from([ORIGIN.to_string()])),
+            allowed_hosts: Arc::new(HashSet::from([HOST.to_string()])),
+            store: crate::store::Store::open(&data_dir).unwrap(),
+            ai: Arc::new(ArcSwap::from_pointee(crate::api::demo_ai())),
+            config: Arc::new(RwLock::new(crate::config::AppConfig::default())),
+            secret: Arc::new(crate::secret::SecretStore::open(&data_dir)),
+            data_dir: Arc::from(data_dir.to_string_lossy().as_ref()),
+            source: Arc::new(crate::source::Source::Mock(crate::source::MockSource::new())),
+            fallback_source: Arc::new(
+                crate::source::Source::Mock(crate::source::MockSource::new()),
+            ),
+            corpus: crate::source::Corpus::open(&data_dir).unwrap(),
+            retriever: None,
+            bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
+            acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        };
+        (dir, state)
+    }
+
+    fn authed(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", HOST)
+            .header("x-learnive-token", TOKEN)
+            .header("origin", ORIGIN)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let resp = crate::app::build_router(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    fn seed_library(dir: &std::path::Path) {
+        let library = source::LocalPdfSource::open(dir).unwrap();
+        std::fs::create_dir_all(library.root()).unwrap();
+        crate::source::mock::write_book_pdf_with_chapters(
+            &library.root().join("a-structured.pdf"),
+            "Structures Book",
+            "Ada Author",
+            &[("1 First Ideas", 2), ("2 Later Ideas", 4)],
+        );
+        crate::source::mock::write_book_pdf(
+            &library.root().join("b-plain.pdf"),
+            "Plain Book",
+            "Bob Author",
+        );
+    }
+
+    #[tokio::test]
+    async fn library_list_offers_every_pdf_with_its_toc_tier() {
+        let (dir, state) = test_state();
+        seed_library(dir.path());
+
+        let (status, body) = send(&state, authed("/api/library")).await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2, "both PDFs listed, sorted by filename");
+
+        let structured = &entries[0];
+        assert_eq!(structured["filename"], "a-structured.pdf");
+        assert_eq!(structured["title"], "Structures Book");
+        assert_eq!(structured["toc"], "embedded");
+        assert!(
+            structured["hash"].as_str().unwrap().len() == 64,
+            "sha256 hex"
+        );
+        assert!(structured["pages"].as_u64().unwrap() >= 8);
+
+        let plain = &entries[1];
+        assert_eq!(plain["filename"], "b-plain.pdf");
+        assert_eq!(plain["toc"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn library_list_is_empty_not_an_error_without_a_library() {
+        let (_dir, state) = test_state();
+        let (status, body) = send(&state, authed("/api/library")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["entries"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn library_toc_splits_printed_numbers_from_embedded_bookmarks() {
+        let (dir, state) = test_state();
+        seed_library(dir.path());
+        let listed = send(&state, authed("/api/library")).await.1;
+        let hash = listed["entries"][0]["hash"].as_str().unwrap().to_string();
+
+        let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "embedded");
+        assert_eq!(body["filename"], "a-structured.pdf");
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["number"], "1");
+        assert_eq!(entries[0]["title"], "First Ideas");
+        assert_eq!(entries[0]["page"], 2);
+        assert_eq!(entries[1]["number"], "2");
+        assert_eq!(entries[1]["page"], 4);
+    }
+
+    #[tokio::test]
+    async fn library_toc_offers_no_chapter_tier_without_bookmarks() {
+        let (dir, state) = test_state();
+        seed_library(dir.path());
+        let listed = send(&state, authed("/api/library")).await.1;
+        let hash = listed["entries"][1]["hash"].as_str().unwrap().to_string();
+
+        let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "unavailable");
+        assert_eq!(body["entries"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn library_toc_404s_on_an_unknown_hash() {
+        let (_dir, state) = test_state();
+        let (status, _) = send(
+            &state,
+            authed(&format!("/api/library/{}/toc", "0".repeat(64))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn library_toc_prefers_a_user_confirmed_toc_over_bookmarks() {
+        let (dir, state) = test_state();
+        seed_library(dir.path());
+        let listed = send(&state, authed("/api/library")).await.1;
+        let hash = listed["entries"][0]["hash"].as_str().unwrap().to_string();
+
+        // A confirmed TOC (the S27k store) outranks the embedded outline,
+        // same precedence the document-scoped acervo TOC endpoint uses.
+        let toc_store = source::toc_confirm::TocConfirmStore::open(dir.path()).unwrap();
+        toc_store
+            .put(
+                &hash,
+                &source::toc_confirm::ConfirmedToc {
+                    entries: vec![source::toc_confirm::ConfirmedTocEntry {
+                        title: "Renamed Chapter".to_string(),
+                        number: Some("7".to_string()),
+                        page: Some(3),
+                        inferred: false,
+                    }],
+                    unresolved: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "confirmed");
+        let entries = body["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["title"], "Renamed Chapter");
+        assert_eq!(entries[0]["number"], "7");
+    }
 }

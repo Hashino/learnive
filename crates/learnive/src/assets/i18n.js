@@ -25,6 +25,22 @@ const I18N = {
     "coldstart.title": "What are we learning?",
     "start.button": "Start",
     "coldstart.back": "Back",
+    // Manual cold start: the learner picks works from the local library
+    // instead of the model proposing a list. Zero model calls in this path.
+    "manual.start": "I already know what I want to learn",
+    "manual.libraryTitle": "Your library",
+    "manual.libraryHint": "Choose the books and articles for this curriculum.",
+    "manual.loading": "Reading the library…",
+    "manual.loadingChapters": "Loading chapter lists…",
+    "manual.empty": "The library is empty. Add PDFs to the library folder, then re-check.",
+    "manual.recheck": "Re-check",
+    "manual.continue": "Continue",
+    "manual.tocUnavailable": "no chapter list, whole work only",
+    "manual.confirmTitle": "Your reading list",
+    "manual.confirmHint":
+      "The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.",
+    "manual.up": "Move up",
+    "manual.down": "Move down",
     // Unified outline confirmation (§S15/§S16): one tree, prerequisites
     // first, ending in the requested topic's own breakdown (locked).
     "outline.mainlineTitle": "What you'll learn",
@@ -220,6 +236,20 @@ const I18N = {
     "coldstart.title": "O que vamos aprender?",
     "start.button": "Começar",
     "coldstart.back": "Voltar",
+    "manual.start": "Eu já sei o que quero aprender",
+    "manual.libraryTitle": "Sua biblioteca",
+    "manual.libraryHint": "Escolha os livros e artigos deste currículo.",
+    "manual.loading": "Lendo a biblioteca…",
+    "manual.loadingChapters": "Carregando listas de capítulos…",
+    "manual.empty": "A biblioteca está vazia. Adicione PDFs à pasta da biblioteca e recheque.",
+    "manual.recheck": "Rechecar",
+    "manual.continue": "Continuar",
+    "manual.tocUnavailable": "sem lista de capítulos, apenas a obra inteira",
+    "manual.confirmTitle": "Sua lista de leitura",
+    "manual.confirmHint":
+      "A ordem aqui é a ordem em que você vai estudar. Use as setas para reordenar e marque o que já sabe como revisar ou pular.",
+    "manual.up": "Mover para cima",
+    "manual.down": "Mover para baixo",
     "outline.mainlineTitle": "O que você vai aprender",
     "prereq.hint":
       "Marque o que já sabe como revisar ou pular. O que você pediu é sempre ensinado por completo e não pode ser pulado.",

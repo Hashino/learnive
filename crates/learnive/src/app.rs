@@ -311,6 +311,8 @@ pub fn build_router(state: AppState) -> Router {
         // not in the library vs. corpus source id not found mean different
         // things to the client).
         .route("/api/library/{hash}", get(api::get_library_meta))
+        .route("/api/library", get(api::library_list))
+        .route("/api/library/{hash}/toc", get(api::library_toc))
         .route("/api/library/{hash}/pdf", get(api::get_library_pdf))
         .layer(middleware::from_fn_with_state(
             state.clone(),

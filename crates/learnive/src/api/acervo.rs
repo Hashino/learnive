@@ -733,6 +733,10 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let data_dir = dir.path().to_path_buf();
+        let corpus = crate::source::Corpus::open(&data_dir).unwrap();
+        let retriever =
+            crate::retrieval::Retriever::open(&data_dir, &corpus, crate::retrieval::Embedder::Mock)
+                .unwrap();
         let state = AppState {
             token: Arc::from(TOKEN),
             allowed_origins: Arc::new(HashSet::from([ORIGIN.to_string()])),
@@ -746,8 +750,13 @@ mod tests {
             fallback_source: Arc::new(
                 crate::source::Source::Mock(crate::source::MockSource::new()),
             ),
-            corpus: crate::source::Corpus::open(&data_dir).unwrap(),
-            retriever: None,
+            // A Mock-embedder retriever over the same corpus, same as
+            // app::tests' harness: since the memo-hit path now also builds
+            // missing indexes (S34-A one layer down, live 2026-09-09), a
+            // test state without an embedder can no longer run a memoized
+            // gate whose report says `index: Missing` — and shouldn't.
+            corpus,
+            retriever: Some(Arc::new(tokio::sync::RwLock::new(retriever))),
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
