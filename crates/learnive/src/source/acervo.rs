@@ -1100,9 +1100,11 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
             "unavailable"
         };
         out.push(LibraryListingEntry {
+            // Same empty-title fallback as the streaming listing endpoint.
             title: pdf
                 .meta_title
                 .clone()
+                .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| filename_stem(&entry.filename)),
             authors: pdf.meta_author.clone(),
             pages: pdf.pages.page_count,
@@ -1114,7 +1116,9 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
     Ok(out)
 }
 
-fn filename_stem(filename: &str) -> String {
+/// `book.pdf` -> `book` — the listing's title fallback when a PDF carries no
+/// embedded `/Info` title (its file is all the learner has to go on then).
+pub fn filename_stem(filename: &str) -> String {
     std::path::Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())

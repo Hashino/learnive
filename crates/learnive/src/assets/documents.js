@@ -213,72 +213,167 @@ async function createLivingDocument(objective_text, nodes) {
 // exactly that selection. Zero model calls anywhere in this path — even
 // the chapter lists come from data already on disk (a user-confirmed TOC
 // or the PDF's own bookmarks; `GET /api/library/{hash}/toc`).
+//
+// The listing itself streams (SSE): a cold pdftext cache extracts roughly
+// one book per minute on a real library, so rows appear as they are read
+// and selection can start while the whale is still extracting.
 let manualLibrary = [];
 // hashes of the checked works, in click order (the initial study order)
 let manualSelected = [];
+let manualScanning = false;
 // The confirmed selection as ConfirmedNode-shaped nodes (plus client-only
 // fields, stripped in `manualNodeToPayload` before the create call).
 let manualTree = [];
 
+// SSE payloads are JSON-encoded twice (grading.rs's `sse_frame` serializes
+// its `&str` as a JSON string) — unwrap the inner layer like acervo.js does.
+function manualPayload(data) {
+  return typeof data === "string" ? JSON.parse(data) : data;
+}
+
 el("manualStartBtn").addEventListener("click", async () => {
   el("startEntry").hidden = true;
   el("libraryPicker").hidden = false;
-  await loadLibrary();
+  if (!manualLibrary.length) await loadLibrary();
 });
 
 async function loadLibrary() {
-  const list = el("libraryList");
-  list.innerHTML = '<li class="muted">' + escapeHtml(t("manual.loading")) + "</li>";
+  if (manualScanning) return;
+  manualScanning = true;
+  el("libraryRecheckBtn").disabled = true;
+  manualLibrary = [];
+  renderLibraryList();
+  const progress = el("libraryProgress");
+  progress.hidden = false;
+  progress.textContent = t("manual.loading");
+  let total = null;
   try {
     const resp = await api("/api/library");
     if (!resp.ok) throw new Error(await resp.text());
-    manualLibrary = (await resp.json()).entries || [];
-    // A re-check keeps what's still there and forgets what vanished.
-    const known = new Set(manualLibrary.map((e) => e.hash));
-    manualSelected = manualSelected.filter((h) => known.has(h));
-    renderLibraryList();
+    await readSse(resp, (event, data) => {
+      if (event === "start") {
+        total = manualPayload(data).total;
+      } else if (event === "entry") {
+        manualLibrary.push(manualPayload(data));
+        progress.textContent = total == null
+          ? t("manual.loading")
+          : t("manual.scanning", manualLibrary.length, total) +
+            " · " + t("manual.scanningHint");
+      }
+      renderLibraryList();
+    });
   } catch (err) {
-    list.innerHTML =
+    el("libraryList").innerHTML =
       '<li class="muted"><span class="error">' + t("error.failed") + " " + escapeHtml(String(err)) + "</span></li>";
   }
+  // A re-check keeps what's still there and forgets what vanished — done
+  // here rather than per-entry so a refresh never flickers the selection.
+  const known = new Set(manualLibrary.map((e) => e.hash));
+  manualSelected = manualSelected.filter((h) => known.has(h));
+  manualScanning = false;
+  el("libraryRecheckBtn").disabled = false;
+  progress.hidden = true;
+  renderLibraryList();
+}
+
+function libraryStem(filename) {
+  return filename.replace(/\.[^.]+$/, "");
+}
+
+function librarySameText(a, b) {
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return norm(a) === norm(b);
+}
+
+// Metadata titles in the wild are often worse than none: the whole
+// "Author - Title (year, publisher)" string, or another converter's
+// leftover filename ("single.dvi" — seen in a real library). Clean what
+// is recognizable and fall back to the filename stem, whose
+// "Author - Title" shape lets the author prefix move to the meta line.
+function libraryDisplayTitle(e) {
+  let title = (e.title || "").trim();
+  if (/^[^/\\]+\.(pdf|dvi|djvu|epub|ps|txt|tex)$/i.test(title)) title = "";
+  if (!title) {
+    const stem = libraryStem(e.filename);
+    const parts = stem.split(" - ");
+    return (parts.length > 1 ? parts[parts.length - 1] : stem).trim();
+  }
+  const authors = (e.authors || "").trim();
+  if (authors && title.toLowerCase().startsWith(authors.toLowerCase() + " - ")) {
+    return title.slice(authors.length + 3).trim();
+  }
+  return title;
+}
+
+function visibleLibraryEntries() {
+  const q = el("librarySearch").value.trim().toLowerCase();
+  return manualLibrary
+    .filter((e) => {
+      if (!q) return true;
+      const hay = (
+        libraryDisplayTitle(e) +
+        " " +
+        e.title +
+        " " +
+        (e.authors || "") +
+        " " +
+        e.filename
+      ).toLowerCase();
+      return hay.includes(q);
+    })
+    .map((e) => ({ e, key: libraryDisplayTitle(e) }))
+    .sort((a, b) => a.key.localeCompare(b.key, undefined, { sensitivity: "base" }))
+    .map((x) => x.e);
 }
 
 function renderLibraryList() {
   const list = el("libraryList");
-  if (!manualLibrary.length) {
+  if (!manualLibrary.length && !manualScanning) {
     list.innerHTML = '<li class="muted">' + escapeHtml(t("manual.empty")) + "</li>";
-    el("libraryContinueBtn").disabled = true;
+    updateLibraryFooter();
     return;
   }
   const chosen = new Set(manualSelected);
-  list.innerHTML = manualLibrary
+  const entries = visibleLibraryEntries();
+  list.innerHTML = entries
     .map((e) => {
-      const meta =
-        escapeHtml(e.filename) +
-        (e.authors ? " · " + escapeHtml(e.authors) : "") +
-        " · " +
-        e.pages +
-        "p" +
-        (e.toc === "unavailable"
-          ? " · " + escapeHtml(t("manual.tocUnavailable"))
-          : "");
+      // The filename only earns its line when it says something the
+      // title doesn't — otherwise the row repeats itself twice.
+      const title = libraryDisplayTitle(e);
+      const showFile = !librarySameText(title, libraryStem(e.filename));
+      const meta = [
+        (e.authors || "").trim(),
+        e.pages + "p",
+        showFile ? e.filename : null,
+        e.toc === "unavailable" ? t("manual.tocUnavailable") : null,
+      ]
+        .filter(Boolean)
+        .map(escapeHtml)
+        .join(" · ");
       return (
-        '<li><label class="library-row">' +
+        '<li><label class="library-row' +
+        (chosen.has(e.hash) ? " selected" : "") +
+        '">' +
         '<input type="checkbox" data-hash="' +
         e.hash +
         '"' +
         (chosen.has(e.hash) ? " checked" : "") +
         ">" +
+        '<span class="library-text">' +
         '<span class="library-title">' +
-        escapeHtml(e.title) +
+        escapeHtml(title) +
         "</span>" +
-        '<span class="muted">' +
+        '<span class="library-meta muted">' +
         meta +
+        "</span>" +
         "</span>" +
         "</label></li>"
       );
     })
     .join("");
+  if (!entries.length) {
+    list.innerHTML = '<li class="muted">' + escapeHtml(t("manual.noMatch")) + "</li>";
+  }
   list.querySelectorAll('input[type="checkbox"]').forEach((box) => {
     box.addEventListener("change", () => {
       const hash = box.dataset.hash;
@@ -287,11 +382,28 @@ function renderLibraryList() {
       } else {
         manualSelected = manualSelected.filter((h) => h !== hash);
       }
-      el("libraryContinueBtn").disabled = manualSelected.length === 0;
+      renderLibraryList();
     });
   });
-  el("libraryContinueBtn").disabled = manualSelected.length === 0;
+  updateLibraryFooter();
 }
+
+function updateLibraryFooter() {
+  const n = manualSelected.length;
+  el("libraryCount").textContent = manualLibrary.length
+    ? t("manual.selectedCount", n, manualLibrary.length)
+    : "";
+  el("libraryClearBtn").hidden = n === 0;
+  el("libraryContinueBtn").disabled = n === 0;
+  el("libraryContinueBtn").textContent = t("manual.continue") + (n ? " (" + n + ")" : "");
+}
+
+el("librarySearch").addEventListener("input", () => renderLibraryList());
+
+el("libraryClearBtn").addEventListener("click", () => {
+  manualSelected = [];
+  renderLibraryList();
+});
 
 el("libraryBackBtn").addEventListener("click", () => {
   el("libraryPicker").hidden = true;

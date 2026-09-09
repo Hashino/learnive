@@ -163,11 +163,17 @@
         <div id="libraryPicker" hidden>
           <h2 data-i18n="manual.libraryTitle">Your library</h2>
           <p class="muted" data-i18n="manual.libraryHint">Choose the books and articles for this curriculum.</p>
+          <div class="library-toolbar">
+            <input type="search" id="librarySearch" autocomplete="off" data-i18n-placeholder="manual.searchPlaceholder" placeholder="Filter by title, author, or file">
+          </div>
           <ul id="libraryList" class="library-list"></ul>
+          <p class="muted" id="libraryProgress" hidden></p>
+          <p class="muted" id="libraryCount"></p>
           <p>
             <button type="button" id="libraryContinueBtn" data-i18n="manual.continue">Continue</button>
             <button type="button" id="libraryBackBtn" data-i18n="coldstart.back">Back</button>
             <button type="button" id="libraryRecheckBtn" data-i18n="manual.recheck">Re-check</button>
+            <button type="button" id="libraryClearBtn" class="link-btn" data-i18n="manual.clear" hidden>Clear</button>
           </p>
         </div>
 

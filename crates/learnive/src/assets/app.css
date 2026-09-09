@@ -878,23 +878,47 @@ body.source-resizing #askBar {
   padding: 0;
   margin: 0 0 0.75rem;
 }
+.library-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.library-toolbar input[type="search"] {
+  flex: 1;
+  max-width: 28rem;
+}
 .library-row {
   display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  padding: 0.3rem 0;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  margin: 0 -0.5rem;
+  border-radius: 6px;
   cursor: pointer;
+}
+.library-row:hover {
+  background: var(--card-bg);
 }
 .library-row input[type="checkbox"] {
   flex: none;
-  align-self: center;
+  margin-top: 0.2em;
+}
+.library-row .library-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 .library-row .library-title {
   font-weight: 600;
 }
-.library-row .muted {
+.library-row .library-meta {
   font-size: 0.85em;
   word-break: break-word;
+}
+/* Selected tint, fixed across themes like the skip/review/learn toggle
+   colors (a low-alpha nord10 wash reads as "marked" on both). */
+.library-row.selected {
+  background: rgba(94, 129, 172, 0.18);
 }
 .manual-reorder {
   display: inline-flex;

@@ -93,25 +93,93 @@ pub async fn get_source_asset(
 // deduction pass: §15's rule that recovery must not cost a model call
 // applies a fortiori to a flow whose entire point is skipping the model.
 
-/// One row of [`library_list`].
-#[derive(serde::Serialize)]
-pub struct LibraryListResp {
-    pub entries: Vec<source::acervo::LibraryListingEntry>,
-}
-
-/// Lists the local library for the manual cold start's picker screen. No
-/// document scope — this is the one endpoint that answers "what could I
-/// study?" directly. Sorted by filename (the scan's own order), so the
-/// picker's rows are stable across the screen's re-check button.
-pub async fn library_list(
-    State(state): State<AppState>,
-) -> Result<Json<LibraryListResp>, ApiError> {
+/// Lists the local library for the manual cold start's picker screen as an
+/// SSE stream — `start` (total), one `entry` per book the moment its file is
+/// read, `done`. No document scope — this is the one endpoint that answers
+/// "what could I study?" directly. Streaming is the point, not decoration:
+/// a cold pdftext cache extracts roughly one book per MINUTE on a real
+/// library (measured 2026-09-09: 115 MB, 13 PDFs), and a single JSON
+/// response held the whole picker hostage behind the slowest book with no
+/// feedback. Progressive rows let the learner start selecting while the
+/// whale is still extracting. Each file's read runs in `spawn_blocking`
+/// (CPU-bound extraction); errors skip the file — same
+/// one-bad-file-must-not-sink-the-batch stance as candidate loading.
+pub async fn library_list(State(state): State<AppState>) -> Result<Response, ApiError> {
     let data_dir = state.data_dir.to_string();
-    let entries = spawn_blocking(move || source::acervo::library_listing(&data_dir))
-        .await
-        .map_err(|e| ApiError::Internal(format!("library listing task failed: {e}")))?
-        .map_err(|e| ApiError::Internal(format!("could not scan the local library: {e}")))?;
-    Ok(Json(LibraryListResp { entries }))
+    let stream = async_stream::stream! {
+        let library = match source::LocalPdfSource::open(&data_dir) {
+            Ok(l) => l,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!(
+                    "could not open local library: {e}"
+                )));
+                return;
+            }
+        };
+        let entries = match library.scan() {
+            Ok(e) => e,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!(
+                    "could not scan the local library: {e}"
+                )));
+                return;
+            }
+        };
+        let start = serde_json::to_string(&serde_json::json!({ "total": entries.len() }))
+            .unwrap_or_default();
+        yield Ok(sse_frame("start", &start));
+
+        let cache_dir = source::pdftext_cache_dir(&data_dir);
+        let toc_confirm = match source::toc_confirm::TocConfirmStore::open(&data_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!("could not open TOC store: {e}")));
+                return;
+            }
+        };
+        for listing_entry in entries {
+            let path = library.root().join(&listing_entry.filename);
+            let cache_dir2 = cache_dir.clone();
+            let read = spawn_blocking(move || source::read_pdf_cached(&path, &cache_dir2)).await;
+            let Ok(Ok((hash, pdf))) = read else {
+                // Genuinely unreadable file: skipped, never listed — it
+                // can't match anything later either (same stance as
+                // `load_candidates`).
+                continue;
+            };
+            let toc = if toc_confirm.get(&hash).is_some() {
+                "confirmed"
+            } else if !pdf.outline.is_empty() {
+                "embedded"
+            } else {
+                "unavailable"
+            };
+            let entry = source::acervo::LibraryListingEntry {
+                // An EMPTY /Info title (not just a missing one) falls back
+                // to the filename stem — several real-world PDFs carry
+                // `Title: ""` and a blank row helps no one (live find,
+                // user's library, 2026-09-09).
+                title: pdf
+                    .meta_title
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| source::acervo::filename_stem(&listing_entry.filename)),
+                authors: pdf.meta_author.clone(),
+                pages: pdf.pages.page_count,
+                hash,
+                filename: listing_entry.filename,
+                toc,
+            };
+            yield Ok(sse_frame("entry", &serde_json::to_string(&entry).unwrap_or_default()));
+        }
+        yield Ok(sse_frame("done", "{}"));
+    };
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .expect("valid stream response"))
 }
 
 /// One chapter the manual path can offer for a book.
@@ -219,20 +287,68 @@ pub async fn library_toc(
 /// The embedded-outline flatten [`get_acervo_toc`] does for the document TOC
 /// screen, plus `split_printed_number` so each entry carries its printed
 /// number separately. All depths, document order — the acervo editor's own
-/// flatten made "flat chapter list" the established shape.
+/// flatten made "flat chapter list" the established shape. Front matter
+/// ([`is_front_matter`]) is dropped, though its children are still walked —
+/// a wrong drop here costs real content, so only the entry itself filters.
 fn flatten_library_outline(
     entries: &[source::pdf::OutlineEntry],
     out: &mut Vec<LibraryTocEntryResp>,
 ) {
     for e in entries {
         let (number, title) = source::toc_confirm::split_printed_number(&e.title);
-        out.push(LibraryTocEntryResp {
-            number,
-            title,
-            page: Some(e.page),
-        });
+        if !is_front_matter(&e.title) {
+            out.push(LibraryTocEntryResp {
+                number,
+                title,
+                page: Some(e.page),
+            });
+        }
         flatten_library_outline(&e.children, out);
     }
+}
+
+/// Front matter a real book carries in its outline but nobody studies as a
+/// chapter. The manual reading list lists every outline entry as a learnable
+/// row, so a real book (live: Axler's "About the Author", "Contents",
+/// "Acknowledgments", "Photo Credits", "Symbol Index"; Stewart's "Front
+/// matter", "To the student" — user's library, 2026-09-09) buries its actual
+/// chapters in page-matter. Zero-token by the §12.2 rule and deliberately
+/// conservative: an exact match on the normalized title, or a prefix from the
+/// short lead list — a miss costs one noisy row, a wrong drop costs a real
+/// chapter.
+fn is_front_matter(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    let t = t.trim_end_matches(':');
+    matches!(
+        t,
+        "contents"
+            | "table of contents"
+            | "acknowledgments"
+            | "acknowledgements"
+            | "index"
+            | "cover"
+            | "title page"
+            | "copyright"
+            // Observed in Stewart's live outline (user's library, 2026-09-09).
+            | "front matter"
+            | "to the student"
+            | "answers"
+            | "answers to odd-numbered exercises"
+            | "answers to selected exercises"
+            | "answer key"
+            // Observed at the tail of Axler's live outline (2026-09-09):
+            // reference pages after the last real chapter.
+            | "photo credits"
+            | "credits"
+            | "symbol index"
+            | "subject index"
+            | "name index"
+    ) || t.starts_with("preface")
+        || t.starts_with("foreword")
+        || t.starts_with("about the")
+        || t.starts_with("about this")
+        || t.starts_with("colophon")
+        || t.starts_with("index of")
 }
 
 /// Meta companion to [`get_library_pdf`] (S27n): title/authors for the
@@ -3208,19 +3324,25 @@ mod tests {
     }
 
     async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
-        let resp = crate::app::build_router(state.clone())
-            .oneshot(req)
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8_lossy(&bytes).into_owned();
+        let (status, body) = send_raw(state, req).await;
         let json = if body.is_empty() {
             serde_json::Value::Null
         } else {
             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null)
         };
         (status, json)
+    }
+
+    /// Raw-body variant — the SSE endpoints' bodies are event streams, not
+    /// JSON, so their tests parse frames themselves.
+    async fn send_raw(state: &AppState, req: Request<Body>) -> (StatusCode, String) {
+        let resp = crate::app::build_router(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn seed_library(dir: &std::path::Path) {
@@ -3239,14 +3361,42 @@ mod tests {
         );
     }
 
+    /// Collects an SSE listing body into (`start` total, `entry` values) —
+    /// `send` drains the stream to completion, so the frames are all there.
+    fn parse_sse_listing(body: &str) -> (Option<usize>, Vec<serde_json::Value>) {
+        let mut total = None;
+        let mut entries = Vec::new();
+        for frame in body.split("\n\n") {
+            let mut lines = frame.lines();
+            let Some(event) = lines.next().and_then(|l| l.strip_prefix("event: ")) else {
+                continue;
+            };
+            let Some(data) = lines.next().and_then(|l| l.strip_prefix("data: ")) else {
+                continue;
+            };
+            // `sse_frame` serializes its `&str` payload as a JSON STRING,
+            // so the data line is JSON-encoded twice — unwrap the outer
+            // layer first (same convention `last_sse_event_json` uses).
+            let inner: String = serde_json::from_str(data).unwrap_or(data.to_string());
+            let json: serde_json::Value = serde_json::from_str(&inner).unwrap_or_default();
+            match event {
+                "start" => total = json["total"].as_u64().map(|n| n as usize),
+                "entry" => entries.push(json),
+                _ => {}
+            }
+        }
+        (total, entries)
+    }
+
     #[tokio::test]
     async fn library_list_offers_every_pdf_with_its_toc_tier() {
         let (dir, state) = test_state();
         seed_library(dir.path());
 
-        let (status, body) = send(&state, authed("/api/library")).await;
+        let (status, body) = send_raw(&state, authed("/api/library")).await;
         assert_eq!(status, StatusCode::OK);
-        let entries = body["entries"].as_array().expect("entries array");
+        let (total, entries) = parse_sse_listing(&body);
+        assert_eq!(total, Some(2), "the start frame names the scan total");
         assert_eq!(entries.len(), 2, "both PDFs listed, sorted by filename");
 
         let structured = &entries[0];
@@ -3267,17 +3417,22 @@ mod tests {
     #[tokio::test]
     async fn library_list_is_empty_not_an_error_without_a_library() {
         let (_dir, state) = test_state();
-        let (status, body) = send(&state, authed("/api/library")).await;
+        let (status, body) = send_raw(&state, authed("/api/library")).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["entries"].as_array().unwrap().len(), 0);
+        let (total, entries) = parse_sse_listing(&body);
+        assert_eq!(total, Some(0));
+        assert!(entries.is_empty());
     }
 
     #[tokio::test]
     async fn library_toc_splits_printed_numbers_from_embedded_bookmarks() {
         let (dir, state) = test_state();
         seed_library(dir.path());
-        let listed = send(&state, authed("/api/library")).await.1;
-        let hash = listed["entries"][0]["hash"].as_str().unwrap().to_string();
+        let (_, listed) = send_raw(&state, authed("/api/library")).await;
+        let hash = parse_sse_listing(&listed).1[0]["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
         assert_eq!(status, StatusCode::OK);
@@ -3296,13 +3451,58 @@ mod tests {
     async fn library_toc_offers_no_chapter_tier_without_bookmarks() {
         let (dir, state) = test_state();
         seed_library(dir.path());
-        let listed = send(&state, authed("/api/library")).await.1;
-        let hash = listed["entries"][1]["hash"].as_str().unwrap().to_string();
+        let (_, listed) = send_raw(&state, authed("/api/library")).await;
+        let hash = parse_sse_listing(&listed).1[1]["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["source"], "unavailable");
         assert_eq!(body["entries"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn library_toc_drops_front_matter_from_embedded_bookmarks() {
+        let (dir, state) = test_state();
+        let library = source::LocalPdfSource::open(dir.path()).unwrap();
+        std::fs::create_dir_all(library.root()).unwrap();
+        crate::source::mock::write_book_pdf_with_chapters(
+            &library.root().join("front-matter.pdf"),
+            "Front Matter Book",
+            "F. M. Author",
+            &[
+                ("Contents", 1usize),
+                ("Preface for Students", 1),
+                ("Acknowledgments", 2),
+                ("Front matter", 2),
+                ("To the student", 2),
+                ("Answers to odd-numbered exercises", 5),
+                ("1 First Ideas", 2),
+                ("About the Author", 3),
+                ("2 Later Ideas", 4),
+                ("Photo Credits", 7),
+                ("Symbol Index", 7),
+                ("Colophon: Notes on Typesetting", 8),
+            ],
+        );
+
+        let (_, listed) = send_raw(&state, authed("/api/library")).await;
+        let hash = parse_sse_listing(&listed).1[0]["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, body) = send(&state, authed(&format!("/api/library/{hash}/toc"))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "embedded");
+        let titles: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, ["First Ideas", "Later Ideas"]);
     }
 
     #[tokio::test]
@@ -3320,8 +3520,11 @@ mod tests {
     async fn library_toc_prefers_a_user_confirmed_toc_over_bookmarks() {
         let (dir, state) = test_state();
         seed_library(dir.path());
-        let listed = send(&state, authed("/api/library")).await.1;
-        let hash = listed["entries"][0]["hash"].as_str().unwrap().to_string();
+        let (_, listed) = send_raw(&state, authed("/api/library")).await;
+        let hash = parse_sse_listing(&listed).1[0]["hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // A confirmed TOC (the S27k store) outranks the embedded outline,
         // same precedence the document-scoped acervo TOC endpoint uses.
