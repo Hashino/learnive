@@ -5,8 +5,9 @@
 //!
 //! ```text
 //! <root>/
-//!   <doc-id>/            # one directory per living document
-//!     <node-id>.html     # one HTML file per concept node (§4.1)
+//!   documents/           # one subdirectory per living document
+//!     <doc-id>/          # the id IS the directory name (see `new_doc_id`)
+//!       <node-id>.html   # one HTML file per concept node (§4.1)
 //! ```
 //!
 //! The directory only serves loose human navigation; the real graph
@@ -88,11 +89,20 @@ pub struct Store {
     outline_lock: Arc<Mutex<()>>,
 }
 
+/// The one subdirectory of the data root that holds living documents. The
+/// root also carries `library/`, `index/`, `secrets.json` etc., so a flat
+/// layout made `list_documents` list the whole data dir and rely on the
+/// API layer skipping dirs without a parseable `outline.json` — the
+/// boundary is structural since documents moved in here (2026-09-09).
+const DOCUMENTS_DIR: &str = "documents";
+
 impl Store {
     /// Opens (creating if needed) the storage at the given root.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
+        migrate_flat_documents(&root)?;
+        fs::create_dir_all(root.join(DOCUMENTS_DIR))?;
         Ok(Self {
             root,
             interaction_lock: Arc::new(Mutex::new(())),
@@ -122,10 +132,10 @@ impl Store {
         Ok(())
     }
 
-    /// Lists the living-document IDs (subdirectories of the root).
+    /// Lists the living-document IDs (subdirectories of `documents/`).
     pub fn list_documents(&self) -> Result<Vec<String>> {
         let mut docs = Vec::new();
-        for entry in fs::read_dir(&self.root)? {
+        for entry in fs::read_dir(self.root.join(DOCUMENTS_DIR))? {
             let entry = entry?;
             if entry.file_type()?.is_dir()
                 && let Some(name) = entry.file_name().to_str()
@@ -135,6 +145,12 @@ impl Store {
         }
         docs.sort();
         Ok(docs)
+    }
+
+    /// Whether a document directory already exists with this id — the
+    /// collision check `new_doc_id`'s uniqueness loop runs against.
+    pub fn document_exists(&self, doc_id: &str) -> bool {
+        ensure_safe_id(doc_id).is_ok() && self.doc_dir(doc_id).is_dir()
     }
 
     /// Most recent modification time anywhere inside the document's directory,
@@ -343,12 +359,36 @@ impl Store {
     }
 
     fn doc_dir(&self, doc_id: &str) -> PathBuf {
-        self.root.join(doc_id)
+        self.root.join(DOCUMENTS_DIR).join(doc_id)
     }
 
     fn node_path(&self, doc_id: &str, node_id: &str) -> PathBuf {
         self.doc_dir(doc_id).join(format!("{node_id}.html"))
     }
+}
+
+/// One-time layout migration (2026-09-09): documents used to live directly
+/// under the data root — `learnive-data/<doc-id>/`, siblings of `library/`
+/// and `index/` — and now live under `learnive-data/documents/`. Any
+/// root-level directory carrying a `document.json` moves in; every other
+/// root entry (the data dir's own subdirs and files) stays put. Runs from
+/// [`Store::open`], before anything can list or read documents — cheap
+/// stat walk, a no-op on an already-migrated root.
+fn migrate_flat_documents(root: &Path) -> Result<()> {
+    let docs_dir = root.join(DOCUMENTS_DIR);
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() || path == docs_dir || !path.join("document.json").is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        fs::create_dir_all(&docs_dir)?;
+        fs::rename(&path, docs_dir.join(name))?;
+    }
+    Ok(())
 }
 
 /// Rejects IDs that could escape the data directory or collide with the file
@@ -501,6 +541,53 @@ mod tests {
     }
 
     #[test]
+    fn root_level_documents_migrate_into_documents_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // The pre-2026-09-09 layout: a document directory as a sibling of
+        // the data dir's own subdirs and files.
+        let old = root.join("om4dxyghc6");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("document.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("library")).unwrap();
+        fs::write(root.join("config.json"), "{}").unwrap();
+
+        Store::open(root).unwrap();
+
+        assert!(root.join("documents/om4dxyghc6/document.json").is_file());
+        assert!(!old.exists(), "the old directory must have moved");
+        assert!(root.join("library").is_dir(), "non-document dirs stay");
+        assert!(root.join("config.json").is_file(), "files stay");
+
+        let store = Store::open(root).unwrap();
+        assert_eq!(store.list_documents().unwrap(), vec!["om4dxyghc6"]);
+    }
+
+    #[test]
+    fn documents_are_structurally_separated_from_data_dir_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        // The pre-migration failure mode: `library/`, `index/`, `corpus/`
+        // were indistinguishable from document dirs at the store level, and
+        // the API layer had to skip them for lacking an outline.
+        fs::create_dir_all(tmp.path().join("library")).unwrap();
+        fs::create_dir_all(tmp.path().join("index")).unwrap();
+
+        store.write_node(&sample_node("algebra", "n1")).unwrap();
+        assert_eq!(store.list_documents().unwrap(), vec!["algebra"]);
+    }
+
+    #[test]
+    fn document_exists_checks_only_real_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        assert!(!store.document_exists("algebra"));
+        store.write_node(&sample_node("algebra", "n1")).unwrap();
+        assert!(store.document_exists("algebra"));
+        assert!(!store.document_exists("../etc"), "traversal is never ok");
+    }
+
+    #[test]
     fn rejects_path_traversal_ids() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).unwrap();
@@ -528,7 +615,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(tmp.path().join("algebra/events.jsonl").exists());
+        assert!(tmp.path().join("documents/algebra/events.jsonl").exists());
 
         assert!(matches!(
             store.event_log("../etc"),

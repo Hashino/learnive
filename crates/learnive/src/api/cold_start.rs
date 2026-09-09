@@ -891,6 +891,63 @@ pub struct CreateResp {
     rejected: Vec<String>,
 }
 
+/// Mints a document id a human can recognize in the file system: the first
+/// three words of the document name, ASCII-folded and dash-joined, plus a
+/// short random tail for uniqueness — `stewart-calculus-early-7f2b91`. The
+/// directory IS the id (§4), so this is literally the folder name under
+/// `learnive-data/documents/`; the random tail absorbs the rare collision,
+/// and the existence loop makes minting collision-proof without a registry.
+/// A birth certificate, not a label: renaming the document later changes
+/// the display name only, never this directory.
+fn new_doc_id(name: &str, store: &crate::store::Store) -> String {
+    loop {
+        let id = format!("{}-{}", doc_slug(name), &engine::new_id()[..6]);
+        if !store.document_exists(&id) {
+            return id;
+        }
+    }
+}
+
+/// The slug half of [`new_doc_id`]: Latin accents folded ("cálculo" →
+/// "calculo"), runs of non-alphanumerics collapsed to single dashes, first
+/// three words, capped so a pathological name can't grow a 200-char
+/// directory. A name with no ASCII word characters at all (CJK, etc.)
+/// folds to "" and the caller's random tail carries the whole id — exactly
+/// the old opaque-id behavior.
+fn doc_slug(name: &str) -> String {
+    let folded: String = name
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            c => c,
+        })
+        .collect::<String>()
+        .to_lowercase();
+    let slug = folded
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut slug = slug.chars().take(48).collect::<String>();
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "document".to_string()
+    } else {
+        slug
+    }
+}
+
 pub async fn create_document(
     State(state): State<AppState>,
     Json(body): Json<CreateReq>,
@@ -955,7 +1012,14 @@ pub async fn create_document(
         items,
     };
 
-    let doc_id = engine::new_id();
+    let doc_id = new_doc_id(
+        if body.name.trim().is_empty() {
+            &body.topic
+        } else {
+            &body.name
+        },
+        &state.store,
+    );
     state.store.create_document(&doc_id)?;
 
     let mut objective_log = ObjectiveLog::default();
@@ -1626,6 +1690,49 @@ pub fn build_fallback_source() -> Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doc_slug_takes_the_first_three_words_folded_and_dashed() {
+        assert_eq!(
+            doc_slug("Stewart - Calculus - Early Transcedentals 6e"),
+            "stewart-calculus-early"
+        );
+        assert_eq!(doc_slug("Um curso de cálculo — Volume 1"), "um-curso-de");
+        assert_eq!(doc_slug("Linear Algebra Done Right"), "linear-algebra-done");
+        // One word only: no trailing dash from the truncation/cleanup path.
+        assert_eq!(doc_slug("History"), "history");
+    }
+
+    #[test]
+    fn doc_slug_survives_names_with_nothing_sluggable() {
+        // No ASCII word characters at all: the fold strips everything, and
+        // the fallback prefix keeps the directory non-empty (the random
+        // tail in `new_doc_id` provides uniqueness).
+        assert_eq!(doc_slug("微积分"), "document");
+        assert_eq!(doc_slug("   "), "document");
+    }
+
+    #[test]
+    fn doc_slug_caps_pathological_names() {
+        let slug = doc_slug("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee");
+        assert!(slug.chars().count() <= 48, "{slug}");
+        assert!(!slug.ends_with('-'), "{slug}");
+    }
+
+    #[test]
+    fn new_doc_id_is_unique_per_call_and_sluggable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let a = new_doc_id("Limits and derivatives", &store);
+        let b = new_doc_id("Limits and derivatives", &store);
+        assert!(a.starts_with("limits-and-derivatives-"), "{a}");
+        assert_ne!(a, b, "two mints for the same name must differ");
+        store.create_document(&a).unwrap();
+        // The existence loop: minting again after the directory is taken
+        // must not collide with it.
+        let c = new_doc_id("Limits and derivatives", &store);
+        assert_ne!(c, a);
+    }
 
     fn learn(id: &str, title: &str, children: Vec<ConfirmedNode>) -> ConfirmedNode {
         ConfirmedNode {
