@@ -315,6 +315,39 @@ async fn mutating_endpoint_rejects_get() {
 /// data directory's non-document siblings (`corpus/`, `index/`) never
 /// show up as documents.
 #[tokio::test]
+async fn a_confirmation_that_skips_everything_is_refused_not_created_empty() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    // Live report 2026-09-09 (manual cold start): the work marked skip +
+    // two chapters learn. The skip cascade consumes the descendants
+    // unconditionally, the outline materialized to ZERO items, and a blank
+    // document was created and shown without a word. `create_document` now
+    // refuses before persisting anything.
+    let (status, body) = call(authed(
+        "POST",
+        "/api/documents",
+        r#"{"topic":"stewart","name":"Stewart","nodes":[{"id":"w1","title":"Stewart","action":"skip","item_type":"book","children":[{"id":"w1c0","title":"Limits","action":"learn","item_type":"chapter","children":[]},{"id":"w1c1","title":"Integrals","action":"learn","item_type":"chapter","children":[]}]}]}"#,
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("nothing to learn or review"), "{body}");
+
+    // Refused before any state was written: the document does not exist.
+    let (status, body) = call(authed("GET", "/api/documents", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.trim(), "[]");
+}
+
+#[tokio::test]
 async fn documents_are_listed_resumable_and_renameable() {
     let state = test_state();
     let call = |req: Request<Body>| {

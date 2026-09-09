@@ -475,22 +475,30 @@ el("libraryContinueBtn").addEventListener("click", async () => {
 // One row of the manual confirmation tree: optional reorder arrows (works
 // only — chapters keep their book's order), then the same 3-segment
 // skip/review/learn toggle markup the proposed path renders
-// (`renderOutlineNode`'s classes, so the styling is shared).
+// (`renderOutlineNode`'s classes, so the styling is shared). A WORK that
+// has chapter children gets NO toggle: both `skip` (cascades to the whole
+// branch server-side) and `review` (materializes the work alone, children
+// omitted) would silently discard the chapter choices the user just made —
+// and the picker already asserted "I want this work". The chapters carry
+// the choices; the work row is a container with an order.
 function manualRowHtml(node, withReorder) {
-  const segments = ["skip", "review", "learn"]
-    .map(
-      (a) =>
-        '<button type="button" class="prereq-toggle-seg' +
-        (node.action === a ? " active" : "") +
-        '" data-action="' +
-        a +
-        '" aria-pressed="' +
-        (node.action === a) +
-        '">' +
-        t("prereq.action." + a) +
-        "</button>",
-    )
-    .join("");
+  const workWithChildren = withReorder && (node.children || []).length > 0;
+  const segments = workWithChildren
+    ? ""
+    : ["skip", "review", "learn"]
+        .map(
+          (a) =>
+            '<button type="button" class="prereq-toggle-seg' +
+            (node.action === a ? " active" : "") +
+            '" data-action="' +
+            a +
+            '" aria-pressed="' +
+            (node.action === a) +
+            '">' +
+            t("prereq.action." + a) +
+            "</button>",
+        )
+        .join("");
   const reorder = withReorder
     ? '<span class="manual-reorder">' +
       '<button type="button" class="reorder-btn" data-dir="up" title="' +
@@ -562,12 +570,17 @@ el("manualBackBtn").addEventListener("click", () => {
 
 // Strips the client-only fields (hash/toc) and hands the server the exact
 // ConfirmedNode shape `create_document` materializes verbatim — same
-// round-trip contract the proposed path uses, just built client-side.
+// round-trip contract the proposed path uses, just built client-side. A
+// work with chapter children is ALWAYS `learn` in the payload (the
+// ChaptersProposed container): a stale `skip`/`review` here would cascade
+// past the user's chapter choices — the toggle is hidden for such works,
+// this normalization is the backstop.
 function manualNodeToPayload(n) {
+  const hasChildren = (n.children || []).length > 0;
   return {
     id: n.id,
     title: n.title,
-    action: n.action,
+    action: n.item_type === "book" && hasChildren ? "learn" : n.action,
     children: (n.children || []).map(manualNodeToPayload),
     item_type: n.item_type,
     bibliography: n.bibliography || undefined,
@@ -576,8 +589,31 @@ function manualNodeToPayload(n) {
   };
 }
 
+// Surviving study units in a confirmed manual payload: leaves (whole works
+// and chapters) that aren't skipped. A container work contributes only what
+// its children contribute — the "book learn + every chapter skip" payload
+// materializes to a lone empty container, which is just the all-skip blank
+// document again (caught live in the 2026-09-09 fix's own verification).
+function manualLeafCount(nodes) {
+  return nodes.reduce(
+    (sum, n) =>
+      sum +
+      ((n.children || []).length
+        ? manualLeafCount(n.children)
+        : n.action === "skip"
+          ? 0
+          : 1),
+    0,
+  );
+}
+
 el("manualConfirmBtn").addEventListener("click", async () => {
   const nodes = manualTree.map(manualNodeToPayload);
+  if (manualLeafCount(nodes) === 0) {
+    el("startStatus").innerHTML =
+      '<span class="error">' + escapeHtml(t("manual.nothingSelected")) + "</span>";
+    return;
+  }
   // topic/name/objective: there was no typed topic, so the selection IS
   // the subject. objective_text stays empty — `create_document` falls
   // back to the topic, and the objective stays revisable later (§5).

@@ -36,6 +36,8 @@ const I18N = {
     "manual.searchPlaceholder": "Filter by title, author, or file",
     "manual.noMatch": "Nothing matches this filter.",
     "manual.clear": "Clear",
+    "manual.nothingSelected":
+      "Nothing to study — every work and chapter is set to skip. Mark at least one as learn.",
     "manual.selectedCount": "{0} of {1} selected",
     "manual.loadingChapters": "Loading chapter lists…",
     "manual.empty": "The library is empty. Add PDFs to the library folder, then re-check.",
@@ -251,6 +253,8 @@ const I18N = {
     "manual.searchPlaceholder": "Filtrar por título, autor ou arquivo",
     "manual.noMatch": "Nada corresponde a este filtro.",
     "manual.clear": "Limpar",
+    "manual.nothingSelected":
+      "Nada para estudar — todas as obras e capítulos estão como pular. Marque ao menos um como aprender.",
     "manual.selectedCount": "{0} de {1} selecionados",
     "manual.loadingChapters": "Carregando listas de capítulos…",
     "manual.empty": "A biblioteca está vazia. Adicione PDFs à pasta da biblioteca e recheque.",

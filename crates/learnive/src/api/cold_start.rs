@@ -938,6 +938,18 @@ pub async fn create_document(
     let mut items = Vec::new();
     let mut to_skip = Vec::new();
     materialize_outline_tree(&confirmed_nodes, None, None, &mut items, &mut to_skip);
+    // A document that materialized to ZERO items is never what a confirm
+    // meant: the generation loop has nothing to walk and the client renders
+    // a blank document (live report 2026-09-09 — manual path, the work marked
+    // skip + two chapters learn; the skip cascade consumed the chapters and
+    // the empty outline was persisted without a word). Refusing here costs
+    // nothing — nothing has been written yet — and turns the silent blank
+    // into an actionable error on BOTH confirmation paths.
+    if items.is_empty() {
+        return Err(ApiError::BadRequest(
+            "the confirmed selection has nothing to learn or review — every node was skipped; mark at least one work or chapter as learn or review".to_string(),
+        ));
+    }
     let outline = engine::Outline {
         topic: body.topic.clone(),
         items,
