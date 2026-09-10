@@ -40,15 +40,11 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
     crate::source::mock::write_book_pdf(&library.root().join("demo-foundations.pdf"), t1, a1);
     crate::source::mock::write_book_pdf(&library.root().join("demo-document.pdf"), t2, a2);
 
-    let corpus = Corpus::open(&dir).unwrap();
-    // A retriever is likewise now load-bearing for every bibliographic node
-    // (`ground_node` hard-requires `state.retriever` to embed its query
-    // against the acervo gate's per-PDF cache) — `Embedder::Mock` gives
-    // tests a real, working `Embedder` with no model download, same spirit
-    // as `Ai::Mock`/`Source::Mock` above.
-    let retriever =
-        crate::retrieval::Retriever::open(&dir, &corpus, crate::retrieval::Embedder::Mock).unwrap();
-
+    // An embedder is likewise now load-bearing for every bibliographic node
+    // (`resolve_grounded_book` hard-requires `state.embedder` to embed its
+    // queries against the acervo gate's per-PDF cache) — `Embedder::Mock`
+    // gives tests a real, working `Embedder` with no model download, same
+    // spirit as `Ai::Mock` above.
     AppState {
         token: Arc::from(TOKEN),
         allowed_origins: Arc::new(HashSet::from([ORIGIN.to_string()])),
@@ -58,10 +54,7 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         config: Arc::new(RwLock::new(AppConfig::default())),
         secret: Arc::new(SecretStore::open(&dir)),
         data_dir: Arc::from(dir.to_string_lossy().as_ref()),
-        source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-        fallback_source: Arc::new(Source::Mock(crate::source::MockSource::new())),
-        corpus,
-        retriever: Some(Arc::new(RwLock::new(retriever))),
+        embedder: Some(Arc::new(crate::retrieval::Embedder::Mock)),
         // S27e: never hit a real catalog host from an integration test —
         // see the field's own doc comment on `AppState`.
         bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
@@ -2144,129 +2137,6 @@ async fn asking_a_question_that_warrants_depth_spawns_a_real_subnode() {
     assert_eq!(qa["anchor_block"], block_id);
 }
 
-// §S13: `decide_move` at L1 offers `research` only on the menu built from
-// `MoveContext`'s own text — check for it the same way the real prompt
-// does (`, research`), so this test breaks if the menu wording ever
-// changes, rather than silently drifting from what it claims to force.
-fn research_once_responder(req: &crate::ai::ChatRequest) -> String {
-    // S33: the research move is Rust-forced now (the gate in
-    // `generate_node` fires on an ungrounded, never-researched node), so
-    // there is no menu to script a "research" pick out of — the plain demo
-    // responder drives whatever the template asks for next.
-    crate::api::demo_responder(req)
-}
-
-/// §S13: the `research` move's branch in `generate_node` (acquire → emit
-/// two status frames → loop back, never `render()`). Since S33 it is not
-/// model-chosen at all — the Rust gate fires when a node starts with no
-/// grounding and no acquisition attempt yet — so this test just needs an
-/// ungrounded node and lets the plain `demo_responder` drive the rest of
-/// the node once `research_attempted` caps the interception at one.
-///
-/// Rewritten 2026-08-29 for S27m: `test_state_with_ai` now seeds a real
-/// (mock-embedder) retriever plus the two demo library PDFs, so a document
-/// created via the DEFAULT `/api/documents {"topic":...}` cold-start path
-/// is bibliographically sourced (`demo_responder`'s reading list) — its
-/// node carries a real `source` pointer and `ground_node` grounds it for
-/// real, so `research` is legitimately never offered on its menu again.
-/// The old comment's premise ("tests never construct a real retriever") no
-/// longer holds. This test's actual subject was always the `research` move
-/// itself, not the reading-list flow, so it now supplies `nodes` directly
-/// (the pre-S27e/direct-API shape, `OutlineItemType::Node` default, no
-/// `source`) to get a genuinely ungrounded node without disabling the
-/// retriever every other test now depends on. `state.source`/
-/// `fallback_source` are swapped to `Source::Unconfigured` so (a) the
-/// explicit `research` move's own `acquire()` call has something to
-/// legitimately fail against, matching "no adequate source found" below,
-/// and (b) `create_document`'s unconditional background `spawn_acquisition`
-/// can't race in and ground the node itself first via `Source::Mock`
-/// (which — unlike the old `retriever: None` no-op — would otherwise
-/// sometimes succeed now that a real retriever backs it).
-#[tokio::test]
-async fn research_move_acquires_then_resumes_the_real_move_loop() {
-    use crate::ai::{Ai, MockProvider, Models, Provider};
-
-    let ai = Ai::new(
-        Provider::Mock(MockProvider::scripted(research_once_responder)),
-        Models::single("demo"),
-    );
-    let mut state = test_state_with_ai(ai);
-    state.source = Arc::new(Source::Unconfigured);
-    state.fallback_source = Arc::new(Source::Unconfigured);
-    let call = |req: Request<Body>| {
-        let state = state.clone();
-        async move {
-            let resp = build_router(state).oneshot(req).await.unwrap();
-            let status = resp.status();
-            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-            (status, String::from_utf8_lossy(&bytes).into_owned())
-        }
-    };
-
-    let (_, body) = call(authed(
-        "POST",
-        "/api/documents",
-        r#"{"topic":"fractions","nodes":[{"id":"n1","title":"Fractions","action":"learn"}]}"#,
-    ))
-    .await;
-    let created: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let doc_id = created["doc_id"].as_str().unwrap().to_string();
-    let node0 = created["items"][0]["id"].as_str().unwrap().to_string();
-
-    // §S18: research still resolves within its own request (the loop-back
-    // to a real decision happens in-process, before that request's one real
-    // move settles and ends the stream) — but the node as a whole may now
-    // take several per-move requests to reach its graded check.
-    let (status, body) = generate_to_completion(&call, &doc_id, &node0).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Both research status frames reached the client...
-    assert_eq!(
-        body.matches("event: research").count(),
-        2,
-        "expected exactly two research status frames:\n{body}"
-    );
-    assert!(body.contains("Looking for sources"));
-    assert!(
-        body.contains("No adequate source found"),
-        "state.source/fallback_source are Source::Unconfigured in this test, \
-         so acquisition must report failure, not silently claim a source: {body}"
-    );
-    // ...and the loop still closed in a graded check afterward, despite
-    // research eating one of MAX_MOVES_PER_NODE's four slots.
-    assert!(body.contains("event: exercise"));
-    assert!(body.contains("event: done"));
-    assert!(!body.contains("event: error"), "unexpected error:\n{body}");
-
-    // Exactly one research move was logged — never a second, off-menu pick:
-    // `research_attempted` withheld it from every later `decide_move` call
-    // in this same node.
-    let event_log = state.store.event_log(&doc_id).unwrap();
-    let research_moves = event_log
-        .iter()
-        .unwrap()
-        .filter(|e| {
-            matches!(&e.kind, crate::events::EventKind::MoveGenerated { move_type, .. }
-                if move_type == "research")
-        })
-        .count();
-    assert_eq!(research_moves, 1);
-
-    // The node still closed with real content and an active exercise —
-    // research burning a slot didn't leave the node half-built.
-    let (status, body) = call(authed(
-        "GET",
-        &format!("/api/documents/{doc_id}/nodes/{node0}"),
-        "",
-    ))
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let view: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(view["demonstrated"], serde_json::json!(false));
-    assert!(view["exercise_block_id"].is_string());
-    assert!(!view["content_html"].as_str().unwrap().is_empty());
-}
-
 /// §S15b — shared node, steps 1+2 (`source_doc_id`/`owner_of` + write
 /// convergence): the acceptance criterion from PLAN.md is literal — the
 /// same node appears in two documents, and a question/annotation made from
@@ -3951,4 +3821,79 @@ async fn library_routes_resolve_a_hash_present_in_the_index() {
     );
     let served_bytes = to_bytes(pdf_resp.into_body(), usize::MAX).await.unwrap();
     assert_eq!(served_bytes.as_ref(), pdf_bytes.as_slice());
+}
+
+/// The manual picker's file choice must survive creation (2026-09-09): with
+/// two files of the same work in the library, `resolve_matched_filename`
+/// sees an ambiguous candidate set and bails — chapter resolution then
+/// never fills `resolved_page` and the S33-2 split gate refuses generation
+/// forever. `create_document` turning `ConfirmedNode::file_hash` into a
+/// `ManualMatchStore` pairing is what makes the learner's explicit pick
+/// win (the store is the first thing that resolver consults).
+#[tokio::test]
+async fn manual_picker_file_choice_is_recorded_as_a_match_pairing() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+
+    // A second file posing as another edition of the same work: identical
+    // title/author metadata, different bytes (one bookmark) → different
+    // hash. Exactly the ambiguity the picker exists to settle.
+    let lib_root = crate::source::LocalPdfSource::open(state.data_dir.as_ref())
+        .unwrap()
+        .root()
+        .to_path_buf();
+    let (t2, a2) = crate::source::mock::DEMO_BOOK_2;
+    crate::source::mock::write_book_pdf_with_chapters(
+        &lib_root.join("demo-document-2nd-edition.pdf"),
+        t2,
+        a2,
+        &[("Chapter One", 1)],
+    );
+
+    // The picker's payload: the work is learn, `file_hash` names the FIRST
+    // fixture — the file the learner actually picked.
+    let bytes = std::fs::read(lib_root.join("demo-document.pdf")).unwrap();
+    let picked = crate::source::acervo::content_hash(&bytes);
+    let payload = serde_json::json!({
+        "topic": "think python",
+        "name": "Think Python",
+        "nodes": [{
+            "id": "wabc123456789",
+            "title": t2,
+            "action": "learn",
+            "item_type": "book",
+            "file_hash": picked,
+            "bibliography": {
+                "title": t2,
+                "authors": [a2],
+                "year": null,
+                "edition": null,
+                "identifier": null,
+                "kind": "book"
+            },
+            "children": []
+        }]
+    })
+    .to_string();
+    let (status, body) = call(authed("POST", "/api/documents", &payload)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The pairing the acervo gate and chapter resolution both consult
+    // first — it must name the picked file, not the duplicate.
+    let manual = crate::source::ManualMatchStore::open(state.data_dir.as_ref()).unwrap();
+    let expected = crate::source::ExpectedItem {
+        title: t2.to_string(),
+        authors: vec![a2.to_string()],
+        kind: crate::source::SourceKind::Book,
+    };
+    let pairing = manual.get(&expected).expect("pairing recorded at creation");
+    assert_eq!(pairing.filename, "demo-document.pdf");
 }

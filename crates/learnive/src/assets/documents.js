@@ -568,9 +568,11 @@ el("manualBackBtn").addEventListener("click", () => {
   el("libraryPicker").hidden = false;
 });
 
-// Strips the client-only fields (hash/toc) and hands the server the exact
-// ConfirmedNode shape `create_document` materializes verbatim — same
-// round-trip contract the proposed path uses, just built client-side. A
+// Hands the server the exact ConfirmedNode shape `create_document`
+// materializes verbatim — same round-trip contract the proposed path uses,
+// just built client-side. `hash` is NOT stripped: it rides along as
+// `file_hash` (the one thing the picker knows that the server cannot
+// re-derive); only `toc` is client-only. A
 // work with chapter children is ALWAYS `learn` in the payload (the
 // ChaptersProposed container): a stale `skip`/`review` here would cascade
 // past the user's chapter choices — the toggle is hidden for such works,
@@ -586,6 +588,12 @@ function manualNodeToPayload(n) {
     bibliography: n.bibliography || undefined,
     verification: null,
     chapter_number: n.chapter_number || undefined,
+    // The one field this payload adds over the proposed path's round-trip:
+    // WHICH library file the work means (server persists it as a
+    // manual-match pairing, so two editions of the same title never leave
+    // chapter resolution ambiguous again). Chapters have no `hash`; it
+    // drops out of the JSON as undefined.
+    file_hash: n.hash || undefined,
   };
 }
 

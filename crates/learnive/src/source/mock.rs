@@ -1,14 +1,11 @@
-//! Canned acquisition backend — demo mode and tests, no network.
-//!
-//! Lets the whole grounding pipeline (§10/§11) run keyless and offline, exactly
-//! as `ai::MockProvider` lets the generation loop run keyless. The content is
-//! deliberately shaped like a real OER textbook excerpt (title, chapter/section
-//! locators, a CC license) so downstream code exercises the real code paths.
+//! Demo-mode library fixtures — canned PDFs written into `<data>/library/`,
+//! no network. Lets the whole grounding pipeline (§10/§11) run keyless and
+//! offline, exactly as `ai::MockProvider` lets the generation loop run
+//! keyless. The content is deliberately shaped like a real textbook
+//! (title/author metadata, chapter bookmarks, enough pages to pass the
+//! acervo gate) so downstream code exercises the real code paths.
 
-use super::{
-    FetchedSource, LocalPdfSource, Origin, SearchHit, Section, SourceError, SourceKind, SourceMeta,
-    corpus_id,
-};
+use super::LocalPdfSource;
 
 /// Bibliographic identity of demo mode's two canned library fixtures —
 /// `(title, author)`. The single source of truth for both `demo_responder`'s
@@ -17,84 +14,6 @@ use super::{
 /// string literals eventually would.
 pub(crate) const DEMO_BOOK_1: (&str, &str) = ("Demo Foundations", "Demo Author");
 pub(crate) const DEMO_BOOK_2: (&str, &str) = ("Demo Document", "Demo Author");
-
-/// A no-network source backend returning a single plausible OER book per query.
-#[derive(Debug, Clone, Default)]
-pub struct MockSource;
-
-impl MockSource {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SourceError> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Err(SourceError::NoResult);
-        }
-        // One canned "OpenStax-like" hit whose title echoes the query, so tests
-        // can assert the topic flowed through.
-        Ok(vec![SearchHit {
-            title: format!("Introduction to {query}"),
-            authors: vec!["OpenStax".into()],
-            kind: SourceKind::Book,
-            origin: Origin::Mock,
-            license: "CC BY 4.0".into(),
-            handle: format!("mock:{query}"),
-            pages: None,
-            size_bytes: None,
-        }])
-    }
-
-    pub async fn fetch(&self, hit: &SearchHit) -> Result<FetchedSource, SourceError> {
-        let topic = hit
-            .handle
-            .strip_prefix("mock:")
-            .unwrap_or(&hit.title)
-            .to_string();
-        let id = corpus_id(&hit.title, "mock");
-        let sections = vec![
-            {
-                let text = format!(
-                    "{topic} is a foundational idea. This section introduces its core \
-                     definition and the vocabulary used to talk about it, grounding the \
-                     learner before any exercise. A worked intuition precedes the formal \
-                     statement so the concept is met concretely first."
-                );
-                Section {
-                    locator: "chap:1;sec:1".into(),
-                    title: format!("What is {topic}?"),
-                    text,
-                }
-            },
-            {
-                let text = format!(
-                    "Building on the definition, this section shows where {topic} is used \
-                     and connects it to adjacent concepts, so the learner integrates it \
-                     rather than memorizing it in isolation."
-                );
-                Section {
-                    locator: "chap:1;sec:2".into(),
-                    title: format!("Why {topic} matters"),
-                    text,
-                }
-            },
-        ];
-        Ok(FetchedSource {
-            meta: SourceMeta {
-                id,
-                title: hit.title.clone(),
-                authors: hit.authors.clone(),
-                kind: hit.kind,
-                license: hit.license.clone(),
-                origin: hit.origin.clone(),
-                pdf_asset: None,
-            },
-            sections,
-            pdf: None,
-        })
-    }
-}
 
 /// Writes a minimal but acervo-gate-passing PDF fixture: `PAGE_COUNT` pages
 /// (8, matching `source::acervo`'s own `MIN_PLAUSIBLE_BOOK_PAGES`, so a
@@ -186,20 +105,9 @@ pub(crate) fn write_book_pdf_with_chapters(
 /// canned PDF fixtures (S27i, PLAN.md, 2026-08-30) so a **live**
 /// `LEARNIVE_DEMO=1` run — not just the router-test harness — can pass the
 /// acervo gate and exercise the real citation → source-panel → native-PDF-
-/// viewer path end to end.
-///
-/// PLAN.md originally specified this as "`MockSource` writes the fixture
-/// into `<data>/library/` on first call" — that design was racy and wrong:
-/// `MockSource::fetch` only ever runs inside `api::cold_start::acquire`,
-/// which `spawn_acquisition` fires via a detached `tokio::spawn` and never
-/// awaits before `ensure_document_grounded` runs (`api/cold_start.rs`). The
-/// acervo gate would then race the fixture write and lose most of the time
-/// — exactly the failure mode `app/tests.rs`'s own `test_state_with_ai` doc
-/// comment already flagged as a reason to seed the library directly instead
-/// of going through `Source::Mock`/`acquire()` at all. This function is that
-/// same eager-seed pattern, promoted from the test harness to a real
-/// (non-`#[cfg(test)]`) call site: `app::AppState::new`, gated on
-/// `LEARNIVE_DEMO` and run *before* any request can reach the acervo gate.
+/// viewer path end to end. Runs from `app::AppState::new`, gated on
+/// `LEARNIVE_DEMO` and *before* any request can reach the acervo gate, so
+/// the gate never races the fixture write.
 ///
 /// Only-if-absent: `data_dir` can be a real `LEARNIVE_DATA_DIR` (the user's
 /// actual library), so this must never overwrite or duplicate a file that's
@@ -224,34 +132,4 @@ pub(crate) fn seed_demo_library(data_dir: impl AsRef<std::path::Path>) -> std::i
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::source::Source;
-
-    #[tokio::test]
-    async fn search_then_fetch_yields_normalized_source() {
-        let src = Source::Mock(MockSource::new());
-        let hits = src.search("limits").await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].title.contains("limits"));
-        assert_eq!(hits[0].license, "CC BY 4.0");
-
-        let fetched = src.fetch(&hits[0]).await.unwrap();
-        assert_eq!(fetched.sections.len(), 2);
-        assert_eq!(fetched.sections[0].locator, "chap:1;sec:1");
-        assert!(fetched.char_len() > 0);
-        assert!(fetched.meta.id.starts_with("introduction-to-limits-"));
-    }
-
-    #[tokio::test]
-    async fn blank_query_has_no_result() {
-        let src = Source::Mock(MockSource::new());
-        assert!(matches!(
-            src.search("   ").await,
-            Err(SourceError::NoResult)
-        ));
-    }
 }

@@ -192,43 +192,4 @@ trailer\n<< /Root 1 0 R /Size 5 >>\n%%EOF";
 
         fs::remove_dir_all(&tmp).ok();
     }
-
-    /// `Source::LocalPdf` fits the enum's shared facade even though it opts
-    /// out of `search`/`fetch` (they're the wrong shape for matching) — the
-    /// enum variant still has to be constructible and matchable like any
-    /// other `Source`.
-    #[tokio::test]
-    async fn source_facade_reports_unsupported_for_search_and_fetch() {
-        let tmp = std::env::temp_dir().join(format!(
-            "learnive-local-pdf-test-facade-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let lib = LocalPdfSource::open(tmp.join("data")).expect("open library");
-        let source = crate::source::Source::LocalPdf(lib);
-
-        assert!(matches!(
-            source.search("anything").await,
-            Err(crate::source::SourceError::Unsupported(_))
-        ));
-        let dummy_hit = crate::source::SearchHit {
-            title: "x".into(),
-            authors: vec![],
-            kind: crate::source::SourceKind::Book,
-            origin: crate::source::Origin::Mock,
-            license: String::new(),
-            handle: "x".into(),
-            pages: None,
-            size_bytes: None,
-        };
-        assert!(matches!(
-            source.fetch(&dummy_hit).await,
-            Err(crate::source::SourceError::Unsupported(_))
-        ));
-
-        fs::remove_dir_all(&tmp).ok();
-    }
 }

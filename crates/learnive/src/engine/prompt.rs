@@ -369,31 +369,6 @@ pub fn propose_outline(topic: &str, objective: &str, rejected: &[String]) -> Vec
     ]
 }
 
-/// Derives a short catalog-search phrase for source acquisition (§11) from
-/// the learner's own topic/objective — NOT a semantic search: the acquisition
-/// backend matches against textbook titles, so a full question or sentence
-/// (e.g. "how does binary search work?") reliably returns zero hits even for
-/// subjects the catalog covers, while a short general subject phrase (e.g.
-/// "python programming", "algebra") reliably matches. Confirmed live against
-/// the OpenStax catalog API across a dozen topics before writing this prompt.
-pub fn search_subject(topic: &str) -> Vec<ChatMessage> {
-    vec![
-        ChatMessage::system(
-            "Name a specific, real book or article that covers this request — \
-             respond with its exact TITLE, the way it would appear on the \
-             book's own cover or a paper's own header, not a general subject \
-             area. It must be a real, existing work you have genuine \
-             knowledge of, never an invented or approximate title. Examples: \
-             a question about appending to a list in Python -> \"Learning \
-             Python\"; a question about derivatives -> \"Calculus\"; a \
-             question about supply and demand -> \"Principles of \
-             Economics\". Respond with ONLY the title, nothing else (no \
-             author, no quotes, no year, no extra commentary).",
-        ),
-        ChatMessage::user(format!("Request: {topic}")),
-    ]
-}
-
 /// Reads a printed contents/sumário page's text and asks for its entries as
 /// structured data (S27k, PLAN.md, 2026-08-29) — the middle rung of §11.1's
 /// TOC cascade, between embedded bookmarks and the heading-line heuristic.

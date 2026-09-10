@@ -360,9 +360,17 @@ fn purpose(move_type: MoveType, ctx: &MoveContext) -> String {
 /// `MoveContext::spawned_section_title` to tell the two `AskDecision`
 /// outcomes apart, same distinction `api::reading::ask_question` already
 /// made before that slice, just now expressed as prompt text.
+///
+/// When NO grounding survived `/ask`'s cascade (`ctx.grounding` empty), an
+/// escape hatch is appended: the model may still work with the document
+/// text it was given, but it must not introduce substance from its own
+/// weights — §11's "the source of explained substance is never the LLM"
+/// applies to tutor answers as much as to node generation. The marker it
+/// emits (`<!--needs-source: …-->`) is what `ask_question` turns into the
+/// `needs_source` response that prompts the learner to add a book.
 fn respond_purpose(ctx: &MoveContext) -> String {
     let question = ctx.question.as_deref().unwrap_or("(no question given)");
-    match ctx.spawned_section_title.as_deref() {
+    let base = match ctx.spawned_section_title.as_deref() {
         Some(sub_title) => format!(
             "The learner asked a question that warrants a real new section of \
              the living document, not a short inline reply — it will be \
@@ -382,6 +390,20 @@ fn respond_purpose(ctx: &MoveContext) -> String {
              question just gets a clear, honest answer. The learner's \
              question: {question}"
         ),
+    };
+    if ctx.grounding.trim().is_empty() {
+        format!(
+            "{base}\n\nSCOPE GUARD: no source passages cover this question. \
+             You may still answer using the document text you were given — \
+             explaining, connecting, or clarifying what is already there. But \
+             if the question's substance is NOT covered by that text, do NOT \
+             answer from your own knowledge: reply with exactly \
+             `<!--needs-source: <two-or-three-word topic>-->` and nothing \
+             else. The app will then ask the learner to add a book that \
+             covers it."
+        )
+    } else {
+        base
     }
 }
 

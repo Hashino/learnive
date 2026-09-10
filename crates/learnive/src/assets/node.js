@@ -1051,36 +1051,19 @@ document.addEventListener("click", (e) => {
   openSourcePanel(cite.dataset.sourceId, cite.dataset.locator);
 });
 
-// S27n: `data-source-id` on a real generated document is a local-library
-// content hash (`ground_node`'s fundamentação block), not a `state.corpus`
-// id — `GET /api/sources/{id}` 404s for it. Resolve the library first, and
-// fall back to the corpus only for documents grounded before the pivot
-// (LibGen/Sci-Hub acquisitions, which still write into `Corpus`). Returns a
-// normalized `{ kind, title, authors, assetUrl }` shape so the caller
-// doesn't need to know which backend answered.
+// `data-source-id` on a generated document is a local-library content
+// hash (`ground_node`'s fundamentação block); the citation click resolves it
+// straight against the library (`/api/library/{hash}`). A hash that is not
+// in the library (a deleted file, or a cite from a pre-pivot document
+// grounded in the retired corpus) surfaces `source.unavailable`.
 async function fetchSourceIndex(sourceId) {
   const libResp = await api(`/api/library/${encodeURIComponent(sourceId)}`);
-  if (libResp.ok) {
-    const meta = await libResp.json();
-    return {
-      kind: "library",
-      title: meta.title || t("source.untitled"),
-      authors: meta.authors ? [meta.authors] : [],
-      license: null,
-      assetUrl: `/api/library/${encodeURIComponent(sourceId)}/pdf`,
-    };
-  }
-  const corpusResp = await api(`/api/sources/${encodeURIComponent(sourceId)}`);
-  if (!corpusResp.ok) throw new Error(await corpusResp.text());
-  const index = await corpusResp.json();
+  if (!libResp.ok) throw new Error(await libResp.text());
+  const meta = await libResp.json();
   return {
-    kind: "corpus",
-    title: index.meta.title,
-    authors: index.meta.authors || [],
-    license: index.meta.license || null,
-    assetUrl: index.meta.pdf_asset
-      ? `/api/sources/${encodeURIComponent(sourceId)}/assets/${encodeURIComponent(index.meta.pdf_asset)}`
-      : null,
+    title: meta.title || t("source.untitled"),
+    authors: meta.authors ? [meta.authors] : [],
+    assetUrl: `/api/library/${encodeURIComponent(sourceId)}/pdf`,
   };
 }
 
@@ -1113,14 +1096,12 @@ async function openSourcePanel(sourceId, locator) {
       iframe.src = page ? `${url.toString()}#page=${page}` : url.toString();
       el("sourceBody").replaceChildren(iframe);
     } else {
-      // Legacy/mock corpus entry with no PDF asset on disk (S27i): no
-      // display surface left without the removed meta bar — same
-      // information the old bar would have shown, just inline.
+      // Library entry with no PDF bytes on disk (deleted between listing
+      // and click): name what is missing instead of a blank panel.
       const bits = [index.title];
       if (index.authors && index.authors.length) {
         bits.push(index.authors.join(", "));
       }
-      if (index.license) bits.push(index.license);
       el("sourceBody").textContent = bits.join(" · ");
     }
   } catch (err) {

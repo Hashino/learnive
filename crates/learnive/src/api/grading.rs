@@ -1,4 +1,4 @@
-use super::reading::{escape_html, grounding_for, objective_for, topic_and_title};
+use super::reading::{escape_html, grounding_for_node, objective_for, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ pub async fn answer(
         "Exercise:\n{}\n\nStudent's answer:\n{}",
         sidecar.exercise_html, body.answer
     );
-    let grounding = grounding_for(&state, &sidecar.title).await;
+    let grounding = grounding_for_node(&state, &owner_id, &node_id).await;
     let ctx = MoveContext {
         topic: sidecar.topic.clone(),
         item_title: sidecar.title.clone(),
@@ -471,7 +471,7 @@ pub async fn practice_node(
     let node = state.store.read_node(&owner_id, &node_id)?;
     let (topic, title) = topic_and_title(&state, &doc_id, &node_id)?;
     let ai = state.ai.load_full();
-    let grounding = grounding_for(&state, &title).await;
+    let grounding = grounding_for_node(&state, &owner_id, &node_id).await;
     let ctx = MoveContext {
         topic: topic.clone(),
         item_title: title.clone(),

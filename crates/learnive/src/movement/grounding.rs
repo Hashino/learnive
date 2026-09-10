@@ -626,9 +626,10 @@ mod tests {
         );
     }
 
-    /// The passage parser reads both producers' header format
-    /// (`ground_node`'s chapter form and `grounding_for`'s similarity
-    /// form) and accumulates non-header lines into the current passage.
+    /// The passage parser reads the grounding header format every producer
+    /// shares ([`cite_block`]'s `[id | loc | title]` form — the pre-retirement
+    /// corpus similarity format used the same shape with `—` separators) and
+    /// accumulates non-header lines into the current passage.
     #[test]
     fn parse_passages_reads_both_selection_formats() {
         let grounding = "[id: hash1 | loc: p:41 | Stewart — Cálculo]\npage 41 text\nmore text\n\n\

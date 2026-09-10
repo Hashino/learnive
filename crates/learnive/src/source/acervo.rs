@@ -1190,6 +1190,29 @@ impl LibraryFileIndex {
         self.dir.join(format!("{hash}.json"))
     }
 
+    /// Every content hash with a record on disk — the whole-library
+    /// enumeration `/ask`'s cross-book grounding tier (api::reading, 2026-09-09)
+    /// walks so a question can be answered from a book other than the node's
+    /// own. Filename stems only: the files ARE the hashes (one `<hash>.json`
+    /// per indexed library file, written by `set`), so no record needs to be
+    /// read to list them.
+    pub(crate) fn all_hashes(&self) -> Vec<String> {
+        let mut hashes = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if let Some(stem) = name.strip_suffix(".json")
+                    && !stem.ends_with(".tmp")
+                {
+                    hashes.push(stem.to_string());
+                }
+            }
+        }
+        hashes.sort();
+        hashes
+    }
+
     /// The directory records live in — `ensure_library_file_index`
     /// (api::reading's cache-hit counterpart of the validation's own index
     /// write) scans it by filename before deciding anything needs re-hashing.

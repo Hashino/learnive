@@ -296,6 +296,18 @@ el("askBar").addEventListener("submit", async (e) => {
     );
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
+    if (data.kind === "needs_source") {
+      // §11 via the /ask cascade: nothing in the library grounds this and
+      // the document text doesn't cover it either — the tutor declined to
+      // invent. Nothing was written to the document; the question stays in
+      // the bar so the learner can re-send it once a covering book is in
+      // the library (the server re-runs the cascade, now grounded).
+      el("askStatus").innerHTML =
+        '<span class="error">' +
+        escapeHtml(t("ask.needsSource").replace("{0}", data.topic)) +
+        "</span>";
+      return;
+    }
     if (data.kind === "spawn") {
       // §S8: not a toggle — permanently spliced right after the
       // paragraph where the question was asked.

@@ -23,9 +23,7 @@ use tokio::sync::RwLock;
 
 use crate::ai::Ai;
 use crate::config::AppConfig;
-use crate::retrieval::Retriever;
 use crate::secret::SecretStore;
-use crate::source::{Corpus, Source};
 use crate::store::Store;
 use crate::{api, security};
 
@@ -49,18 +47,10 @@ pub struct AppState {
     pub secret: Arc<SecretStore>,
     /// Data directory, needed to persist config on setup.
     pub data_dir: Arc<str>,
-    /// Source acquisition backend (§11.1) — swappable; `Source::Unconfigured`
-    /// when no mirror URL is configured (see `build_source`).
-    pub source: Arc<Source>,
-    /// §11.1's fallback tier — tried when `source` finds nothing for a query
-    /// (`api::cold_start::acquire`); `Source::Unconfigured` when no secondary
-    /// mirror URL is configured.
-    pub fallback_source: Arc<Source>,
-    /// Immutable source corpus (§4/§11).
-    pub corpus: Corpus,
-    /// Retrieval index for grounding (§10). `None` when the embedding model could
-    /// not be loaded — the loop then runs ungrounded rather than failing.
-    pub retriever: Option<Arc<RwLock<Retriever>>>,
+    /// Text→vector embedder (§10) behind grounding (`source::search_index_cache`
+    /// and the outline's prerequisite matcher). `None` when the embedding model
+    /// could not be loaded — the loop then runs ungrounded rather than failing.
+    pub embedder: Option<Arc<crate::retrieval::Embedder>>,
     /// S27d/S27e: the real HTTP client `api::cold_start::verify_reading_list`
     /// checks every proposed book/article against. Swappable the same way
     /// `ai`/`source` are: `app::tests::test_state_with_ai` wires
@@ -101,7 +91,6 @@ impl AppState {
         let data_dir =
             std::env::var("LEARNIVE_DATA_DIR").unwrap_or_else(|_| "learnive-data".to_string());
         let store = Store::open(&data_dir).expect("open data store");
-        let corpus = Corpus::open(&data_dir).expect("open source corpus");
         let config = AppConfig::load(&data_dir);
         let secret = SecretStore::open(&data_dir);
 
@@ -112,28 +101,19 @@ impl AppState {
         // router-test harness (`app::tests::test_state_with_ai`, which does
         // the same seeding directly) — can pass the acervo gate and
         // generate a real, citable, PDF-backed node. Must run before any
-        // request can reach `ensure_document_grounded`, hence here rather
-        // than inside `Source::Mock::fetch` (which only runs from a
-        // detached `tokio::spawn` in `api::cold_start::acquire` and would
-        // race the gate — see `source::mock::seed_demo_library`'s doc
-        // comment). Only-if-absent and demo-gated: never touches a real
-        // `LEARNIVE_DATA_DIR` library.
+        // request can reach `ensure_document_grounded` — see
+        // `source::mock::seed_demo_library`'s doc comment. Only-if-absent
+        // and demo-gated: never touches a real `LEARNIVE_DATA_DIR` library.
         if std::env::var("LEARNIVE_DEMO").is_ok_and(|v| !v.is_empty())
             && let Err(e) = crate::source::mock::seed_demo_library(&data_dir)
         {
             eprintln!("demo library seed failed (grounding may fail for demo docs): {e}");
         }
 
-        // Load the embedding model and open the retrieval index (§10). Non-fatal:
-        // offline / first-run-download failures just disable grounding.
-        let retriever = match crate::retrieval::Embedder::default_model() {
-            Ok(embedder) => match Retriever::open(&data_dir, &corpus, embedder) {
-                Ok(r) => Some(Arc::new(RwLock::new(r))),
-                Err(e) => {
-                    eprintln!("grounding disabled (index): {e}");
-                    None
-                }
-            },
+        // Load the embedding model (§10). Non-fatal: offline /
+        // first-run-download failures just disable grounding.
+        let embedder = match crate::retrieval::Embedder::default_model() {
+            Ok(e) => Some(Arc::new(e)),
             Err(e) => {
                 eprintln!("grounding disabled (embedding model): {e}");
                 None
@@ -151,25 +131,7 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             secret: Arc::new(secret),
             data_dir: Arc::from(data_dir.as_str()),
-            source: {
-                let source = api::build_source();
-                // A missing backend is expected post-pivot (§11.1 origin is a
-                // deliberately open question): say so once instead of spamming
-                // an error on every acquisition. The document still generates,
-                // just ungrounded, until a backend is wired up.
-                if matches!(source, crate::source::Source::Unconfigured) {
-                    println!(
-                        "note: no source acquisition backend configured — \
-                         documents will be generated ungrounded. Set \
-                         LEARNIVE_LIBGEN_URL or LEARNIVE_SCIHUB_URL to enable \
-                         grounding (a mirror you supply; no default is baked in)."
-                    );
-                }
-                Arc::new(source)
-            },
-            fallback_source: Arc::new(api::build_fallback_source()),
-            corpus,
-            retriever,
+            embedder,
             bibliography_client: Arc::new(crate::source::BibliographyClient::new()),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
@@ -290,26 +252,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/documents/{doc}/acervo/toc/{item}",
             get(api::get_acervo_toc).put(api::put_acervo_toc),
         )
-        // Read-only source viewer (§11) — the corpus is global, not per-document
-        // (§4), so this lives outside the `/api/documents/{doc}` tree; a citation
-        // click resolves here for its `data-source-id`. Meta+toc only: the
-        // display surface is the browser's native PDF viewer, not this app's
-        // own reader (§4/§11, post-pivot).
-        .route("/api/sources/{id}", get(api::get_source))
-        // The canonical PDF artifact (§4/§11) — served as-is for the native
-        // viewer to render; content-addressed by source id, safe to cache.
-        .route(
-            "/api/sources/{id}/assets/{filename}",
-            get(api::get_source_asset),
-        )
         // S27n: citations on real generated documents cite a local-library
-        // content hash (`ground_node`'s `<cite data-source-id>`), which never
-        // matches a `state.corpus` id — this route resolves that hash
-        // straight against `<data>/library/` instead. Kept a separate path
-        // rather than overloading `/api/sources/{id}` so the corpus route
-        // stays simple and this one owns its own not-found semantics (hash
-        // not in the library vs. corpus source id not found mean different
-        // things to the client).
+        // content hash (`ground_node`'s `<cite data-source-id>`); this route
+        // resolves that hash straight against `<data>/library/`, outside the
+        // `/api/documents/{doc}` tree (the library is global, not
+        // per-document, §4/§11).
         .route("/api/library/{hash}", get(api::get_library_meta))
         .route("/api/library", get(api::library_list))
         .route("/api/library/{hash}/toc", get(api::library_toc))

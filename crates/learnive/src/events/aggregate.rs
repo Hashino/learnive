@@ -173,24 +173,6 @@ pub fn node_generated(mut events: impl Iterator<Item = Event>, node_id: &str) ->
     })
 }
 
-/// Whether a `research` move has EVER been logged for `node_id` — §S18's
-/// cross-request counterpart to `MoveContext::research_attempted`. Before
-/// the per-move-request split, that cap lived entirely in one request's
-/// in-memory `ctx` (never reset across the move loop's iterations), which
-/// was enough because the whole node generated in one request. Now each
-/// `/generate` call gets a fresh `ctx`, so `prepare` reconstructs the cap
-/// from the log the same way it reconstructs `resumed_ungraded_moves` —
-/// otherwise the Rust-forced research interception (S33) could fire again
-/// on every request it's still eligible for, burning through
-/// `MAX_MOVES_PER_NODE`'s whole budget on research alone and leaving no
-/// slot for the template's teaching or graded moves.
-pub fn research_attempted(mut events: impl Iterator<Item = Event>, node_id: &str) -> bool {
-    events.any(|e| {
-        e.node_id.as_deref() == Some(node_id)
-            && matches!(&e.kind, EventKind::MoveGenerated { move_type, .. } if move_type == "research")
-    })
-}
-
 /// S33-3 spaced review scheduler (n·2ᵏ, user decision 2026-09-03) — the
 /// concrete policy PLAN.md's S24 "due-for-review" queue waited on, and the
 /// replacement for the deleted `revisit_suggestion` (which could only point

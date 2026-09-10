@@ -78,6 +78,8 @@ const I18N = {
     "ask.aboutLine": "Asking about the line you're on: {0}",
     "ask.aboutPage": "Asking about this page",
     "ask.thinking": "thinking…",
+    "ask.needsSource":
+      "Nothing in your library covers this yet ({0}). Add a PDF that covers it to your library, then ask again.",
     // Document list
     "doc.count": "{0} / {1} demonstrated",
     "delete.title": "Delete this document",
@@ -285,6 +287,8 @@ const I18N = {
     "ask.aboutLine": "Perguntando sobre a linha em que você está: {0}",
     "ask.aboutPage": "Perguntando sobre esta página",
     "ask.thinking": "pensando…",
+    "ask.needsSource":
+      "Nada na sua biblioteca cobre isso ainda ({0}). Adicione à biblioteca um PDF que cubra o tema e pergunte de novo.",
     "doc.count": "{0} / {1} demonstrados",
     "delete.title": "Excluir este documento",
     "delete.confirm": 'Excluir "{0}" e tudo o que contém?',

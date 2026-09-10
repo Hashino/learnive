@@ -124,8 +124,8 @@ pub struct OutlineItem {
     /// The bibliographic identity + S27d verification outcome behind a
     /// `Book`/`Article` item — `None` for a `Node`/`Chapter` (a chapter
     /// inherits its parent book's identity, S27g). See [`SourcePointer`].
-    /// Deliberately NOT wired into S21's grounding retrieval here — that's
-    /// `grounding_for`'s job, a later slice.
+    /// Grounding retrieval reads it per node (`api::reading`'s
+    /// `resolve_grounded_book`).
     #[serde(default)]
     pub source: Option<SourcePointer>,
     /// The proposed chapter/section number for a `Chapter` item (S27g,
@@ -333,7 +333,7 @@ pub fn is_generable(outline: &Outline, item: &OutlineItem) -> bool {
 /// real bug, not theoretical: `outline_view` computed this for the
 /// sidebar's remediation badge, but `prepare`/`ground_node` never checked
 /// it — a chapter with `resolved_page: None` still fell through to
-/// `ground_node`'s unscoped full-book-search fallback and generated real
+/// `ground_node`'s then-unscoped whole-book fallback and generated real
 /// content, so a learner could open a node that already has real prose and
 /// still be offered "restart this document" / "skip this chapter" by the
 /// remediation modal. The user's stated invariant is that this must be
@@ -623,19 +623,6 @@ pub fn new_id() -> String {
 pub async fn propose_objective(ai: &Ai, topic: &str) -> Result<ObjectiveProposal, EngineError> {
     let text = collect(ai, Tier::Fast, prompt::propose_objective(topic)).await?;
     parse::objective_proposal(&text)
-}
-
-/// Derives a real, specific book/article TITLE for source acquisition (§11)
-/// from the raw topic — see `prompt::search_subject` for the exact
-/// instruction. Renamed from the old `propose_search_subject` 2026-08-29: it
-/// used to ask the model for a 2-4-word subject phrase ("calculus"), which is
-/// what an all-fields catalog search against LibGen was matching on and how
-/// a discrete-math node could acquire an unrelated Android/automata paper —
-/// title-column search (`source::libgen`) needs an actual title, not a
-/// subject. Fast tier: a background, non-blocking, low-stakes call.
-pub async fn propose_source_title(ai: &Ai, topic: &str) -> Result<String, EngineError> {
-    let text = collect(ai, Tier::Fast, prompt::search_subject(topic)).await?;
-    Ok(text.trim().trim_matches('"').to_string())
 }
 
 /// Reads a PDF's printed contents/sumário page (S27k, PLAN.md, 2026-08-29) —

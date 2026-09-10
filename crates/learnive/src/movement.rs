@@ -18,10 +18,9 @@
 //!   `explain` → `integrate` → `test`
 //!
 //! Rust-forced moves remain, never decided: `respond` answers a learner
-//! question (§S6/§S17, `api::reading::ask_question`), `research` acquires
-//! grounding (§S13) — the orchestration loop intercepts `research` when
-//! grounding is empty, exactly one attempt per node, then loops back to the
-//! template.
+//! question (§S6/§S17, `api::reading::ask_question`). (The old §S13
+//! `research` move — in-loop acquisition — died with the corpus retirement,
+//! 2026-09-09: grounding is settled before the loop starts, by the gate.
 //!
 //! **Streamed vs structured is a real invariant of the move ABI, not an
 //! implementation detail** (§14's ~1s TTFT target). [`MoveType::render`]
@@ -65,8 +64,8 @@ pub enum MoveType {
     Integrate,
     Revisit,
     /// Answers a question the learner asked mid-reading (§S6/§9/§S17).
-    /// Forced by Rust only, exactly like `Research` — the deterministic
-    /// template never picks it. §8.2's unification is of the generation
+    /// Forced by Rust only — the deterministic template never picks it.
+    /// §8.2's unification is of the generation
     /// PATH (grounding/citations/`MoveGenerated`), not of who decides to
     /// answer a question. Streamed (`render()`), Robust tier (genuine
     /// explanatory prose, §12.1). Used for both the inline-answer and the
@@ -74,16 +73,6 @@ pub enum MoveType {
     /// distinguishes them for `purpose()`); `api::reading::ask_question`
     /// decides which case via `engine::decide_ask_response`.
     Respond,
-    /// Acquires grounding for a concept the current corpus has nothing on
-    /// (§S13, `api::cold_start::acquire`) — forced by the orchestration
-    /// loop (`api::generation::generate_node`) when grounding is empty and
-    /// unattempted, never by the template; produces no learner-facing
-    /// content of its own. The loop intercepts it before `render()` is
-    /// ever consulted, runs acquisition, refreshes the context's grounding,
-    /// and loops back to the template — `render()`/`generate_move*` must
-    /// never actually be called with this type (debug-asserted the same way
-    /// the streamed/structured split is).
-    Research,
     /// Deserialization catch-all for the append-only event log (§4.3):
     /// logs written before S33 contain `ask`/`profile`/`confront`/`plan`
     /// moves that no longer exist as types. `#[serde(other)]` folds any
@@ -115,12 +104,9 @@ impl MoveType {
     }
 
     /// Streamed vs structured (§14) — see the module docs for the rationale.
-    /// Never actually called for `Research` (see its own doc comment) — the
-    /// orchestration loop intercepts it first; `Structured` here is just an
-    /// arbitrary total-match default, not a real routing decision.
     pub fn render(self) -> MoveRender {
         match self {
-            MoveType::Test | MoveType::Other | MoveType::Research => MoveRender::Structured,
+            MoveType::Test | MoveType::Other => MoveRender::Structured,
             _ => MoveRender::Streamed,
         }
     }
@@ -134,7 +120,6 @@ impl std::fmt::Display for MoveType {
             MoveType::Integrate => "integrate",
             MoveType::Revisit => "revisit",
             MoveType::Respond => "respond",
-            MoveType::Research => "research",
             MoveType::Other => "other",
         };
         write!(f, "{s}")
@@ -152,8 +137,8 @@ pub struct MoveRecord {
 /// Context handed to `next_move`/`generate_move*` (§14 context budget).
 /// `objective` is the document's current objective text (§S4) — empty only
 /// for a document with no confirmed objective yet. Every function degrades
-/// gracefully on an empty field, the same way grounding already does in
-/// `api::reading::grounding_for`.
+/// gracefully on an empty field, the same way every grounding path does in
+/// `api::reading`.
 #[derive(Debug, Clone, Default)]
 pub struct MoveContext {
     pub topic: String,
@@ -170,17 +155,6 @@ pub struct MoveContext {
     /// fed to the content prompts — the caller keeps this updated as moves are
     /// generated. Empty for the node's first move.
     pub node_tail: String,
-    /// Set once a `research` move has run for this NODE (§S13) — withholds
-    /// `research` from the menu on any further `decide_move` call, the cap
-    /// on repeated acquisition attempts. Seeded from the event log by
-    /// `prepare` (`events::aggregate::research_attempted`) on every
-    /// per-move `/generate` request (§S18), not just set true in-process —
-    /// each request gets a fresh `ctx`, so an in-process-only flag would
-    /// only cap research within a single request, not across the several a
-    /// node's generation now spans. Still also set `true` mid-loop the
-    /// moment a request's OWN research attempt runs, exactly as before, so
-    /// a second pick can't happen later in that same request either.
-    pub research_attempted: bool,
     /// §S15: titles of this node's own children in the outline tree
     /// (`OutlineItem::parent_id` pointing back at it) — a prerequisite
     /// decomposed into sub-skills, or a question that spawned an
@@ -268,7 +242,7 @@ pub struct MoveContext {
     pub chapter_close: bool,
     /// §S23: the zero-cost scaffolding parameter
     /// (`events::aggregate::scaffolding_level`), reconstructed by `prepare`
-    /// on every `/generate` call the same way `research_attempted` is —
+    /// on every `/generate` call, the same zero-token log fold —
     /// calibrates SUPPORT in the fade addendum (a worked example before
     /// the problem, or the problem direct), never difficulty.
     pub scaffolding: crate::events::aggregate::ScaffoldingLevel,
@@ -797,7 +771,7 @@ mod tests {
         ] {
             assert_eq!(mt.render(), MoveRender::Streamed);
         }
-        for mt in [MoveType::Test, MoveType::Research, MoveType::Other] {
+        for mt in [MoveType::Test, MoveType::Other] {
             assert_eq!(mt.render(), MoveRender::Structured);
         }
     }

@@ -31,58 +31,6 @@ pub(super) fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Read-only source viewer (§11): serves the corpus's meta + table of
-/// contents for a citation's `data-source-id`, so `<cite>` has somewhere real
-/// to point. GET, mutates nothing: the source viewer is read-only by design
-/// (§9/§11) — any note the learner wants to make lands in the living
-/// document, never on the source itself. Not document-scoped: the corpus
-/// (`state.corpus`) is one shared, global store (§4/§11), so this sits beside
-/// `/api/documents/...` rather than under it.
-pub async fn get_source(
-    State(state): State<AppState>,
-    Path(source_id): Path<String>,
-) -> Result<Json<crate::source::SourceIndex>, ApiError> {
-    state
-        .corpus
-        .load_index(&source_id)
-        .map(Json)
-        .map_err(|e| ApiError::NotFound(e.to_string()))
-}
-
-/// Serves the canonical PDF artifact for a source (§4/§11: PDF is the sole
-/// canonical, displayed format — a section's extracted text is index-only).
-/// Read-only, same rationale as the other source endpoints. The filename is
-/// always `source.pdf` (`SourceMeta.pdf_asset`); `Content-Type` is fixed,
-/// never sniffed from the bytes.
-pub async fn get_source_asset(
-    State(state): State<AppState>,
-    Path((source_id, filename)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    let mime = match filename.rsplit('.').next() {
-        Some("pdf") => "application/pdf",
-        _ => return Err(ApiError::BadRequest("unsupported asset type".to_string())),
-    };
-    let bytes = state
-        .corpus
-        .load_asset(&source_id, &filename)
-        .map_err(|e| ApiError::NotFound(e.to_string()))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
-            ),
-            (
-                header::HeaderName::from_static("x-content-type-options"),
-                HeaderValue::from_static("nosniff"),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
 // -- GET /api/library, GET /api/library/{hash}/toc — the manual cold start --
 //
 // The second cold-start path (2026-09-09, user request): instead of the
@@ -693,6 +641,34 @@ pub(super) fn folded_node_states(
     Ok(states)
 }
 
+/// Extracts the topic from `respond_purpose`'s escape-hatch marker
+/// (`<!--needs-source: …-->`), tolerating a free model's imperfect
+/// punctuation: a missing `:`, a missing `-->` (cut off at end-of-line or
+/// end-of-output instead), surrounding whitespace. `None` when no marker is
+/// present. An empty topic still means needs-source — the client's prompt
+/// just can't name the gap, so a generic topic is substituted.
+fn needs_source_topic(html: &str) -> Option<String> {
+    const OPEN: &str = "<!--needs-source";
+    let idx = html.find(OPEN)?;
+    let rest = html[idx + OPEN.len()..].trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    let end = rest
+        .find("-->")
+        .or_else(|| rest.find('\n'))
+        .unwrap_or(rest.len());
+    let mut topic: String = rest[..end]
+        .trim()
+        .trim_end_matches('-')
+        .trim()
+        .chars()
+        .take(120)
+        .collect();
+    if topic.is_empty() {
+        topic = "this topic".to_string();
+    }
+    Some(topic)
+}
+
 #[derive(Deserialize)]
 pub struct AskReq {
     question: String,
@@ -721,6 +697,16 @@ pub enum AskResp {
         content_html: String,
         anchor_block: String,
     },
+    /// §11 via the /ask cascade (2026-09-09, user decision): nothing in the
+    /// library grounds the question (all cascade tiers fell through their
+    /// floors) AND the document text itself doesn't cover it — the model
+    /// declined to invent (`respond_purpose`'s escape hatch). Nothing is
+    /// written: no answer, no sub-node, no `MoveGenerated` event. The
+    /// client prompts the learner to add a book covering `topic`; once it
+    /// sits in the library and is indexed, the SAME ask re-run grounds from
+    /// it — the recovery is the user acting on data already on disk, zero
+    /// tokens (§12.2's corollary, honored rather than worked around).
+    NeedsSource { topic: String },
 }
 
 /// §S6/§S8: "seleção→pergunta" / "pergunta-na-linha" (§9). The reading-line
@@ -760,7 +746,7 @@ pub async fn ask_question(
     // Degrades to `Inline` on failure (a bad/unparseable decision, or a
     // provider error after the one bounded repair) rather than propagating —
     // every other optional-context signal in this codebase degrades the same
-    // way (`objective_for`, `grounding_for` all fall back to ""); `/ask`
+    // way (`objective_for`, the grounding paths all fall back to ""); `/ask`
     // must stay at least as reliable as it was before §S8, not regress into
     // failing outright when the classifier call itself fails.
     let decision = engine::decide_ask_response(
@@ -802,7 +788,7 @@ pub async fn ask_question(
         item_title: title.clone(),
         node_tail,
         objective: objective_for(&state, &doc_id),
-        grounding: grounding_for(&state, &title).await,
+        grounding: grounding_for_ask(&state, &owner_id, &node_id, question).await,
         locale,
         question: Some(question.to_string()),
         reading_context: context.clone(),
@@ -812,6 +798,14 @@ pub async fn ask_question(
     match decision {
         AskDecision::Inline => {
             let generated = movement::generate_move_complete(&ai, MoveType::Respond, &ctx).await?;
+            // The escape hatch fired (nothing grounds this and the model
+            // refused to invent): surface the add-a-book prompt instead of
+            // persisting a non-answer as if it were one.
+            if ctx.grounding.trim().is_empty()
+                && let Some(topic) = needs_source_topic(&generated.html)
+            {
+                return Ok(Json(AskResp::NeedsSource { topic }));
+            }
             if let Err(e) = event_log.append(
                 Some(&node_id),
                 EventKind::MoveGenerated {
@@ -862,6 +856,16 @@ pub async fn ask_question(
             let sub_id = engine::new_id();
             ctx.spawned_section_title = Some(sub_title.clone());
             let generated = movement::generate_move_complete(&ai, MoveType::Respond, &ctx).await?;
+            // Same escape hatch as the Inline arm: a question nothing
+            // grounds must not spawn a permanently-spliced, equally
+            // ungrounded sub-node either — the classifier's "this deserves
+            // a section" verdict stands, but the section needs a source
+            // first, so the learner is pointed at the library instead.
+            if ctx.grounding.trim().is_empty()
+                && let Some(topic) = needs_source_topic(&generated.html)
+            {
+                return Ok(Json(AskResp::NeedsSource { topic }));
+            }
             if let Err(e) = event_log.append(
                 Some(&node_id),
                 EventKind::MoveGenerated {
@@ -1115,11 +1119,6 @@ pub(super) struct NodePrep {
     /// counts differ and why the loop must start at this one, not
     /// `resumed_moves.len()`.
     pub(super) resumed_move_index: usize,
-    /// §S18: whether `research` has ever been logged for this node —
-    /// reconstructed the same way `resumed_move_index` is, so the one-
-    /// attempt-per-node cap (`MoveContext::research_attempted`'s doc
-    /// comment) survives across per-move requests, not just within one.
-    pub(super) research_attempted: bool,
     /// §S23: the zero-cost scaffolding parameter, folded fresh from the
     /// event log on every `/generate` call — fed to `MoveContext::scaffolding`.
     pub(super) scaffolding: crate::events::aggregate::ScaffoldingLevel,
@@ -1718,8 +1717,8 @@ pub(super) async fn prepare(
     // Bug reported live 2026-09-01: a `Chapter` `source::match_chapter`
     // could not place in its book's TOC (`engine::chapter_match_failed`,
     // shared with `cold_start::outline_view`'s remediation badge) used to
-    // fall straight through to `ground_node`'s unscoped full-book-search
-    // fallback below and generate real content anyway — so a learner could
+    // fall straight through to `ground_node`'s then-unscoped whole-book
+    // fallback and generate real content anyway — so a learner could
     // open a node with real prose already on it and still be offered
     // "restart this document" / "skip this chapter" by the client's
     // remediation modal, which only checks the SAME flag `outline_view`
@@ -1867,10 +1866,6 @@ pub(super) async fn prepare(
             .map(|node| engine::strip_build_marker(&node.content.html).to_string())
             .unwrap_or_default()
     };
-    let research_attempted = crate::events::aggregate::research_attempted(
-        event_log.iter().map_err(|e| e.to_string())?,
-        &item.id,
-    );
     let scaffolding =
         crate::events::aggregate::scaffolding_level(event_log.iter().map_err(|e| e.to_string())?);
     // §S23: nearby ⇒ an already-demonstrated prerequisite of this item, or
@@ -1921,7 +1916,6 @@ pub(super) async fn prepare(
         resumed_moves,
         resumed_content_html,
         resumed_move_index,
-        research_attempted,
         scaffolding,
         interleave_titles,
         chapter_close,
@@ -1976,7 +1970,7 @@ fn prior_content_context(
 
 /// Compact objective summary for `MoveContext::objective` (§S4) — a document
 /// with no `objective.json` yet (pre-S4) or an empty version chain degrades
-/// to "", the same way `grounding_for` degrades when nothing is indexed.
+/// to "", the same way every grounding path degrades when nothing is found.
 pub(super) fn objective_for(state: &AppState, doc_id: &str) -> String {
     let Ok(json) = state.store.read_doc_file(doc_id, "objective.json") else {
         return String::new();
@@ -2302,10 +2296,7 @@ async fn build_missing_indexes(
         return Ok(0);
     }
 
-    let Some(embedder) = (match &state.retriever {
-        Some(r) => Some(r.read().await.embedder().clone()),
-        None => None,
-    }) else {
+    let Some(embedder) = state.embedder.as_deref().cloned() else {
         return Err("no embedding model is loaded — cannot index the library".to_string());
     };
     let library = source::LocalPdfSource::open(state.data_dir.as_ref())
@@ -2759,6 +2750,74 @@ fn chapter_page_range(outline: &Outline, item: &OutlineItem) -> Option<(usize, O
     Some((start, end))
 }
 
+/// Where the next top-level chapter STARTS, read off the PDF's own embedded
+/// bookmarks — `chapter_page_range`'s upper bound comes from MATERIALIZED
+/// sibling chapters, and the manual picker legitimately materializes a
+/// single chapter of a twenty-chapter book. The old "no sibling ⇒ range
+/// runs to the end of the book" reading then handed the split prompt the
+/// entire remaining text (live 2026-09-09: a "The Way of the Program"
+/// split proposed sphere-volume and poker sub-topics grounded at p:220+).
+/// Zero tokens: the bookmarks are already parsed at `read_pdf_cached`
+/// time. `None` keeps the old whole-tail reading — no bookmarks, or no
+/// higher-numbered chapter left (a genuine last chapter).
+fn next_chapter_start_from_bookmarks(
+    outline: &[source::OutlineEntry],
+    chapter_number: Option<&str>,
+) -> Option<usize> {
+    let own: u32 = chapter_number
+        .and_then(|n| n.split('.').next())
+        .and_then(|n| n.parse().ok())?;
+    let mut flat = Vec::new();
+    flatten_embedded_outline(outline, &mut flat);
+    flat.iter()
+        .filter_map(|e| {
+            let n = e.number.as_deref()?;
+            // top-level chapters only: "2", not a "2.1" section
+            (!n.contains('.')).then_some(())?;
+            let page = e.page?;
+            n.parse::<u32>().ok().map(|top| (top, page))
+        })
+        .find(|(top, _)| *top > own)
+        .map(|(_, page)| page)
+}
+
+/// A book's own bookmark outline, from its pdftext cache — already paid at
+/// first read, never a re-parse of the PDF. `None` when the cache entry is
+/// missing (then the whole-tail range reading below simply keeps the old
+/// behavior).
+fn cached_outline(state: &AppState, hash: &str) -> Option<Vec<source::OutlineEntry>> {
+    let path = source::pdftext_cache_dir(state.data_dir.as_ref()).join(format!("{hash}.json"));
+    let bytes = std::fs::read(path).ok()?;
+    let cached: source::pdf::PdfDocument = serde_json::from_slice(&bytes).ok()?;
+    Some(cached.outline)
+}
+
+/// [`chapter_page_range`] with the whole-book-tail default closed: when no
+/// materialized sibling chapter bounds this one, the next chapter's own
+/// bookmarked page does (see [`next_chapter_start_from_bookmarks`]'s doc for
+/// the live bug this closes — a lone chapter's grounding must not anchor in
+/// chapter-15 text because nothing said where chapter 1 ends).
+///
+/// Callers that already hold the `PdfDocument` (the chapter split) clamp
+/// inline instead; this variant is for the grounding paths, which resolve
+/// the book by hash and have nothing but the cache.
+fn bookmarked_page_range(
+    state: &AppState,
+    outline: &Outline,
+    item: &OutlineItem,
+    book_hash: &str,
+) -> Option<(usize, Option<usize>)> {
+    let (start, end) = chapter_page_range(outline, item)?;
+    let end = end.or_else(|| {
+        let number = nearest_chapter(outline, item)?.chapter_number.clone();
+        let outline = cached_outline(state, book_hash)?;
+        next_chapter_start_from_bookmarks(&outline, number.as_deref())
+            .map(|next| next.saturating_sub(1))
+            .filter(|&e| e > start)
+    });
+    Some((start, end))
+}
+
 /// What [`try_split_chapter`] decided, and what the caller should do about
 /// `expansion` (S27g item 2).
 enum ChapterSplitOutcome {
@@ -2840,7 +2899,15 @@ async fn try_split_chapter(
         // than panicking: defensive, not expected.
         return ChapterSplitOutcome::Deferred;
     };
-    let end = end.unwrap_or(pdf.page_texts.len());
+    let end = end.unwrap_or_else(|| {
+        // No materialized sibling bounds this chapter — clamp at the next
+        // chapter's own bookmarked page instead of the whole book tail
+        // (`next_chapter_start_from_bookmarks`'s doc has the live bug).
+        next_chapter_start_from_bookmarks(&pdf.outline, chapter.chapter_number.as_deref())
+            .map(|next| next.saturating_sub(1))
+            .filter(|&e| e > start)
+            .unwrap_or(pdf.page_texts.len())
+    });
     if start == 0 || start > pdf.page_texts.len() {
         return ChapterSplitOutcome::Deferred;
     }
@@ -3033,32 +3100,40 @@ async fn mark_chapter_expanded(
 /// state — the error messages say so deliberately.
 ///
 /// An item with **no** bibliographic ancestor at all (legacy/demo/pre-S27e
-/// documents, or a spawned sub-node under a plain `Node` parent) is
-/// deliberately untouched: falls through to the old unscoped-similarity
-/// [`grounding_for`], exactly as it behaved before S27m.
+/// documents, or a spawned sub-node under a plain `Node` parent) grounds
+/// **empty** since the corpus retirement (2026-09-09): the old unscoped
+/// similarity fallback searched a store that no longer exists. `index` is
+/// then `None`, so the gate inserts no citations and checks nothing — the
+/// same degrade convention every optional signal in this codebase uses.
 /// What [`ground_node`] resolved for one node: the formatted passage text
 /// the move prompts see, plus — when that text came from a chapter's page
 /// window — everything the §S21-lean mechanical citer needs to match blocks
 /// against the SAME book's page index (`movement::grounding`). `index` is
-/// `None` on the similarity-fallback path (no source pointer), where the
-/// gate then inserts no citations and checks nothing.
+/// `None` when no citations can be checked (no bibliographic pointer).
 pub(super) struct GroundedSelection {
     pub(super) text: String,
     pub(super) index: Option<crate::movement::grounding::GroundingIndex>,
 }
 
-async fn ground_node(
-    state: &AppState,
-    outline: &Outline,
-    item: &OutlineItem,
-) -> Result<GroundedSelection, String> {
-    let Some(ptr) = engine::resolve_grounding_source(outline, item) else {
-        return Ok(GroundedSelection {
-            text: grounding_for(state, &item.title).await,
-            index: None,
-        });
-    };
+/// One item's matched book, resolved once and shared by every grounding
+/// consumer ([`ground_node`], [`grounding_for_node`], [`grounding_for_ask`]):
+/// the matched library file's content hash and display title, the loaded
+/// embedder, and the per-book page-index directory to search.
+struct GroundedBook {
+    hash: String,
+    title: String,
+    embedder: crate::retrieval::Embedder,
+    index_cache_dir: std::path::PathBuf,
+}
 
+/// Resolves a bibliographic pointer ([`engine::SourcePointer`]) to the
+/// library file the acervo gate matched for it, with the embedder and index
+/// directory grounding then searches. Errors here are internal-inconsistency
+/// errors (the document gate already passed) — strict, like [`ground_node`].
+async fn resolve_grounded_book(
+    state: &AppState,
+    ptr: &engine::SourcePointer,
+) -> Result<GroundedBook, String> {
     let expected = source::ExpectedItem {
         title: ptr.item.title.clone(),
         authors: ptr.item.authors.clone(),
@@ -3082,10 +3157,7 @@ async fn ground_node(
         ));
     };
 
-    let Some(embedder) = (match &state.retriever {
-        Some(r) => Some(r.read().await.embedder().clone()),
-        None => None,
-    }) else {
+    let Some(embedder) = state.embedder.as_deref().cloned() else {
         return Err("no embedding model is loaded — cannot ground this node".to_string());
     };
 
@@ -3093,7 +3165,36 @@ async fn ground_node(
     let bytes = fs::read(&path).map_err(|e| format!("could not read {filename}: {e}"))?;
     let hash = source::acervo::content_hash(&bytes);
 
-    let page_range = chapter_page_range(outline, item);
+    Ok(GroundedBook {
+        hash,
+        title: expected.title,
+        embedder,
+        index_cache_dir,
+    })
+}
+
+/// Formats one retrieved page the way every grounding consumer presents it:
+/// a cite-addressable header (`[id | loc | title]`) above the page text
+/// (§10/§4.3 — the model cites by exact id/locator).
+fn cite_block(hash: &str, title: &str, page: usize, text: &str) -> String {
+    format!("[id: {hash} | loc: p:{page} | {title}]\n{text}")
+}
+
+async fn ground_node(
+    state: &AppState,
+    outline: &Outline,
+    item: &OutlineItem,
+) -> Result<GroundedSelection, String> {
+    let Some(ptr) = engine::resolve_grounding_source(outline, item) else {
+        return Ok(GroundedSelection {
+            text: String::new(),
+            index: None,
+        });
+    };
+
+    let book = resolve_grounded_book(state, &ptr).await?;
+
+    let page_range = bookmarked_page_range(state, outline, item, &book.hash);
     // One k=1 similarity query, purely to ANCHOR the contiguous window: the
     // page where this node's own topic best matches is where its section
     // text starts reading from (a split chapter's second node should not be
@@ -3102,86 +3203,216 @@ async fn ground_node(
     // doc for why the old top-4 budget stopped matching the chapter-sized
     // node unit (2026-09-04).
     let anchor = source::search_index_cache(
-        &index_cache_dir,
-        &hash,
-        &embedder,
+        &book.index_cache_dir,
+        &book.hash,
+        &book.embedder,
         &item.title,
         1,
         page_range,
     )
-    .map_err(|e| format!("could not search the index for {filename}: {e}"))?
+    .map_err(|e| format!("could not search the index for {}: {e}", book.title))?
     .into_iter()
     .next()
     .map(|(page, _, _)| page);
     let pages = source::acervo::pages_text_from_cache(
-        &index_cache_dir,
-        &hash,
+        &book.index_cache_dir,
+        &book.hash,
         page_range,
         anchor,
         source::acervo::SECTION_TEXT_CHAR_BUDGET,
     )
-    .map_err(|e| format!("could not read the section text of {filename}: {e}"))?;
+    .map_err(|e| format!("could not read the section text of {}: {e}", book.title))?;
     if pages.is_empty() {
         return Err(format!(
             "internal error: \"{}\" produced no retrievable content — this should not happen after the acervo gate passed",
-            expected.title
+            book.title
         ));
     }
 
     Ok(GroundedSelection {
         text: pages
             .iter()
-            .map(|(page, text)| {
-                format!(
-                    "[id: {} | loc: p:{page} | {}]\n{}",
-                    hash, expected.title, text
-                )
-            })
+            .map(|(page, text)| cite_block(&book.hash, &book.title, *page, text))
             .collect::<Vec<_>>()
             .join("\n\n"),
         index: Some(crate::movement::grounding::GroundingIndex {
-            embedder,
-            dir: index_cache_dir,
-            content_hash: hash,
+            embedder: book.embedder,
+            dir: book.index_cache_dir,
+            content_hash: book.hash,
         }),
     })
 }
 
-/// Retrieves grounding passages for a concept and formats them so the model can
-/// cite each by its exact id/locator (§10/§4.3). Returns "" when grounding is off
-/// or nothing relevant is indexed yet.
+/// Re-grounds an ALREADY-generated node for a follow-up move (remediation,
+/// re-grade), chapter-scoped exactly like [`ground_node`] but DEGRADING to
+/// "" on any failure instead of erroring: the node already passed the gate
+/// when it generated, so a hiccup re-reading the library must never fail an
+/// answer or a grade — the move proceeds on the node's own text (the same
+/// degrade convention `objective_for` uses), it just cites nothing new.
 ///
-/// Callers pass the node's own concept title alone, never `{topic} {title}` —
-/// prepending the raw curriculum topic was found (2026-08-20, live QA on an
-/// "Epistemologia" document) to dominate the embedding query over the node's
-/// own title, pulling in grounding for the topic itself even on a
-/// prerequisite node meant to teach something standalone and different from
-/// it ("Familiarity with the concept of philosophy" retrieved only
-/// Epistemology passages, never the corpus's own Introduction to Philosophy
-/// source, which scored higher once the topic prefix was dropped). A node's
-/// own title is already a self-contained concept name (`propose_outline`'s
-/// contract, `engine/prompt.rs`) — the topic doesn't need to ride along.
-pub(super) async fn grounding_for(state: &AppState, query: &str) -> String {
-    let Some(retriever) = &state.retriever else {
-        return String::new();
-    };
-    let hits = {
-        let r = retriever.read().await;
-        r.retrieve(query, 4)
-    };
-    hits.iter()
-        .map(|h| {
-            format!(
-                "[id: {} | loc: {} | {} — {}]\n{}",
-                h.chunk.source_id,
-                h.chunk.locator,
-                h.chunk.source_title,
-                h.chunk.section_title,
-                h.chunk.text
+/// Replaces the old corpus-retriever `grounding_for` (deleted 2026-09-09):
+/// grounding everywhere now comes from the PDF, chapter-scoped (user
+/// decision) — grading/remediation included.
+pub(super) async fn grounding_for_node(state: &AppState, owner_doc: &str, node_id: &str) -> String {
+    let grounded = async {
+        let outline_json = state.store.read_doc_file(owner_doc, "outline.json").ok()?;
+        let outline: Outline = serde_json::from_str(&outline_json).ok()?;
+        let item = outline.items.iter().find(|i| i.id == node_id)?;
+        let ptr = engine::resolve_grounding_source(&outline, item)?;
+        let book = resolve_grounded_book(state, &ptr).await.ok()?;
+        let page_range = bookmarked_page_range(state, &outline, item, &book.hash);
+        let pages = source::acervo::pages_text_from_cache(
+            &book.index_cache_dir,
+            &book.hash,
+            page_range,
+            None,
+            source::acervo::SECTION_TEXT_CHAR_BUDGET,
+        )
+        .ok()?;
+        if pages.is_empty() {
+            return None;
+        }
+        Some(
+            pages
+                .iter()
+                .map(|(page, text)| cite_block(&book.hash, &book.title, *page, text))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    }
+    .await;
+    grounded.unwrap_or_default()
+}
+
+/// Similarity floor for [`grounding_for_ask`]'s scoped tiers (chapter, whole
+/// book). Untuned by intent — there is no retrieval telemetry yet (the same
+/// gap that left the old corpus retriever's 0.01 floor flagged as no floor)
+/// — just a deliberate bar ABOVE "any vector at all": potion-base-8M cosine
+/// puts a same-topic page/question pair around 0.5+, unrelated prose in the
+/// 0.2-0.35 range. The point is to keep a question the book genuinely
+/// doesn't cover from being "grounded" by its least-bad page: a below-floor
+/// tier falls through to the next tier (or to needs-source), which is the
+/// honest answer.
+const ASK_MIN_SCORE: f32 = 0.45;
+
+/// A HIGHER floor for the cross-book tier: another book has none of the
+/// question's surrounding context, so its hit must clear a stricter bar
+/// before it is allowed to speak for this question.
+const ASK_MIN_SCORE_CROSS_BOOK: f32 = 0.55;
+
+/// Pages retrieved per tier of [`grounding_for_ask`]; the contiguous-window
+/// trick node generation uses does not apply here — a question wants the
+/// best-matching pages, not the chapter read in order.
+const ASK_PAGES_PER_TIER: usize = 3;
+
+/// `/ask`'s grounding cascade (2026-09-09, user decision): the node's own
+/// CHAPTER first (the material being studied right now), then the WHOLE
+/// book (a question can wander past the chapter without leaving the book),
+/// then every OTHER indexed book in the library (§10's cross-document
+/// retrieval, finally consumed — the learner may own the answer), then "".
+/// Every tier applies [`ASK_MIN_SCORE`]-family floors, so "nothing covers
+/// this" stays reachable — that outcome is what drives the client's
+/// add-a-book prompt (the `needs_source` ask response, §11: the model must
+/// not invent what no source covers).
+///
+/// Zero extra tokens throughout: every query is a local embedding against
+/// page indexes the acervo gate already built. The query is title + question
+/// — the title anchors the domain, the question discriminates within it
+/// (the title alone retrieves the node's own teaching pages regardless of
+/// what was asked; the question alone loses the domain for pronoun-heavy
+/// asks like "why is that?").
+pub(super) async fn grounding_for_ask(
+    state: &AppState,
+    owner_doc: &str,
+    node_id: &str,
+    question: &str,
+) -> String {
+    let grounded = async {
+        let outline_json = state.store.read_doc_file(owner_doc, "outline.json").ok()?;
+        let outline: Outline = serde_json::from_str(&outline_json).ok()?;
+        let item = outline.items.iter().find(|i| i.id == node_id)?;
+        let ptr = engine::resolve_grounding_source(&outline, item)?;
+        let book = resolve_grounded_book(state, &ptr).await.ok()?;
+        let query = format!("{}\n{}", item.title, question);
+
+        // Tier 1+2: the node's own book, chapter-scoped then whole-book.
+        let chapter_range = bookmarked_page_range(state, &outline, item, &book.hash);
+        for page_range in [chapter_range, None] {
+            let hits = source::search_index_cache(
+                &book.index_cache_dir,
+                &book.hash,
+                &book.embedder,
+                &query,
+                ASK_PAGES_PER_TIER,
+                page_range,
             )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+            .ok()?;
+            let good: Vec<_> = hits
+                .into_iter()
+                .filter(|(_, _, score)| *score >= ASK_MIN_SCORE)
+                .collect();
+            if !good.is_empty() {
+                return Some(
+                    good.iter()
+                        .map(|(page, text, _)| cite_block(&book.hash, &book.title, *page, text))
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                );
+            }
+        }
+
+        // Tier 3: every OTHER indexed book in the library — one query each,
+        // best page only, stricter floor. `LibraryFileIndex` is the hash →
+        // (filename, title) map the acervo gate already maintains, so this
+        // never re-scans PDF bytes to name a hit.
+        let index_root = book.index_cache_dir.parent()?;
+        let files = source::acervo::LibraryFileIndex::open(index_root).ok()?;
+        let mut cross: Vec<(String, String, usize, String, f32)> = Vec::new();
+        for hash in files.all_hashes() {
+            if hash == book.hash {
+                continue;
+            }
+            let Some(record) = files.get(&hash) else {
+                continue;
+            };
+            let hits = source::search_index_cache(
+                &book.index_cache_dir,
+                &hash,
+                &book.embedder,
+                &query,
+                1,
+                None,
+            )
+            .ok();
+            let Some(hits) = hits else { continue };
+            let Some((page, text, score)) = hits.into_iter().next() else {
+                continue;
+            };
+            if score < ASK_MIN_SCORE_CROSS_BOOK {
+                continue;
+            }
+            cross.push((
+                hash,
+                record.title.unwrap_or(record.filename),
+                page,
+                text,
+                score,
+            ));
+        }
+        cross.sort_by(|a, b| b.4.total_cmp(&a.4));
+        if cross.is_empty() {
+            return None;
+        }
+        Some(
+            cross
+                .iter()
+                .map(|(hash, title, page, text, _)| cite_block(hash, title, *page, text))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    }
+    .await;
+    grounded.unwrap_or_default()
 }
 
 /// Assembles the node from the accumulated moves and persists it (node +
@@ -3275,6 +3506,89 @@ pub(super) async fn finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmark_clamp_bounds_a_lone_materialized_chapter() {
+        // The live shape (Think Python 2012): flat bookmarks, chapter
+        // headers carrying a printed number, their sections carrying none.
+        let outline = vec![
+            source::pdf::OutlineEntry {
+                title: "Preface".into(),
+                page: 11,
+                children: vec![],
+            },
+            source::pdf::OutlineEntry {
+                title: "1 The Way of the Program".into(),
+                page: 21,
+                children: vec![source::pdf::OutlineEntry {
+                    title: "The Python Programming Language".into(),
+                    page: 21,
+                    children: vec![],
+                }],
+            },
+            source::pdf::OutlineEntry {
+                title: "2 Writing a Program".into(),
+                page: 33,
+                children: vec![],
+            },
+            source::pdf::OutlineEntry {
+                title: "3 Functions".into(),
+                page: 49,
+                children: vec![],
+            },
+        ];
+        // Chapter 1 of the materialized outline ends where chapter 2
+        // starts — not at the end of the book.
+        assert_eq!(
+            next_chapter_start_from_bookmarks(&outline, Some("1")),
+            Some(33)
+        );
+        // Section numbers never count as the next chapter ("2.1" is not
+        // past "2"), and the genuinely last chapter finds nothing.
+        let nested = vec![source::pdf::OutlineEntry {
+            title: "2 A Chapter".into(),
+            page: 30,
+            children: vec![source::pdf::OutlineEntry {
+                title: "2.1 A Section".into(),
+                page: 31,
+                children: vec![],
+            }],
+        }];
+        assert_eq!(next_chapter_start_from_bookmarks(&nested, Some("2")), None);
+        // No chapter number to order by — no clamp.
+        assert_eq!(next_chapter_start_from_bookmarks(&outline, None), None);
+    }
+
+    #[test]
+    fn needs_source_marker_parses_tolerantly() {
+        assert_eq!(
+            needs_source_topic("so, <!--needs-source: tensor calculus--> as I was saying"),
+            Some("tensor calculus".to_string())
+        );
+        // Missing colon.
+        assert_eq!(
+            needs_source_topic("<!--needs-source group theory-->"),
+            Some("group theory".to_string())
+        );
+        // Missing closing arrow (stream cut off) — end of output bounds it.
+        assert_eq!(
+            needs_source_topic("<!--needs-source: measure theory"),
+            Some("measure theory".to_string())
+        );
+        // Newline bounds it when the model keeps talking.
+        assert_eq!(
+            needs_source_topic("<!--needs-source: entropy\nActually, here is an answer…"),
+            Some("entropy".to_string())
+        );
+        // No marker at all → None.
+        assert_eq!(needs_source_topic("<p>a normal answer</p>"), None);
+        // Empty topic still means needs-source, with a generic name.
+        assert_eq!(
+            needs_source_topic("<!--needs-source:-->"),
+            Some("this topic".to_string())
+        );
+    }
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
@@ -3300,12 +3614,7 @@ mod tests {
             config: Arc::new(RwLock::new(crate::config::AppConfig::default())),
             secret: Arc::new(crate::secret::SecretStore::open(&data_dir)),
             data_dir: Arc::from(data_dir.to_string_lossy().as_ref()),
-            source: Arc::new(crate::source::Source::Mock(crate::source::MockSource::new())),
-            fallback_source: Arc::new(
-                crate::source::Source::Mock(crate::source::MockSource::new()),
-            ),
-            corpus: crate::source::Corpus::open(&data_dir).unwrap(),
-            retriever: None,
+            embedder: None,
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };

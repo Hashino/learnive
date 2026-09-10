@@ -1,14 +1,14 @@
-use super::cold_start::{acquire, outline_view};
+use super::cold_start::outline_view;
 use super::grading::sse_frame;
 use super::reading::due_review_view;
-use super::reading::{finalize, grounding_for, prepare, tail_chars, topic_and_title};
+use super::reading::{finalize, prepare, tail_chars, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
 // Node generation (§6): the deterministic template → generate → stream, move by move (§14).
 //
 // §S18: the loop closes by MOVE, not by node. One `/generate` request
-// produces at most one real (non-`research`) move, then ends the stream —
+// produces exactly one move, then ends the stream —
 // see `generate_node`'s doc comment for the event that signals this
 // (`move_paused`) vs. node-complete (`done`). The client reopens the request
 // once the learner has read that move (today: crossing the read-to-end
@@ -17,20 +17,16 @@ use super::*;
 // move-loop index — is now reconstructed on every call by `prepare` from the
 // event log + persisted `content.html` (the same resume machinery §14 built
 // for crash recovery; see `resumed_move_index`'s doc comment), not carried
-// forward in memory. `research` is the one exception: it produces nothing
-// the learner reads, so it still loops internally within the same request
-// (capped at one attempt via `ctx.research_attempted`) before the request's
-// one real move happens.
+// forward in memory.
 // ---------------------------------------------------------------------------
 
 /// Hard cap on moves generated for one node, enforced ACROSS requests
 /// (§S18) rather than within a single one (§12.2 cost control). The
 /// deterministic template closes a node in 2-3 moves, so it never comes
-/// near this; the slots exist for the research interception (which
-/// consumes one when a node starts ungrounded) and as a last-resort cost
-/// guard: once `prepare`'s reconstructed index reaches the last allowed
-/// slot, that request forces `Test` so the node still closes in a graded
-/// check (every node ends in one, §6).
+/// near this; the slot exists as a last-resort cost guard: once `prepare`'s
+/// reconstructed index reaches the last allowed slot, that request forces
+/// `Test` so the node still closes in a graded check (every node ends in
+/// one, §6).
 const MAX_MOVES_PER_NODE: usize = 4;
 
 /// Verbatim §14 context budget for the move loop's own node tail (~1.5k chars).
@@ -136,7 +132,7 @@ pub async fn generate_node(
         } else {
             tail_chars(&content_html, NODE_TAIL_BUDGET)
         };
-        let mut ctx = MoveContext {
+        let ctx = MoveContext {
             topic: prep.topic.clone(),
             item_title: prep.title.clone(),
             outline_context: prep.context.clone(),
@@ -150,13 +146,11 @@ pub async fn generate_node(
             prior_moves: prep.resumed_moves.clone(),
             node_tail: resumed_tail,
             locale,
-            research_attempted: prep.research_attempted,
             scaffolding: prep.scaffolding,
             interleave_titles: prep.interleave_titles.clone(),
             chapter_close: prep.chapter_close,
             ..Default::default()
         };
-        let mut graded: Option<(String, GeneratedMove)> = None;
 
         // Clamped so a resumed attempt always retries at least the final,
         // forced-`Test` iteration rather than erroring out with no graded
@@ -169,23 +163,26 @@ pub async fn generate_node(
         // move's success breaks the loop before the progressive-persistence
         // block runs — so reusing that index here can't collide.
         let start = prep.resumed_move_index.min(MAX_MOVES_PER_NODE - 1);
-        for i in start..MAX_MOVES_PER_NODE {
+        // One move slot per request (§S18): the `for` this used to live in
+        // only ever iterated for the `research` move's in-request loop-back,
+        // which died with the corpus retirement (2026-09-09), so this is
+        // straight-line code — an ungraded move ends the request, a graded
+        // one falls through to `finalize`. The clamp above still guarantees
+        // a resumed attempt retries at least the final, forced-`Test` slot
+        // (reachable only if every slot was already logged by a prior
+        // attempt whose graded move then failed to `finalize`).
+        let i = start;
             // S33: move choice is the deterministic template
-            // (`movement::next_move`) — the model never picks. One
-            // structural interception remains: §S13/S30's research move,
-            // Rust-forced now instead of menu-offered — a node that starts
-            // with no grounding and no acquisition attempt yet acquires
-            // first (one attempt per node, `ctx.research_attempted`), then
-            // the template resumes. Like any other move it consumes one of
-            // `MAX_MOVES_PER_NODE`'s slots; the forced-`Test` last slot
-            // always outranks it, so a node can never spend its whole
-            // budget without reaching a graded check.
+            // (`movement::next_move`) — the model never picks. Grounding is
+            // settled before the loop starts (`prepare`'s `ground_node`,
+            // the S27m gate): there is no in-loop acquisition step anymore
+            // (the corpus retirement, 2026-09-09 — §11's "no source
+            // coverage ⇒ no generation" is enforced by the gate refusing
+            // the node, never by a move papering over it).
             let move_type = if i == MAX_MOVES_PER_NODE - 1 {
                 // Cost guard exhausted without a graded check — force one so
                 // the node still closes (every node ends in a check, §6).
                 MoveType::Test
-            } else if ctx.grounding.trim().is_empty() && !ctx.research_attempted {
-                MoveType::Research
             } else {
                 match movement::next_move(&ctx) {
                     Ok(mt) => mt,
@@ -195,53 +192,6 @@ pub async fn generate_node(
                     }
                 }
             };
-
-            if move_type == MoveType::Research {
-                // §S13: acquires grounding for this concept, then loops back
-                // to the template — never reaches `render()` (see
-                // `MoveType::Research`'s doc comment). Capped at one attempt
-                // per node across requests via `ctx.research_attempted`
-                // (reconstructed from the log in `prepare`), so a source
-                // that genuinely can't be found costs exactly one slot.
-                let looking_en = format!("Looking for sources on {}…", ctx.item_title);
-                let looking_pt = format!("Procurando fontes sobre {}…", ctx.item_title);
-                yield Ok(sse_frame(
-                    "research",
-                    crate::locale::pick(locale, &looking_en, &looking_pt),
-                ));
-                let outcome =
-                    acquire(&state, &format!("{} {}", ctx.topic, ctx.item_title)).await;
-                let status = match &outcome.source_title {
-                    Some(title) => {
-                        let en = format!("Found a source: {title}");
-                        let pt = format!("Fonte encontrada: {title}");
-                        crate::locale::pick(locale, &en, &pt).to_string()
-                    }
-                    None => crate::locale::pick(
-                        locale,
-                        "No adequate source found — continuing ungrounded",
-                        "Nenhuma fonte adequada encontrada — continuando sem fonte",
-                    )
-                    .to_string(),
-                };
-                yield Ok(sse_frame("research", &status));
-                if let Err(e) = event_log.append(
-                    Some(&prep.node_id),
-                    EventKind::MoveGenerated {
-                        move_id: engine::new_id(),
-                        move_type: move_type.to_string(),
-                        tactics: Vec::new(),
-                        rung: "deterministic".to_string(),
-                    },
-                ) {
-                    eprintln!("event log append failed: {e}");
-                }
-                ctx.research_attempted = true;
-                if outcome.grounded {
-                    ctx.grounding = grounding_for(&state, &ctx.item_title).await;
-                }
-                continue;
-            }
 
             let generated = match move_type.render() {
                 MoveRender::Streamed => {
@@ -385,11 +335,7 @@ pub async fn generate_node(
                 eprintln!("event log append failed: {e}");
             }
 
-            if generated.graded {
-                graded = Some((move_id, generated));
-                break;
-            }
-
+            if !generated.graded {
             // Ungraded: both streamed moves (tokens already yielded above) and
             // structured-but-ungraded moves (one full frame here) render as
             // sanitized prose in the app origin — same contract, same client
@@ -426,7 +372,7 @@ pub async fn generate_node(
                 &learnive_core::redact_interactive_blocks(&tagged),
             ));
             // §S18: the loop now closes by MOVE, not by node — one real
-            // (non-`research`) move settles per request, then the request
+            // move settles per request, then the request
             // ends here. The learner reads it (crossing the read-to-end
             // sentinel reopens `/generate` for the next template move);
             // `prepare`'s resume machinery reconstructs `prior_moves`/
@@ -434,17 +380,12 @@ pub async fn generate_node(
             // content on that next call for this same node.
             yield Ok(sse_frame("move_paused", &prep.node_id));
             return;
-        }
+            }
 
-        let Some((move_id, graded)) = graded else {
-            yield Ok(sse_frame(
-                "error",
-                "could not produce a graded check for this node",
-            ));
-            return;
-        };
-
-        match finalize(&state, &doc_id, &prep, &content_html, &move_id, &graded).await {
+        // The graded move: straight into finalize — there is no exhausted-
+        // without-a-check case anymore, because the forced-`Test` last slot
+        // (above) makes the graded move itself the cost guard.
+        match finalize(&state, &doc_id, &prep, &content_html, &move_id, &generated).await {
             Ok(()) => {
                 // The client fetches the exercise sandboxed from its own
                 // frame endpoint (§4.4) — this event just signals it's ready

@@ -1,10 +1,5 @@
 use super::*;
-
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-use crate::retrieval::Retriever;
-use crate::source::{SearchHit, Source};
+use tokio::task::spawn_blocking;
 
 // ---------------------------------------------------------------------------
 // Cold start (§6.1, §S4): topic → proposed objective → confirmed objective +
@@ -361,18 +356,15 @@ const PREREQ_MATCH_THRESHOLD: f32 = 0.86;
 /// once per node — every node, prerequisite or objective alike, there is no
 /// structural reason to skip the objective's own subtree here even though
 /// the client locks its toggle regardless — comparing by cosine similarity.
-/// `None` embedder (grounding disabled — `state.retriever` unset) degrades
-/// to every node suggested `learn`, the same graceful degradation `acquire`
-/// already uses for a missing retriever.
+/// `None` embedder (grounding disabled — `state.embedder` unset) degrades
+/// to every node suggested `learn`, the same graceful degradation the
+/// grounding paths use for a missing embedder.
 async fn resolve_outline_forest(
     state: &AppState,
     tree: &[engine::ProposedOutlineNode],
     known: &[KnownConcept],
 ) -> Vec<ProposedNode> {
-    let embedder = match &state.retriever {
-        Some(r) => Some(r.read().await.embedder().clone()),
-        None => None,
-    };
+    let embedder = state.embedder.as_deref().cloned();
     let known_vecs = embedder.as_ref().map(|e| {
         let titles: Vec<String> = known.iter().map(|k| k.title.clone()).collect();
         e.embed_batch(&titles)
@@ -461,6 +453,18 @@ pub struct ConfirmedNode {
     /// revised 2026-08-30) — set only for a `Chapter`-typed node.
     #[serde(default)]
     chapter_number: Option<String>,
+    /// Echoed back from the manual picker (2026-09-09): the content hash of
+    /// the exact library PDF the learner picked for this work. Only the
+    /// picker can set it — the automatic path proposes works nobody has a
+    /// file for yet (that is precisely what the acervo gate settles after
+    /// creation). `create_document` turns it into a `ManualMatchStore`
+    /// pairing; without it, `resolve_matched_filename` sees every edition
+    /// of the work as an equally plausible candidate, bails on the
+    /// ambiguity, and the S33-2 split gate then refuses generation forever
+    /// (live: Think Python 2012 vs 2nd ed, `resolved_page` stuck at `None`
+    /// despite the learner's explicit pick).
+    #[serde(default)]
+    file_hash: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -647,6 +651,65 @@ fn source_pointer_from(node: &ConfirmedNode) -> Option<SourcePointer> {
     })
 }
 
+/// Persists the manual picker's per-work file choices
+/// (`ConfirmedNode::file_hash`) as `ManualMatchStore` pairings (2026-09-09).
+///
+/// The picker's whole job is disambiguation — it shows the learner the real
+/// files in their library and records which one each work means — but the
+/// confirm payload used to strip that knowledge (`hash` was client-only),
+/// so a library holding two editions of the same work left chapter
+/// resolution permanently ambiguous: `resolve_matched_filename` bails on
+/// 2+ candidates, `resolved_page` never fills, and the S33-2 split gate
+/// refuses generation forever. The pairing is identity-keyed
+/// (normalized title + author surnames + kind), exactly the key
+/// `resolve_matched_filename` consults first — so this write is what makes
+/// the learner's explicit choice win there, for this and every future
+/// document naming the same work.
+///
+/// A hash with no matching library file is skipped rather than an error:
+/// the file was deleted between the picker screen and this call, and the
+/// acervo gate surfaces the absence with a real report right after
+/// creation — a 500 here would only bury that signal.
+async fn record_manual_file_pairings(
+    state: &AppState,
+    nodes: &[ConfirmedNode],
+) -> Result<(), ApiError> {
+    fn collect(nodes: &[ConfirmedNode], out: &mut Vec<(crate::source::ProposedItem, String)>) {
+        for node in nodes {
+            if let (Some(bib), Some(hash)) = (&node.bibliography, &node.file_hash) {
+                out.push((bib.clone(), hash.clone()));
+            }
+            collect(&node.children, out);
+        }
+    }
+    let mut pairs = Vec::new();
+    collect(nodes, &mut pairs);
+    if pairs.is_empty() {
+        return Ok(()); // the automatic path: no file was ever picked
+    }
+    let data_dir = state.data_dir.to_string();
+    let listing = spawn_blocking(move || crate::source::acervo::library_listing(&data_dir))
+        .await
+        .map_err(|e| ApiError::Internal(format!("library scan failed: {e}")))?
+        .map_err(|e| ApiError::Internal(format!("library scan failed: {e}")))?;
+    let manual = crate::source::ManualMatchStore::open(state.data_dir.as_ref())
+        .map_err(|e| ApiError::Internal(format!("could not open the manual-match store: {e}")))?;
+    for (bib, hash) in pairs {
+        let Some(entry) = listing.iter().find(|e| e.hash == hash) else {
+            continue;
+        };
+        let expected = crate::source::ExpectedItem {
+            title: bib.title.clone(),
+            authors: bib.authors.clone(),
+            kind: bib.kind,
+        };
+        manual
+            .set(&expected, &entry.filename)
+            .map_err(|e| ApiError::Internal(format!("could not record the file pairing: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Every descendant of a `skip`ped node is skipped too, unconditionally —
 /// `action` on a descendant is ignored once an ancestor is skipped, the
 /// literal "um clique, nada daquele subnodo ou dos seus próprios filhos é
@@ -677,6 +740,7 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             bibliography: n.bibliography.clone(),
             verification: n.verification.clone(),
             chapter_number: n.chapter_number.clone(),
+            file_hash: None,
         })
         .collect()
 }
@@ -1007,6 +1071,12 @@ pub async fn create_document(
             "the confirmed selection has nothing to learn or review — every node was skipped; mark at least one work or chapter as learn or review".to_string(),
         ));
     }
+    // The manual picker knew WHICH file each picked work is (its content
+    // hash); `ConfirmedNode::file_hash` carries that choice here, and
+    // recording it before anything is persisted means a failed write aborts
+    // creation instead of silently producing the S33-2 deadlock it exists
+    // to prevent.
+    record_manual_file_pairings(&state, &confirmed_nodes).await?;
     let outline = engine::Outline {
         topic: body.topic.clone(),
         items,
@@ -1056,12 +1126,6 @@ pub async fn create_document(
         })
         .unwrap_or_default(),
     )?;
-    // Acquire a grounding source in the background (§11/§14): the outline returns
-    // immediately and content starts streaming ungrounded; citations appear once
-    // the source is fetched and indexed. Never blocks the user. Seeded with the
-    // confirmed objective text (strictly better grounding input than the raw
-    // topic, and the only text guaranteed to already reflect the user's edits).
-    spawn_acquisition(state.clone(), objective_text);
     let items = outline_view(&state, &doc_id, &outline)?;
     Ok(Json(CreateResp {
         doc_id,
@@ -1181,10 +1245,6 @@ pub async fn next_topic(
             }
         }
     }
-
-    // Same background grounding as `create_document` — the new epoch's
-    // objective is the best available seed text.
-    spawn_acquisition(state.clone(), objective_text);
 
     let outline_json = state.store.read_doc_file(&doc_id, "outline.json")?;
     let outline: Outline =
@@ -1482,211 +1542,6 @@ pub async fn revise_objective(
     }))
 }
 
-/// Outcome of `acquire` — enough for a caller to tell the learner what
-/// happened (the `research` move, §S13) or just log it (cold-start's
-/// background call, `spawn_acquisition`).
-pub(super) struct AcquisitionOutcome {
-    pub grounded: bool,
-    pub source_title: Option<String>,
-}
-
-/// Runs source acquisition + reindex for `query_hint` (§11.1/§10): derives a
-/// real book/article title (`engine::propose_source_title` — renamed
-/// 2026-08-29 from `propose_search_subject`; searching by *subject* against
-/// an all-fields index is what let a discrete-math node acquire an unrelated
-/// Android/automata paper, the wrong-book bug S27m closed at the grounding
-/// gate but not at the source), then tries each configured `Source` in order
-/// (`state.source` then `state.fallback_source`) with that title, searched
-/// against LibGen's title column specifically (`source::libgen`). Falls back
-/// to the raw hint verbatim if the title search yields nothing — deliberately:
-/// a hallucinated or unmatched title should mean *no book*, not a resurrected
-/// subject-phrase guess, so this fallback is expected to usually also miss.
-/// An acquisition that lands nothing here is not silently absorbed later: it
-/// leaves `research_attempted` set and grounding empty, which is what makes
-/// S27m's document-level gate refuse the node rather than generate ungrounded
-/// prose. Returns as soon as one attempt lands. The primary (LibGen) and
-/// fallback (Sci-Hub) backends are both tried; Sci-Hub still only accepts a
-/// DOI query and is unaffected by this title change (open question, not yet
-/// decided: resolving title→DOI via `source::bibliography`'s Crossref lookup
-/// so Sci-Hub can be reached from a title too — see PLAN.md's S27m note).
-/// When neither mirror answers (offline / blocked / no result) this degrades
-/// to not-grounded — same as the no-retriever case below. Acquisition is a
-/// best-effort enhancement, so every failure mode here is recoverable and
-/// never surfaced as an error to the caller.
-///
-/// No-op (returns not-grounded) when grounding is disabled (no retriever).
-/// Awaited directly by the `research` move (generation must not proceed
-/// without knowing whether it landed); wrapped in `tokio::spawn` by
-/// `spawn_acquisition` for the fire-and-forget cold-start case, where an
-/// ungrounded document is still fully usable and nothing is waiting on it.
-pub(super) async fn acquire(state: &AppState, query_hint: &str) -> AcquisitionOutcome {
-    let Some(retriever) = &state.retriever else {
-        return AcquisitionOutcome {
-            grounded: false,
-            source_title: None,
-        };
-    };
-    // Both acquisition slots empty (the 2026-09-01 unplug) → there is nothing
-    // to search, and `propose_source_title` below is a paid model call that
-    // would only name queries for backends that don't exist. The `research`
-    // move — this function's other consumer — then reports "no adequate
-    // source found" instantly instead of after a mirror timeout (§12.2: never
-    // spend a call to learn what the type already knows).
-    if matches!(*state.source, Source::Unconfigured)
-        && matches!(*state.fallback_source, Source::Unconfigured)
-    {
-        return AcquisitionOutcome {
-            grounded: false,
-            source_title: None,
-        };
-    }
-    let ai = state.ai.load_full();
-    let title = engine::propose_source_title(&ai, query_hint)
-        .await
-        .unwrap_or_default();
-
-    let mut queries = Vec::with_capacity(2);
-    if !title.trim().is_empty() {
-        queries.push(title.as_str());
-    }
-    if !query_hint.trim().is_empty() && query_hint != title {
-        queries.push(query_hint);
-    }
-
-    // Try every (backend, query), and within a query EVERY ranked hit — the
-    // best textbook first, then the next, … — until one actually downloads.
-    // A single mirror download can reset mid-stream (LibGen is flaky on larger
-    // PDFs), so falling through to the next candidate is what lets grounding
-    // land a real textbook instead of silently giving up on the first reset.
-    // `ranked_hits` already puts textbooks ahead of journal articles.
-    for source in [&state.source, &state.fallback_source] {
-        for query in &queries {
-            let Ok(hits) = source.search(query).await else {
-                continue;
-            };
-            for hit in crate::source::ranked_hits(&hits) {
-                if let Some(title) = fetch_and_store(state, source, retriever, &hit).await {
-                    return AcquisitionOutcome {
-                        grounded: true,
-                        source_title: Some(title),
-                    };
-                }
-            }
-        }
-    }
-    AcquisitionOutcome {
-        grounded: false,
-        source_title: None,
-    }
-}
-
-/// Downloads, stores, and reindexes a chosen hit. `None` on any failure —
-/// every failure mode is recoverable by the caller trying another
-/// hit/query/backend.
-async fn fetch_and_store(
-    state: &AppState,
-    source: &Arc<Source>,
-    retriever: &Arc<RwLock<Retriever>>,
-    hit: &SearchHit,
-) -> Option<String> {
-    let corpus = &state.corpus;
-    let doc = match source.fetch(hit).await {
-        Ok(d) => d,
-        // Download/normalize failure (e.g. mirror reset mid-stream) — log it
-        // so a flaky acquisition is visible, then let the caller try the next
-        // ranked candidate instead of failing silently.
-        Err(e) => {
-            eprintln!("acquisition: fetch failed for \"{}\": {e}", hit.title);
-            return None;
-        }
-    };
-    let title = doc.meta.title.clone();
-    match corpus.store(&doc) {
-        Ok(true) => {
-            let mut r = retriever.write().await;
-            if let Err(e) = r.reindex(corpus) {
-                eprintln!("reindex after acquisition failed: {e}");
-                return None;
-            }
-            eprintln!("grounded on \"{title}\" ({} chunks)", r.len());
-            Some(title)
-        }
-        // Already in the corpus and indexed — still a successful ground.
-        Ok(false) => Some(title),
-        Err(e) => {
-            eprintln!("corpus store failed: {e}");
-            None
-        }
-    }
-}
-
-/// Background source acquisition (§11.1/§10), fire-and-forget: cold start
-/// returns the outline immediately and content starts streaming ungrounded;
-/// citations appear once `acquire` lands. Failures are logged only (see
-/// `acquire`'s doc comment) — an ungrounded document is still fully usable.
-fn spawn_acquisition(state: AppState, topic: String) {
-    if state.retriever.is_none() {
-        return;
-    }
-    tokio::spawn(async move {
-        acquire(&state, &topic).await;
-    });
-}
-
-/// The runtime acquisition backend (§11.1). Origin is deliberately open
-/// (`source::mod` doc comment) — the earlier OpenStax/Wikipedia backends were
-/// deleted, and although the façade still ships LibGen and Sci-Hub backends,
-/// **both slots are UNPLUGGED as of 2026-09-01 (user decision)**:
-/// `build_source`/`build_fallback_source` return `Source::Unconfigured`
-/// unless the user points them at a mirror via `LEARNIVE_LIBGEN_URL` /
-/// `LEARNIVE_SCIHUB_URL` — the env vars are the only plug. The built-in
-/// default mirror lists that used to make the slot always-on are out of the
-/// build path (retained below, unreferenced): live QA that day showed the
-/// always-on default burning a cold start on 7 mirror rejections (HTTP
-/// 500/503) before one download landed, and grounding on real documents
-/// comes from the local library (route B) anyway — remote
-/// search-and-download must be an explicit act, never a background default.
-/// `Source::Unconfigured`'s calls fail fast with `SourceError::Unconfigured`,
-/// and `acquire` short-circuits before even proposing a search title.
-// Retained for re-plugging (2026-09-01): candidate roots tried in order
-// (whichever answers first wins). They rotate constantly, so REFRESH these
-// lists when plugging back in — these are what was live at unplug time.
-// Re-plug by restoring the `unwrap_or_else(DEFAULT_…)` fallbacks in
-// `build_source`/`build_fallback_source`, or just set the env vars.
-// `sci-hub.ee` is a reliably-ungated mirror (no Cloudflare interstitial) that
-// works where `.se`/`.st`/`.wf` are challenged. libgen.im/libgen.li are tried
-// first because they answer from more networks; libgen.is/rs/st are the older
-// generation that still works where reachable.
-#[allow(dead_code)]
-const DEFAULT_LIBGEN_URLS: &str =
-    "https://libgen.li,https://libgen.im,https://libgen.is,https://libgen.rs,https://libgen.st";
-#[allow(dead_code)]
-const DEFAULT_SCIHUB_URLS: &str = "https://sci-hub.ee,https://sci-hub.se,https://sci-hub.st,https://sci-hub.wf,https://sci-hub.ren";
-
-/// The §11.1 primary acquisition backend: LibGen (books) — currently
-/// UNPLUGGED (see the module doc above): `Source::Unconfigured` unless
-/// `LEARNIVE_LIBGEN_URL` is set. The fallback (`build_fallback_source`,
-/// Sci-Hub for papers) is tried when this yields nothing.
-pub fn build_source() -> Source {
-    match std::env::var("LEARNIVE_LIBGEN_URL") {
-        Ok(urls) if !urls.trim().is_empty() => {
-            Source::LibGen(crate::source::LibGenSource::new(urls))
-        }
-        _ => Source::Unconfigured,
-    }
-}
-
-/// The §11.1 fallback tier: Sci-Hub (papers) — currently UNPLUGGED, same
-/// terms as `build_source` above.
-pub fn build_fallback_source() -> Source {
-    match std::env::var("LEARNIVE_SCIHUB_URL") {
-        Ok(urls) if !urls.trim().is_empty() => {
-            Source::SciHub(crate::source::SciHubSource::new(urls))
-        }
-        _ => Source::Unconfigured,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1745,6 +1600,7 @@ mod tests {
             bibliography: None,
             verification: None,
             chapter_number: None,
+            file_hash: None,
         }
     }
 
@@ -1759,6 +1615,7 @@ mod tests {
             bibliography: None,
             verification: None,
             chapter_number: None,
+            file_hash: None,
         }
     }
 
@@ -1859,6 +1716,7 @@ mod tests {
             bibliography: None,
             verification: None,
             chapter_number: None,
+            file_hash: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1895,6 +1753,7 @@ mod tests {
             bibliography: None,
             verification: None,
             chapter_number: None,
+            file_hash: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1926,6 +1785,7 @@ mod tests {
             bibliography: None,
             verification: None,
             chapter_number: None,
+            file_hash: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1971,6 +1831,7 @@ mod tests {
                     matched_title: title.to_string(),
                 }),
                 chapter_number: None,
+                file_hash: None,
             }
         }
         let tree = vec![book("b1", "Pré-Cálculo"), book("b2", "Cálculo, Volume 1")];
@@ -2025,6 +1886,7 @@ mod tests {
                 bibliography: None,
                 verification: None,
                 chapter_number: number.map(String::from),
+                file_hash: None,
             }
         }
         let book = ConfirmedNode {
@@ -2050,6 +1912,7 @@ mod tests {
                 matched_title: "The C Programming Language".to_string(),
             }),
             chapter_number: None,
+            file_hash: None,
         };
         let mut items = Vec::new();
         let mut to_skip = Vec::new();

@@ -1,24 +1,20 @@
-//! Retrieval layer (§10, §7.1) — grounding by relevance.
+//! The embedding layer (§10, §7.1).
 //!
-//! Turns the immutable source [`Corpus`](crate::source::Corpus) into a
-//! **rebuildable derived cache**: chunk each source, embed the chunks, and search
-//! by cosine similarity. This is explicitly NOT a source of truth — deleting the
-//! index only forces a reindex from the files (§4/§10). The same layer will later
-//! serve cross-document context (§10) and profile memory (§7.1).
+//! After the corpus retirement (2026-09-09, user decision) there is no
+//! whole-corpus vector index anymore: grounding searches the per-book PDF
+//! page indexes the acervo gate builds (`source::search_index_cache`), and
+//! this module now holds only the one thing that path still needs — the
+//! swappable [`Embedder`] — plus the [`cosine`] it scores with. The same
+//! layer is what §10 cross-document retrieval and §7.1 profile memory are
+//! meant to reuse when they arrive.
 //!
-//! **Embedder is swappable** ([`Embedder`]): the default is `model2vec-rs` static
-//! embeddings — real semantic vectors, pure-Rust inference (no onnxruntime),
-//! model cached locally after first download. A different embedder (a heavier
-//! local model, or an embeddings API) is a drop-in behind the same interface; the
-//! index, persistence and search are identical. Chunking uses `text-splitter`.
-//!
-//! Not all surfaces are wired into the loop yet (grounding is being threaded into
-//! `engine`); hence the temporary `allow`s (mirrors `source`/`ai`).
+//! **Embedder is swappable** ([`Embedder`]): the default is `model2vec-rs`
+//! static embeddings — real semantic vectors, pure-Rust inference (no
+//! onnxruntime), model cached locally after first download. A different
+//! embedder (a heavier local model, or an embeddings API) is a drop-in
+//! behind the same interface; the per-book indexes, persistence and search
+//! are identical.
 #![allow(dead_code, unused_imports)]
-
-pub mod index;
-
-pub use index::{Retrieved, Retriever, VectorIndex};
 
 use std::sync::Arc;
 
@@ -31,29 +27,21 @@ pub const DEFAULT_MODEL: &str = "minishlab/potion-base-8M";
 
 /// Target chunk size / overlap in characters (§10). ~700 keeps a chunk to a few
 /// sentences — a citable unit — with overlap so a concept spanning a boundary
-/// stays retrievable.
+/// stays retrievable. Used by the acervo gate's per-book page index
+/// (`source::acervo::build_index_cache` chunks PAGE text through this).
 const CHUNK_SIZE: usize = 700;
 const CHUNK_OVERLAP: usize = 120;
 
-/// A retrieval chunk: a slice of one source section, carrying everything needed
-/// to **cite** it back (§4.3) — the source id and the section locator.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Chunk {
-    /// Corpus source id — becomes `<cite data-source-id=...>`.
-    pub source_id: String,
-    /// `Section` locator, e.g. `chap:3;sec:2` (`Corpus`'s own convention,
-    /// S28 item 5b, PLAN.md) — becomes `<cite data-locator=...>`. This index
-    /// covers the `Corpus`-backed acquisition path (LibGen/Sci-Hub,
-    /// §11.1's route A) only; the live bibliographic grounding path
-    /// (`source::search_index_cache`, §11 route B) never builds a `Chunk`
-    /// and uses page locators (`p:N`) instead — see that module's own docs.
-    pub locator: String,
-    /// Human title of the source (for the citation label).
-    pub source_title: String,
-    /// Section title (for the citation label / context header).
-    pub section_title: String,
-    /// The chunk text.
-    pub text: String,
+/// Splits a page's text into overlapping, sentence-aware chunks
+/// (`text-splitter`) — shared by the acervo gate's per-book index builder.
+pub(crate) fn chunk_text(text: &str) -> Vec<String> {
+    let cfg = ChunkConfig::new(CHUNK_SIZE)
+        .with_overlap(CHUNK_OVERLAP)
+        .expect("overlap < capacity");
+    TextSplitter::new(cfg)
+        .chunks(text)
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Swappable text→vector embedder (§10). Same-idiom facade as `ai::Provider` /
@@ -66,11 +54,10 @@ pub enum Embedder {
     /// no model file, no download, no network. Exists solely so integration
     /// tests (and the keyless demo path, §22) can exercise the real
     /// retrieval/acervo-gate pipeline (S27m's `ensure_document_grounded` +
-    /// `ground_node` both hard-require *some* `Embedder`, not just a
-    /// retrieval index) without paying for a real model load in every test
-    /// run. Never selected by `build_ai`/`build_source`/any real-user config
-    /// path — added 2026-08-29 alongside the demo-mode library fixtures in
-    /// `app::tests`. Cosine similarity between two `Mock` vectors correlates
+    /// `ground_node` both hard-require *some* `Embedder`) without paying for
+    /// a real model load in every test run. Never selected by
+    /// `build_ai`/any real-user config path — added 2026-08-29 alongside
+    /// the demo-mode library fixtures in `app::tests`. Cosine similarity between two `Mock` vectors correlates
     /// with shared vocabulary, which is enough for tests to get non-empty,
     /// plausible-looking retrieval hits; it is not a real semantic space.
     Mock,
@@ -146,17 +133,6 @@ impl Embedder {
     }
 }
 
-/// Splits a section's text into overlapping, sentence-aware chunks (`text-splitter`).
-pub(crate) fn chunk_text(text: &str) -> Vec<String> {
-    let cfg = ChunkConfig::new(CHUNK_SIZE)
-        .with_overlap(CHUNK_OVERLAP)
-        .expect("overlap < capacity");
-    TextSplitter::new(cfg)
-        .chunks(text)
-        .map(|s| s.to_string())
-        .collect()
-}
-
 /// Cosine similarity of two vectors. (Kept explicit rather than pulling a linear
 /// algebra crate for three lines; the embedding itself is the crate's job.)
 pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -176,16 +152,6 @@ pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chunking_overlaps_and_covers() {
-        let text = "One two three four five. Six seven eight nine ten. Eleven twelve \
-                    thirteen fourteen fifteen. Sixteen seventeen eighteen nineteen twenty. "
-            .repeat(6);
-        let chunks = chunk_text(&text);
-        assert!(chunks.len() >= 2, "long text splits into multiple chunks");
-        assert!(chunks.iter().all(|c| !c.trim().is_empty()));
-    }
 
     #[test]
     fn cosine_basics() {
