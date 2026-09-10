@@ -1,6 +1,10 @@
-// learnive — S27f: the acervo gate report ("what's missing"), PDF<->item
-// manual matching, and TOC confirmation. Surfaces the backend already built
-// in S27c/S27d/S27e (api/acervo.rs) — this file adds no policy of its own.
+// learnive — the acervo gate report ("what's missing") and PDF<->item
+// manual matching. Surfaces the backend already built in S27c/S27d/S27e
+// (api/acervo.rs) — this file adds no policy of its own. (S27f's third
+// screen, TOC confirmation, was deleted 2026-09-10: the app derives the
+// chapter tier from the text itself now, and refuses a book too big to be
+// one whole-work node when nothing is derivable — there is nothing left
+// for a user to confirm or correct.)
 //
 // This screen is not itself the block — the server is. `ensure_document_
 // grounded` (S27m) refuses generation while the acervo isn't clear, so a
@@ -33,13 +37,10 @@
 
 // { mode: "coldstart" | "review", docId, continueNodeId }
 let acervoState = { mode: "review", docId: null, continueNodeId: null };
-let acervoTocEntries = [];
-let acervoTocItemId = null;
 
 function showAcervoView(name) {
   el("acervoReportView").hidden = name !== "report";
   el("acervoMatchesView").hidden = name !== "matches";
-  el("acervoTocView").hidden = name !== "toc";
 }
 
 // `continueNodeId`: the node `createLivingDocument` would otherwise have
@@ -75,10 +76,6 @@ el("acervoMatchesBtn").addEventListener("click", () => {
   loadAcervoMatches();
 });
 el("acervoMatchesBackBtn").addEventListener("click", () => {
-  showAcervoView("report");
-  loadAcervoReport();
-});
-el("acervoTocBackBtn").addEventListener("click", () => {
   showAcervoView("report");
   loadAcervoReport();
 });
@@ -281,22 +278,16 @@ function renderAcervoReport(report) {
     // must not be sent to re-acquire it (SPEC §11.1's manual-acquisition cost).
     if (item.text_layer === "extractor_failed")
       bits.push(t("acervo.extractorFailed"));
+    // The one blocking toc outcome: a book too big to be one whole-work
+    // node with no derivable chapter tier. The reason text comes from the
+    // server (`check_toc`) — it names the page count and the way out
+    // (supply a copy with a real table of contents).
+    if (item.toc === "unusable") bits.push(t("acervo.tocUnusable", item.toc_reason || ""));
     if (bits.length) {
       const details = document.createElement("div");
       details.className = "muted acervo-item-details";
       details.textContent = bits.join(" · ");
       li.appendChild(details);
-    }
-
-    if (item.presence === "found" && item.needs_toc_confirmation) {
-      const actions = document.createElement("div");
-      actions.className = "acervo-item-actions";
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = t("acervo.reviewToc");
-      btn.addEventListener("click", () => openAcervoToc(item.item_id));
-      actions.appendChild(btn);
-      li.appendChild(actions);
     }
 
     list.appendChild(li);
@@ -387,135 +378,6 @@ async function chooseAcervoMatch(itemId, filename) {
       '<span class="error">' + t("acervo.matches.error") + escapeHtml(String(err)) + "</span>";
   }
 }
-
-// --- TOC confirmation screen -----------------------------------------------
-
-function acervoTocSourceLabel(source) {
-  switch (source) {
-    case "embedded":
-      return t("acervo.toc.sourceEmbedded");
-    case "deduced":
-      return t("acervo.toc.sourceDeduced");
-    case "heuristic":
-      return t("acervo.toc.sourceHeuristic");
-    case "confirmed":
-      return t("acervo.toc.sourceConfirmed");
-    default:
-      return t("acervo.toc.sourceUnavailable");
-  }
-}
-
-async function openAcervoToc(itemId) {
-  acervoTocItemId = itemId;
-  showAcervoView("toc");
-  el("acervoTocStatus").textContent = t("acervo.loading");
-  acervoTocEntries = [];
-  el("acervoTocEntries").innerHTML = "";
-  el("acervoTocSourceNote").textContent = "";
-  try {
-    const resp = await api(`/api/documents/${acervoState.docId}/acervo/toc/${itemId}`);
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    acervoTocEntries = data.entries.map((e) => ({ title: e.title, page: e.page }));
-    el("acervoTocStatus").textContent = "";
-    el("acervoTocSourceNote").textContent = acervoTocSourceLabel(data.source);
-    renderAcervoTocEntries();
-  } catch (err) {
-    el("acervoTocStatus").innerHTML =
-      '<span class="error">' + t("acervo.error") + escapeHtml(String(err)) + "</span>";
-  }
-}
-
-function renderAcervoTocEntries() {
-  const ol = el("acervoTocEntries");
-  ol.innerHTML = "";
-  acervoTocEntries.forEach((entry, i) => {
-    const li = document.createElement("li");
-    li.className = "acervo-toc-entry";
-
-    const titleInput = document.createElement("input");
-    titleInput.type = "text";
-    titleInput.value = entry.title;
-    titleInput.placeholder = t("acervo.toc.titlePlaceholder");
-    titleInput.addEventListener("input", () => {
-      acervoTocEntries[i].title = titleInput.value;
-    });
-
-    const pageInput = document.createElement("input");
-    pageInput.type = "number";
-    pageInput.min = "1";
-    pageInput.value = entry.page != null ? entry.page : "";
-    pageInput.placeholder = t("acervo.toc.pagePlaceholder");
-    pageInput.addEventListener("input", () => {
-      const v = pageInput.value.trim();
-      acervoTocEntries[i].page = v ? parseInt(v, 10) : null;
-    });
-
-    const up = document.createElement("button");
-    up.type = "button";
-    up.textContent = "↑";
-    up.title = t("acervo.toc.moveUp");
-    up.setAttribute("aria-label", t("acervo.toc.moveUp"));
-    up.disabled = i === 0;
-    up.addEventListener("click", () => swapAcervoTocEntries(i, i - 1));
-
-    const down = document.createElement("button");
-    down.type = "button";
-    down.textContent = "↓";
-    down.title = t("acervo.toc.moveDown");
-    down.setAttribute("aria-label", t("acervo.toc.moveDown"));
-    down.disabled = i === acervoTocEntries.length - 1;
-    down.addEventListener("click", () => swapAcervoTocEntries(i, i + 1));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "✕";
-    remove.title = t("acervo.toc.remove");
-    remove.setAttribute("aria-label", t("acervo.toc.remove"));
-    remove.addEventListener("click", () => {
-      acervoTocEntries.splice(i, 1);
-      renderAcervoTocEntries();
-    });
-
-    li.append(titleInput, pageInput, up, down, remove);
-    ol.appendChild(li);
-  });
-}
-
-function swapAcervoTocEntries(i, j) {
-  const tmp = acervoTocEntries[i];
-  acervoTocEntries[i] = acervoTocEntries[j];
-  acervoTocEntries[j] = tmp;
-  renderAcervoTocEntries();
-}
-
-el("acervoTocAddBtn").addEventListener("click", () => {
-  acervoTocEntries.push({ title: "", page: null });
-  renderAcervoTocEntries();
-});
-
-el("acervoTocSaveBtn").addEventListener("click", async () => {
-  const entries = acervoTocEntries
-    .map((e) => ({ title: e.title.trim(), page: e.page }))
-    .filter((e) => e.title);
-  if (entries.length === 0) {
-    el("acervoTocStatus").innerHTML =
-      '<span class="error">' + t("acervo.toc.needsAtLeastOne") + "</span>";
-    return;
-  }
-  el("acervoTocStatus").textContent = t("status.saving");
-  try {
-    const resp = await putJson(
-      `/api/documents/${acervoState.docId}/acervo/toc/${acervoTocItemId}`,
-      { entries },
-    );
-    if (!resp.ok) throw new Error(await resp.text());
-    el("acervoTocStatus").textContent = t("acervo.toc.saved");
-  } catch (err) {
-    el("acervoTocStatus").innerHTML =
-      '<span class="error">' + t("acervo.toc.error") + escapeHtml(String(err)) + "</span>";
-  }
-});
 
 // --- Sidebar entry point (review mode, any time a document is open) ------
 

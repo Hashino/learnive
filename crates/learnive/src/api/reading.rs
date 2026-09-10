@@ -104,13 +104,8 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
                 // `load_candidates`).
                 continue;
             };
-            let toc = if toc_confirm.get(&hash).is_some() {
-                "confirmed"
-            } else if !pdf.outline.is_empty() {
-                "embedded"
-            } else {
-                "unavailable"
-            };
+            let toc =
+                source::acervo::listing_toc_label(toc_confirm.get(&hash).is_some(), &pdf);
             // An EMPTY /Info title (not just a missing one) falls back to
             // the filename stem — several real-world PDFs carry `Title: ""`
             // and a blank row helps no one (live find, user's library,
@@ -164,10 +159,11 @@ pub struct LibraryTocResp {
     pub hash: String,
     pub filename: String,
     /// Same tier labels as the document-scoped acervo TOC endpoint —
-    /// `"confirmed"` | `"embedded"` | `"unavailable"` — but with NO
-    /// heuristic tier: a book with neither a confirmed TOC nor embedded
-    /// bookmarks simply offers no chapter picking (`entries: []`), and the
-    /// client falls back to whole-work selection.
+    /// `"confirmed"` | `"embedded"` | `"derived"` | `"unavailable"`. The
+    /// derived tier (S36) is the book's own chapter openers, parsed from
+    /// the cached text with zero tokens and no user confirmation; a book
+    /// with none of the three offers no chapter picking (`entries: []`),
+    /// and the client falls back to whole-work selection.
     pub source: &'static str,
     pub entries: Vec<LibraryTocEntryResp>,
 }
@@ -175,11 +171,11 @@ pub struct LibraryTocResp {
 /// The chapter list one library book offers the manual cold start's second
 /// screen, keyed by content hash — file-scoped like every other library
 /// route, deliberately NOT document-scoped: the whole point of this flow is
-/// picking from a library that no document references yet. Resolution order
-/// mirrors `get_acervo_toc`: a user-confirmed TOC (S27k store) wins, then
-/// the PDF's own embedded bookmarks (flattened, printed numbers split off),
-/// then nothing — never the heuristic+LLM deduction pass (zero-token rule
-/// in the module comment above).
+/// picking from a library that no document references yet. Resolution
+/// order: a user-confirmed TOC (S27k store) wins, then the PDF's own
+/// embedded bookmarks (flattened, printed numbers split off), then the
+/// book's own chapter openers derived from the cached text (zero-token,
+/// no confirmation step), then nothing.
 pub async fn library_toc(
     State(state): State<AppState>,
     Path(hash): Path<String>,
@@ -233,11 +229,28 @@ pub async fn library_toc(
         if !pdf.outline.is_empty() {
             flatten_library_outline(&pdf.outline, &mut entries);
         }
+        if entries.is_empty() {
+            // No bookmarks either — the book's own chapter openers, derived
+            // and verified from the cached text (S36). This is the tier
+            // that makes a bookmark-less scan like K&R pickable per
+            // chapter; derivation is pure and zero-token over the cache,
+            // so it runs inline here without any confirmation step.
+            entries = source::acervo::derive_chapter_toc(&pdf.page_texts)
+                .into_iter()
+                .map(|e| LibraryTocEntryResp {
+                    number: e.number,
+                    title: e.title,
+                    page: e.page,
+                })
+                .collect();
+        }
         Ok(LibraryTocResp {
             hash: hash2,
             filename,
             source: if entries.is_empty() {
                 "unavailable"
+            } else if pdf.outline.is_empty() {
+                "derived"
             } else {
                 "embedded"
             },
@@ -2143,12 +2156,7 @@ pub(super) async fn ensure_document_grounded(
         let needs_toc_deduction: Vec<source::ExpectedItem> = report
             .items
             .iter()
-            .filter(|r| {
-                matches!(
-                    r.toc,
-                    source::TocCheck::Heuristic { .. } | source::TocCheck::Unavailable
-                )
-            })
+            .filter(|r| matches!(r.toc, source::TocCheck::Unavailable))
             .map(|r| r.expected.clone())
             .collect();
         let has_outline_work = !needs_toc_deduction.is_empty()
@@ -2260,12 +2268,7 @@ pub(super) async fn ensure_document_grounded(
     let needs_toc_deduction: Vec<source::ExpectedItem> = report
         .items
         .iter()
-        .filter(|r| {
-            matches!(
-                r.toc,
-                source::TocCheck::Heuristic { .. } | source::TocCheck::Unavailable
-            )
-        })
+        .filter(|r| matches!(r.toc, source::TocCheck::Unavailable))
         .map(|r| r.expected.clone())
         .collect();
     resolve_outline_structure(
@@ -2475,19 +2478,25 @@ async fn resolve_outline_structure(
         // — so this whole block re-ran, uselessly, on EVERY `/generate`
         // request for the document's entire lifetime (the reported
         // "grounding starts empty, Research fires every time" bug).
-        // Prefer the PDF's own embedded bookmarks when present; only
-        // fall back to the confirmed-deduction store when there are
-        // none to flatten.
+        // Prefer the PDF's own embedded bookmarks when present; next the
+        // confirmed-deduction store; last the book's own chapter openers,
+        // derived and verified from the cached page text (S36: a
+        // bookmark-less scan like K&R resolves its chapters with zero
+        // tokens and zero user interaction).
         let entries: Vec<source::ConfirmedTocEntry> = if !pdf.outline.is_empty() {
             let mut flat = Vec::new();
             flatten_embedded_outline(&pdf.outline, &mut flat);
             flat
-        } else {
-            let Some(confirmed) = toc_confirm.get(&hash) else {
-                continue;
-            };
+        } else if let Some(confirmed) = toc_confirm.get(&hash)
+            && !confirmed.entries.is_empty()
+        {
             confirmed.entries
+        } else {
+            source::acervo::derive_chapter_toc(&pdf.page_texts)
         };
+        if entries.is_empty() {
+            continue;
+        }
         let chapters: Vec<(String, Option<usize>)> = outline
             .items
             .iter()
@@ -2942,13 +2951,17 @@ async fn try_split_chapter(
         .join("toc");
     let sub_titles: Vec<String> = (|| {
         let toc_confirm = source::TocConfirmStore::open_at(&toc_confirm_dir).ok()?;
-        let confirmed = toc_confirm.get(&hash)?;
-        let matched = source::match_chapter(
-            &confirmed.entries,
-            chapter.chapter_number.as_deref(),
-            &chapter.title,
-        )?;
-        let subs = source::sub_entries_within(&confirmed.entries, matched.number.as_deref());
+        // Confirmed entries first; a book with none (bookmark-less scan)
+        // still gets its zero-token section shortcut from the derived tier
+        // when the openers carry numbered sub-structure.
+        let entries = toc_confirm
+            .get(&hash)
+            .filter(|c| !c.entries.is_empty())
+            .map(|c| c.entries)
+            .unwrap_or_else(|| source::acervo::derive_chapter_toc(&pdf.page_texts));
+        let matched =
+            source::match_chapter(&entries, chapter.chapter_number.as_deref(), &chapter.title)?;
+        let subs = source::sub_entries_within(&entries, matched.number.as_deref());
         (!subs.is_empty()).then(|| subs.into_iter().map(|e| e.title.clone()).collect())
     })()
     .unwrap_or_default();

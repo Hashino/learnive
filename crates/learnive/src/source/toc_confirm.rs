@@ -1,42 +1,30 @@
-//! User-confirmed table of contents store (§11.1's cascade, step 3, PLAN.md
-//! S27f) — persists corrections to a PDF's *deduced* structure when
-//! [`super::acervo::TocCheck::needs_user_confirmation`] is true, i.e. the PDF
-//! had no embedded `/Outlines` and the app fell back to
-//! [`super::acervo::heuristic_toc`]'s best-effort guess over the extracted
-//! text. **This is a safety net, never a gate**: nothing in this module or
-//! its caller (`api::acervo`) rejects a PDF for lacking bookmarks — SPEC
-//! §11.1's own words, "nenhum PDF é rejeitado por não ter bookmarks."
+//! Table-of-contents store keyed by the PDF's content hash. Started as
+//! §11.1's cascade step 3 (S27f: the user confirms what the app couldn't
+//! read); extended for S27k with the deduction cascade's automatic entries;
+//! **since 2026-09-10 the confirmation screen itself is gone** (user
+//! decision — the app derives the chapter tier from the book's own openers
+//! instead, `super::acervo::derive_chapter_toc`, and refuses a book too
+//! big to stay whole-work when nothing is derivable). What remains here is
+//! the persisted tier the other paths wrote: a confirmed or deduced TOC
+//! still outranks a fresh derivation, belonging to the **file**, not to
+//! whichever bibliographic item currently points at it. Nothing in this
+//! module or its callers rejects a PDF for lacking bookmarks — SPEC §11.1's
+//! own words, "nenhum PDF é rejeitado por não ter bookmarks" (the one
+//! refusal is structural, in `super::acervo::check_toc`, and fires on size,
+//! never on bookmark absence).
 //!
 //! Keyed by the PDF's content hash ([`super::acervo::content_hash`]), like
 //! the acervo gate's own retrieval-index cache (`<data>/index/library/`) —
-//! a confirmed TOC belongs to the **file**, not to whichever bibliographic
-//! item currently points at it: a renamed or re-matched file keeps its
-//! confirmation, and two items that happen to share one PDF (rare, but nothing
-//! rules it out) share the confirmation too.
+//! a renamed or re-matched file keeps its tier, and two items that happen
+//! to share one PDF (rare, but nothing rules it out) share it too.
 //!
-//! **Extended for S27k (PLAN.md, 2026-08-29).** Two additions over the S27f
-//! shape this module started as:
-//! - [`ConfirmedTocEntry::inferred`] — `true` for an entry `source::toc`'s
-//!   deduction cascade placed automatically, `false` for one the user typed
-//!   or corrected by hand. This is the "invisible provenance" PLAN.md asks
-//!   for (*"o usuário não vê nada, ou a app falhou"*): nothing in the public
-//!   shape ever ranks or exposes this to the user, but a later deduction
-//!   pass must never clobber a user's own correction — see [`TocConfirmStore::put_deduced`].
-//! - [`ConfirmedToc::unresolved`] — titles the deduction cascade read off
-//!   the contents page but could not place on a real physical page. This is
-//!   now the ONLY thing the S27f confirmation screen should still ask about
-//!   (PLAN.md: *"passa a listar só os capítulos não resolvidos"*), not a
-//!   blank per-chapter form.
-//!
-//! **Shape note for S27g, flagged rather than solved here:** a
-//! heuristic-path entry (the cascade's last resort, `super::acervo::heuristic_toc`)
-//! still always has `page: None` — that heuristic only ever returns titles.
-//! S27g's book→chapter contextual expansion will need a real page number to
-//! build a chapter pointer and will have to get it some other way (or ask
-//! the user directly) for anything that came through the heuristic instead
-//! of a real embedded outline or a successful S27k deduction. The
-//! embedded-outline path (read-only display, `needs_user_confirmation() ==
-//! false`) and a resolved S27k entry both carry real page numbers.
+//! [`ConfirmedTocEntry::inferred`] — `true` for an entry `source::toc`'s
+//! deduction cascade (or the newer opener derivation) placed automatically,
+//! `false` for one the user typed or corrected by hand. This is the
+//! "invisible provenance" PLAN.md asks for (*"o usuário não vê nada, ou a
+//! app falhou"*): nothing in the public shape ever ranks or exposes this to
+//! the user, but a later deduction pass must never clobber a user's own
+//! correction — see [`TocConfirmStore::put_deduced`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,8 +42,8 @@ pub struct ConfirmedTocEntry {
     /// [`match_chapter`] tries this first, before falling back to title.
     #[serde(default)]
     pub number: Option<String>,
-    /// `None` for anything confirmed from the heuristic path — see the
-    /// module doc's shape note.
+    /// `None` for a user-typed entry (`confirm_one` never asks for one);
+    /// every automatic tier — embedded, deduced, derived — carries a page.
     #[serde(default)]
     pub page: Option<usize>,
     /// `true` when `source::toc`'s deduction cascade placed this entry
@@ -68,8 +56,9 @@ pub struct ConfirmedTocEntry {
     pub inferred: bool,
 }
 
-/// A confirmed table of contents for one PDF, flat (see the module doc —
-/// the heuristic this replaces never produced hierarchy either).
+/// A confirmed table of contents for one PDF, flat (chapters only — the
+/// opener derivation resolves the chapter tier; sub-chapters come from
+/// `match_chapter`'s sub-entry logic over the same list).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ConfirmedToc {
     pub entries: Vec<ConfirmedTocEntry>,

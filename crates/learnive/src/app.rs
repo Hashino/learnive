@@ -250,7 +250,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/documents/{doc}/acervo/toc/{item}",
-            get(api::get_acervo_toc).put(api::put_acervo_toc),
+            get(api::get_acervo_toc),
         )
         // S27n: citations on real generated documents cite a local-library
         // content hash (`ground_node`'s `<cite data-source-id>`); this route

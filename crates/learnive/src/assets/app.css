@@ -920,6 +920,16 @@ body.source-resizing #askBar {
 .library-row.selected {
   background: rgba(94, 129, 172, 0.18);
 }
+/* An unusable book (too long, no derivable chapter tier — the gate would
+   refuse it) is still listed, for honesty about what's in the library, but
+   cannot be picked. */
+.library-row.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.library-row.disabled:hover {
+  background: none;
+}
 .manual-reorder {
   display: inline-flex;
   flex-direction: column;

@@ -40,8 +40,7 @@ use std::path::PathBuf;
 use tokio::task::spawn_blocking;
 
 use crate::source::{
-    self, ConfirmedToc, ConfirmedTocEntry, ExpectedItem, LocalPdfSource, ManualMatchStore,
-    OutlineEntry, SourceKind, TocConfirmStore,
+    self, ExpectedItem, LocalPdfSource, ManualMatchStore, OutlineEntry, SourceKind, TocConfirmStore,
 };
 
 use super::grading::sse_frame;
@@ -113,16 +112,6 @@ fn resolve_matched_filename(
     source::acervo::resolve_matched_filename(library, manual, item)
 }
 
-fn flatten_outline(entries: &[OutlineEntry], out: &mut Vec<TocEntryResp>) {
-    for e in entries {
-        out.push(TocEntryResp {
-            title: e.title.clone(),
-            page: Some(e.page),
-        });
-        flatten_outline(&e.children, out);
-    }
-}
-
 // -- GET /api/documents/{doc}/acervo -- the gate report ("what's missing") --
 
 #[derive(Serialize)]
@@ -137,7 +126,12 @@ pub struct AcervoItemResp {
     pub identity_reason: Option<String>,
     pub text_layer: &'static str,
     pub toc: &'static str,
-    pub needs_toc_confirmation: bool,
+    /// Why the gate refused the book outright — `Some` only for
+    /// `TocCheck::Unusable`, the one blocking toc outcome (a big book with
+    /// no chapter structure anywhere). The client renders this in the
+    /// item's failure line instead of a bare "unusable" label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toc_reason: Option<String>,
     pub page_map: &'static str,
     pub index: &'static str,
     pub passes: bool,
@@ -397,13 +391,17 @@ fn acervo_item_resp(item_id: String, r: source::acervo::ItemReport) -> AcervoIte
         source::TextLayerCheck::ExtractorFailed => "extractor_failed",
         source::TextLayerCheck::Skipped => "skipped",
     };
-    let needs_toc_confirmation = r.toc.needs_user_confirmation();
     let toc = match &r.toc {
         source::TocCheck::Embedded { .. } => "embedded",
         source::TocCheck::Deduced { .. } => "deduced",
-        source::TocCheck::Heuristic { .. } => "heuristic",
+        source::TocCheck::Derived { .. } => "derived",
+        source::TocCheck::Unusable { .. } => "unusable",
         source::TocCheck::Unavailable => "unavailable",
         source::TocCheck::Skipped => "skipped",
+    };
+    let toc_reason = match &r.toc {
+        source::TocCheck::Unusable { reason } => Some(reason.clone()),
+        _ => None,
     };
     let page_map = match &r.page_map {
         source::PageMapCheck::Labeled { .. } => "labeled",
@@ -426,7 +424,7 @@ fn acervo_item_resp(item_id: String, r: source::acervo::ItemReport) -> AcervoIte
         identity_reason,
         text_layer,
         toc,
-        needs_toc_confirmation,
+        toc_reason,
         page_map,
         index,
         passes: r.passes(),
@@ -550,7 +548,14 @@ pub async fn set_acervo_match(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// -- GET/PUT /api/documents/{doc}/acervo/toc/{item} -- TOC confirmation --
+// -- GET /api/documents/{doc}/acervo/toc/{item} -- TOC candidates --
+//
+// A read-only data endpoint: the Review-TOC confirmation screen this route
+// once backed was deleted (user decision, 2026-09-10 — the app derives the
+// tier itself now, and a manual entry form was a dead end on exactly the
+// scans that need help). The one surviving consumer is the
+// chapter-match-failure remediation modal (`remediate.js`), which offers
+// the resolved candidates as one-click page suggestions.
 
 #[derive(Serialize)]
 pub struct TocEntryResp {
@@ -562,12 +567,8 @@ pub struct TocEntryResp {
 pub struct TocResp {
     pub item_id: String,
     pub filename: String,
-    /// `"embedded" | "heuristic" | "confirmed" | "unavailable"`.
+    /// `"embedded" | "deduced" | "confirmed" | "derived" | "unavailable"`.
     pub source: &'static str,
-    /// False only for `"embedded"` (a real `/Outlines` tree is read-only
-    /// display here, never a "confirmation" — it never needed the safety
-    /// net in the first place).
-    pub editable: bool,
     pub entries: Vec<TocEntryResp>,
 }
 
@@ -595,7 +596,7 @@ pub async fn get_acervo_toc(
 
     let path = lib.root().join(&filename);
     let pdftext_cache_dir = source::pdftext_cache_dir(state.data_dir.as_ref());
-    let (source_label, editable, entries) = spawn_blocking(move || -> Result<_, String> {
+    let (source_label, entries) = spawn_blocking(move || -> Result<_, String> {
         let (hash, pdf) =
             source::read_pdf_cached(&path, &pdftext_cache_dir).map_err(|e| e.to_string())?;
         if let Some(confirmed) = toc_store.get(&hash) {
@@ -607,22 +608,24 @@ pub async fn get_acervo_toc(
                     page: e.page,
                 })
                 .collect();
-            return Ok(("confirmed", true, entries));
+            return Ok(("confirmed", entries));
         }
         if !pdf.outline.is_empty() {
-            let mut flat = Vec::new();
-            flatten_outline(&pdf.outline, &mut flat);
-            return Ok(("embedded", false, flat));
+            let entries = flatten_outline(&pdf.outline);
+            return Ok(("embedded", entries));
         }
-        let heuristic = source::acervo::heuristic_toc(&pdf);
-        if heuristic.is_empty() {
-            return Ok(("unavailable", true, Vec::new()));
+        let entries = source::acervo::derive_chapter_toc(&pdf.page_texts);
+        if entries.is_empty() {
+            return Ok(("unavailable", Vec::new()));
         }
-        let entries = heuristic
+        let entries = entries
             .into_iter()
-            .map(|title| TocEntryResp { title, page: None })
+            .map(|e| TocEntryResp {
+                title: e.title,
+                page: e.page,
+            })
             .collect();
-        Ok(("heuristic", true, entries))
+        Ok(("derived", entries))
     })
     .await
     .map_err(|e| ApiError::Internal(format!("TOC-read task panicked: {e}")))?
@@ -632,88 +635,23 @@ pub async fn get_acervo_toc(
         item_id,
         filename,
         source: source_label,
-        editable,
         entries,
     }))
 }
 
-#[derive(Deserialize)]
-pub struct TocEntryReq {
-    pub title: String,
-    #[serde(default)]
-    pub page: Option<usize>,
-}
-
-#[derive(Deserialize)]
-pub struct PutTocReq {
-    pub entries: Vec<TocEntryReq>,
-}
-
-/// Persists the user's corrected TOC. No PDF is ever rejected for lacking
-/// bookmarks (SPEC §11.1) — this only records a correction to the deduced
-/// result for a later slice (S27g's contextual expansion) to read back; it
-/// never blocks anything itself.
-pub async fn put_acervo_toc(
-    State(state): State<AppState>,
-    Path((doc, item_id)): Path<(String, String)>,
-    Json(req): Json<PutTocReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if req.entries.is_empty() {
-        return Err(ApiError::BadRequest(
-            "a table of contents needs at least one entry".to_string(),
-        ));
+/// Flattens the PDF's embedded `/Outlines` tree into the wire shape —
+/// depth-first, parents before children (a reader picks chapters from the
+/// same list sections appear in).
+fn flatten_outline(entries: &[OutlineEntry]) -> Vec<TocEntryResp> {
+    let mut out = Vec::new();
+    for e in entries {
+        out.push(TocEntryResp {
+            title: e.title.clone(),
+            page: Some(e.page),
+        });
+        out.extend(flatten_outline(&e.children));
     }
-    let item = find_expected_item(&state, &doc, &item_id)?;
-    let lib = library(&state)?;
-    let manual = manual_match_store(&state)?;
-    let toc_store = toc_confirm_store(&state)?;
-
-    let lib2 = lib.clone();
-    let item2 = item.clone();
-    let filename = spawn_blocking(move || resolve_matched_filename(&lib2, &manual, &item2))
-        .await
-        .map_err(|e| ApiError::Internal(format!("matching task panicked: {e}")))?
-        .map_err(|e| ApiError::Internal(format!("matching scan failed: {e}")))?
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "this item has no single matched PDF yet — resolve it on the matching screen first"
-                    .to_string(),
-            )
-        })?;
-
-    let path = lib.root().join(&filename);
-    let entries: Vec<ConfirmedTocEntry> = req
-        .entries
-        .into_iter()
-        .map(|e| ConfirmedTocEntry {
-            title: e.title,
-            number: None,
-            page: e.page,
-            // A full manual submission is always a user correction (S27k,
-            // never overwritten by a later deduction pass — see
-            // `TocConfirmStore::put_deduced`).
-            inferred: false,
-        })
-        .collect();
-
-    spawn_blocking(move || -> Result<(), String> {
-        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-        let hash = source::acervo::content_hash(&bytes);
-        toc_store
-            .put(
-                &hash,
-                &ConfirmedToc {
-                    entries,
-                    unresolved: Vec::new(),
-                },
-            )
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("TOC-write task panicked: {e}")))?
-    .map_err(ApiError::Internal)?;
-
-    Ok(Json(serde_json::json!({ "ok": true })))
+    out
 }
 
 #[cfg(test)]
@@ -957,7 +895,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_and_read_back_a_manual_match_then_confirm_its_toc() {
+    async fn set_and_read_back_a_manual_match_then_read_its_toc() {
         let (_dir, state) = test_state();
         seed_document(
             &state,
@@ -966,7 +904,7 @@ mod tests {
         );
 
         // Place a real (bookmark-free) PDF fixture into the library so the
-        // TOC endpoints have something to read.
+        // TOC endpoint has something to read.
         let lib = LocalPdfSource::open(state.data_dir.as_ref()).unwrap();
         write_minimal_pdf(&lib.root().join("mybook.pdf"));
 
@@ -984,9 +922,11 @@ mod tests {
         let set_resp: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(set_resp["ok"], true);
 
-        // TOC read falls back to heuristic/unavailable (fixture has no real
-        // headings) but must resolve the matched filename via the manual
-        // pairing just recorded, not error out as unmatched.
+        // TOC read: the fixture has no outline, no confirmed TOC, and no
+        // derivable chapter openers (one textless page), so the cascade
+        // ends at "unavailable" — but the matched filename must resolve
+        // via the manual pairing just recorded, not error out as
+        // unmatched.
         let (status, body) = send(
             &state,
             authed("GET", "/api/documents/doc1/acervo/toc/b1", ""),
@@ -995,37 +935,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let toc: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(toc["filename"], "mybook.pdf");
-        let toc_source = toc["source"].as_str().unwrap();
-        assert!(
-            matches!(toc_source, "heuristic" | "unavailable"),
-            "{toc_source}"
-        );
-
-        // Confirm a corrected TOC.
-        let (status, body) = send(
-            &state,
-            authed(
-                "PUT",
-                "/api/documents/doc1/acervo/toc/b1",
-                r#"{"entries":[{"title":"Chapter 1","page":1},{"title":"Chapter 2","page":10}]}"#,
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let put_resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(put_resp["ok"], true);
-
-        let (status, body) = send(
-            &state,
-            authed("GET", "/api/documents/doc1/acervo/toc/b1", ""),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let toc_again: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(toc_again["source"], "confirmed");
-        assert_eq!(toc_again["entries"].as_array().unwrap().len(), 2);
-        assert_eq!(toc_again["entries"][0]["title"], "Chapter 1");
-        assert_eq!(toc_again["entries"][0]["page"], 1);
+        assert_eq!(toc["source"], "unavailable");
+        assert_eq!(toc["entries"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -1100,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toc_endpoints_refuse_an_item_with_no_resolved_match() {
+    async fn toc_endpoint_refuses_an_item_with_no_resolved_match() {
         let (_dir, state) = test_state();
         seed_document(
             &state,

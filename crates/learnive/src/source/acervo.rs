@@ -71,7 +71,7 @@ use super::local::{LibraryEntry, LocalPdfSource};
 use super::manual_match::ManualMatchStore;
 use super::matching::{normalize, primary_title, surname_of};
 use super::pdf::{OutlineEntry, PdfDocument, read_pdf};
-use super::toc_confirm::TocConfirmStore;
+use super::toc_confirm::{ConfirmedTocEntry, TocConfirmStore};
 use crate::retrieval::{Embedder, chunk_text, cosine};
 
 /// A minimal, standalone description of one reading-list item to validate
@@ -145,11 +145,12 @@ pub enum TextLayerCheck {
     Skipped,
 }
 
-/// Check 4: table of contents, in SPEC's own cascade — embedded bookmarks
-/// (the good path) → best-effort heuristic over the extracted text → user
-/// confirmation (a later slice's UI, not this one). **Never a hard fail on
-/// its own** — [`ItemReport::blocking_failures`] never includes this check,
-/// by design, even when the heuristic finds nothing.
+/// Check 4: table of contents. SPEC's original cascade ended in a
+/// user-confirmation step; the pivot (user decision, 2026-09-10) replaced it
+/// with the app deriving the tier itself ([`derive_chapter_toc`]) and
+/// REFUSING a book too big to be one whole-work node when nothing
+/// derivable remains — [`ItemReport::blocking_failures`] includes this
+/// check exactly once, on [`TocCheck::Unusable`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum TocCheck {
     Embedded {
@@ -164,28 +165,32 @@ pub enum TocCheck {
         resolved: usize,
         unresolved: usize,
     },
-    Heuristic {
+    /// The book's own chapter openers, derived and verified by
+    /// [`derive_chapter_toc`] — no embedded bookmarks and nothing
+    /// confirmed, but the text itself yielded a usable tier (user
+    /// decision, 2026-09-10: the app parses the structure itself; there
+    /// is no confirmation screen anymore).
+    Derived {
         entries: usize,
     },
-    /// Neither the embedded outline nor the heuristic found anything —
-    /// still not a block (SPEC: "Nenhum PDF é rejeitado por não ter
-    /// bookmarks"); a later slice's confirmation screen is the real net.
+    /// No tier exists ANYWHERE — embedded, confirmed, or derivable — and
+    /// the book is too big to be one whole-work node
+    /// ([`MAX_PAGES_FOR_SINGLE_NODE`]). A blocking failure, replacing the
+    /// old single-node fallback (user decision, 2026-09-10: "the
+    /// application should refuse entirely to use the book. single node
+    /// book is a terrible experience"). Short works don't reach this
+    /// variant — below the threshold a whole-work node is the fine,
+    /// designed shape.
+    Unusable {
+        reason: String,
+    },
+    /// No tier found, but the work is small enough to stay whole — the
+    /// fine, designed shape for papers and short monographs. Not a block
+    /// (SPEC: "Nenhum PDF é rejeitado por não ter bookmarks" — the gate's
+    /// blocking came from the structural argument above, never from the
+    /// mere absence of bookmarks).
     Unavailable,
     Skipped,
-}
-
-impl TocCheck {
-    /// Whether this result still needs the S27f confirmation screen (SPEC's
-    /// cascade step 3) before a chapter/section outline can be built from
-    /// it. True for anything short of a real embedded outline or a fully
-    /// resolved S27k deduction (`Deduced` with nothing left `unresolved`).
-    pub fn needs_user_confirmation(&self) -> bool {
-        match self {
-            TocCheck::Embedded { .. } => false,
-            TocCheck::Deduced { unresolved, .. } => *unresolved > 0,
-            _ => true,
-        }
-    }
 }
 
 /// Check 5: real page numbering (a `/PageLabels` tree) vs. plain physical
@@ -250,6 +255,14 @@ impl ItemReport {
             TextLayerCheck::NoText | TextLayerCheck::ExtractorFailed
         ) {
             out.push("text_layer");
+        }
+        // The one toc outcome that blocks: a book too big to be one node
+        // with no chapter tier anywhere (derived, embedded, or confirmed).
+        // Every other toc result degrades honestly; this one refuses
+        // outright, because the alternative document is degenerate by
+        // construction (user decision, 2026-09-10).
+        if let TocCheck::Unusable { .. } = self.toc {
+            out.push("toc");
         }
         out
     }
@@ -554,7 +567,7 @@ fn build_item_report(
     tick(AcervoPhase::TextLayer, on_progress);
     let text_layer = check_text_layer(&cand.pdf);
     tick(AcervoPhase::Toc, on_progress);
-    let toc = check_toc(&cand.pdf, &cand.hash, toc_confirm);
+    let toc = check_toc(&cand.pdf, &cand.hash, toc_confirm, item.kind);
     tick(AcervoPhase::PageMap, on_progress);
     let page_map = check_page_map(&cand.pdf);
     tick(AcervoPhase::Index, on_progress);
@@ -680,7 +693,12 @@ fn check_text_layer(pdf: &PdfDocument) -> TextLayerCheck {
 /// six-check engine — this module stays free of `Ai`/tokio, S27k's own
 /// discipline note) shows up here without this function ever calling the
 /// model itself.
-fn check_toc(pdf: &PdfDocument, content_hash: &str, toc_confirm: &TocConfirmStore) -> TocCheck {
+fn check_toc(
+    pdf: &PdfDocument,
+    content_hash: &str,
+    toc_confirm: &TocConfirmStore,
+    kind: SourceKind,
+) -> TocCheck {
     if !pdf.outline.is_empty() {
         return TocCheck::Embedded {
             entries: count_outline_entries(&pdf.outline),
@@ -694,13 +712,27 @@ fn check_toc(pdf: &PdfDocument, content_hash: &str, toc_confirm: &TocConfirmStor
             unresolved: confirmed.unresolved.len(),
         };
     }
-    let heuristic = heuristic_toc(pdf);
-    if heuristic.is_empty() {
-        TocCheck::Unavailable
-    } else {
-        TocCheck::Heuristic {
-            entries: heuristic.len(),
+    let derived = derive_chapter_toc(&pdf.page_texts);
+    if !derived.is_empty() {
+        return TocCheck::Derived {
+            entries: derived.len(),
+        };
+    }
+    // Nothing derivable either. For a big book that's now a hard refusal —
+    // the single-node fallback this replaces was a degenerate document (one
+    // grounding window over hundreds of pages). A short work stays whole,
+    // which is the fine, designed shape below the threshold.
+    if kind == SourceKind::Book && pdf.pages.page_count > MAX_PAGES_FOR_SINGLE_NODE {
+        TocCheck::Unusable {
+            reason: format!(
+                "no usable chapter structure (no embedded bookmarks, nothing confirmed, and \
+                 no chapter openings the text itself yields) and {} pages — too long to be one \
+                 node; use a copy of this book with a real table of contents",
+                pdf.pages.page_count
+            ),
         }
+    } else {
+        TocCheck::Unavailable
     }
 }
 
@@ -978,16 +1010,147 @@ fn count_outline_entries(entries: &[OutlineEntry]) -> usize {
         .sum()
 }
 
-/// Best-effort chapter/heading detection over extracted text, used only when
-/// the PDF has no embedded `/Outlines` — never a hard TOC failure by itself
-/// (SPEC's cascade: bookmarks → heuristic → user confirmation). Two simple,
-/// independent signals, tried in order: (1) a literal contents/sumário page,
-/// whose lines ending in a page number look like a real TOC; (2) failing
-/// that, "Chapter N" / numbered-heading lines (`1.2 Title`) scattered through
-/// the body. Deliberately unsophisticated — the real safety net is the S27f
-/// user-confirmation screen, not this heuristic.
-pub(crate) fn heuristic_toc(pdf: &PdfDocument) -> Vec<String> {
-    heuristic_toc_over(&pdf.page_texts)
+/// A book whose structure can't be resolved must never be forced through
+/// generation as ONE node — that degenerate document (one grounding window
+/// over hundreds of pages, one explain, one check) is exactly what the
+/// chapter-granularity pivot exists to prevent. At or below this page count
+/// a whole-work node is fine (a paper, a short monograph — the grounding
+/// window fits); above it, a book with no usable chapter tier is a blocking
+/// gate failure, not a warning (user decision, 2026-09-10 — "the
+/// application should refuse entirely to use the book. single node book is
+/// a terrible experience").
+pub(crate) const MAX_PAGES_FOR_SINGLE_NODE: usize = 50;
+
+/// Derives the chapter tier from the book's own text when it carries no
+/// embedded bookmarks and nothing is confirmed (user decision, 2026-09-10:
+/// the app parses the structure itself, pre-generation, with no user
+/// confirmation step — the Review-TOC list this replaces was a dead end on
+/// exactly the scans that need it, K&R's two-column OCR-mangled contents
+/// among them). Zero-token, pure, over already-cached page texts.
+///
+/// The signal is the chapter OPENERS, not the contents page: openers carry
+/// their own physical page (no printed↔physical offset problem) and survive
+/// the two-column/OCR damage that breaks contents parsing. Evidence, K&R
+/// 1978: `CHAPTER 1: A TUTORIAL INTRODUCTION` at physical p.13 — while the
+/// contents page itself parses to garbage ("CONIENTS", "Chapter 0/1"
+/// unnumbered, titles split from numbers across columns).
+///
+/// Rules: a line shaped `chapter N[.:] Title` (also `capítulo`/`capitulo`)
+/// is an opener candidate, EXCEPT on a page that looks like a contents
+/// listing (its own keyword or ≥5 digit-ending lines — catches OCR-mangled
+/// headers like "CONIENTS" too). First occurrence per chapter number wins
+/// (openers precede that chapter's running heads). Then the verification,
+/// which is what makes silent auto-apply defensible: chapter numbers
+/// strictly increasing, opener pages strictly increasing, count in
+/// `3..=60`. Any violation ⇒ no tier is derivable (empty vec) — the caller
+/// treats the book as unstructured rather than trusting a broken parse.
+pub fn derive_chapter_toc(pages: &[String]) -> Vec<ConfirmedTocEntry> {
+    const MIN_CHAPTERS: usize = 3;
+    const MAX_CHAPTERS: usize = 60;
+
+    let mut best: Vec<(u32, String, usize)> = Vec::new(); // (number, title, page) in page order
+    for (idx, page) in pages.iter().enumerate() {
+        if looks_like_toc_page(page) {
+            continue;
+        }
+        // Openers head their page; measured on K&R, true openers sit at
+        // line index 2 while prose cross-references ("Chapter 2 deals
+        // with…", which would poison first-occurrence) sit at 20+. The
+        // window is the discriminator — running heads later in the chapter
+        // lose to first-occurrence anyway.
+        for (line_idx, line) in page.lines().enumerate() {
+            if line_idx > 3 {
+                break;
+            }
+            let Some((number, title)) = parse_chapter_opener(line) else {
+                continue;
+            };
+            if best.iter().any(|(n, _, _)| *n == number) {
+                continue;
+            }
+            // A trailing printed page number rides along on some scans'
+            // openers ("CONTROL FLOW 53") — it's the running head's page,
+            // not part of the title.
+            let title = title
+                .trim_end_matches(|c: char| c.is_ascii_digit() || c.is_whitespace())
+                .trim_end_matches(['.', '-', ':'])
+                .trim()
+                .to_string();
+            best.push((number, title, idx + 1));
+        }
+    }
+    if best.len() < MIN_CHAPTERS || best.len() > MAX_CHAPTERS {
+        return Vec::new();
+    }
+    // Both orders strictly increasing — a broken parse (running head
+    // leaking through, mis-OCR'd number) shows up as an inversion and
+    // disqualifies the whole derivation rather than poisoning one chapter.
+    let numbers_ok = best.windows(2).all(|w| w[0].0 < w[1].0);
+    let pages_ok = best.windows(2).all(|w| w[0].2 < w[1].2);
+    if !(numbers_ok && pages_ok) {
+        return Vec::new();
+    }
+    best.into_iter()
+        .map(|(number, title, page)| ConfirmedTocEntry {
+            number: Some(number.to_string()),
+            title,
+            page: Some(page),
+            // App-inferred, never user-confirmed — kept honest so a future
+            // consumer of the entry shape can tell the two apart.
+            inferred: true,
+        })
+        .collect()
+}
+
+/// `Some((number, title))` for a line shaped `Chapter 3: Control Flow` /
+/// `CHAPTER  2 - Types` / `Capítulo 1 Título`. Arabic numbers only — roman
+/// numerals are ambiguous with words (I, V, X) and K&R's own openers are
+/// arabic. Whitespace-normalized on the way in (scans emit double spaces).
+fn parse_chapter_opener(line: &str) -> Option<(u32, String)> {
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = line.to_lowercase();
+    let rest = if lower.starts_with("chapter ") {
+        &line["chapter ".len()..]
+    } else if lower.starts_with("capítulo ") {
+        &line["capítulo ".len()..]
+    } else if lower.starts_with("capitulo ") {
+        &line["capitulo ".len()..]
+    } else {
+        return None;
+    };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let number: u32 = digits.parse().ok()?;
+    if digits.is_empty() || digits.len() > 3 {
+        return None;
+    }
+    let title = rest[digits.len()..]
+        .trim_start()
+        .trim_start_matches([':', '.', '-', '–', '—'])
+        .trim()
+        .trim_end_matches(['.', ':', ' '])
+        .trim()
+        .to_string();
+    Some((number, title))
+}
+
+/// A contents listing page — by its own keyword OR by shape (≥5 lines
+/// ending in a bare number). The shape check is what catches OCR-mangled
+/// headers: K&R's contents opens with "CONIENTS", which no keyword list
+/// contains, but its 22 digit-ending lines identify it unmistakably.
+fn looks_like_toc_page(page: &str) -> bool {
+    let head: String = page.chars().take(60).collect::<String>().to_lowercase();
+    if head.contains("contents") || head.contains("sumário") || head.contains("sumario") {
+        return true;
+    }
+    page.lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.split_whitespace().next_back().is_some_and(|last| {
+                !last.is_empty() && last.len() <= 4 && last.chars().all(|c| c.is_ascii_digit())
+            })
+        })
+        .count()
+        >= 5
 }
 
 /// Same heuristic as [`heuristic_toc`], over an arbitrary page-text slice —
@@ -1086,8 +1249,8 @@ fn looks_like_numbered_heading(line: &str) -> bool {
 /// (`/api/library/{hash}/toc`, later `/api/library/{hash}/pdf`) is keyed by,
 /// display metadata from the PDF's own `/Info` dictionary, and which TOC
 /// tier the chapter picker can expect (same cascade `get_acervo_toc` uses —
-/// a user-confirmed TOC outranks embedded bookmarks; no heuristic/LLM tier
-/// here, the manual path stays zero-token).
+/// a confirmed TOC outranks embedded bookmarks, which outrank the derived
+/// opener tier; the manual path stays zero-token).
 #[derive(Debug, Clone, Serialize)]
 pub struct LibraryListingEntry {
     pub hash: String,
@@ -1095,9 +1258,30 @@ pub struct LibraryListingEntry {
     pub title: String,
     pub authors: Option<String>,
     pub pages: usize,
-    /// `"confirmed"` | `"embedded"` | `"unavailable"` — what
-    /// `GET /api/library/{hash}/toc` would return as its `source`.
+    /// [`listing_toc_label`]'s output — `"confirmed"` | `"embedded"` |
+    /// `"derived"` | `"unusable"` | `"unavailable"`.
     pub toc: &'static str,
+}
+
+/// The library rows' `toc` label: the tier cascade the consumers use,
+/// ending in the size split that decides whole-work's fate (user decision,
+/// 2026-09-10). A big book with nothing derivable is `"unusable"` — the
+/// gate will refuse it outright, so the picker must not pretend whole-work
+/// is an option; a short work is `"unavailable"` (whole-work is the fine,
+/// designed shape). The picker path sends `kind: "book"` for every pick,
+/// so the label treats each listed file as a would-be book.
+pub(crate) fn listing_toc_label(confirmed: bool, pdf: &super::pdf::PdfDocument) -> &'static str {
+    if confirmed {
+        "confirmed"
+    } else if !pdf.outline.is_empty() {
+        "embedded"
+    } else if !derive_chapter_toc(&pdf.page_texts).is_empty() {
+        "derived"
+    } else if pdf.pages.page_count > MAX_PAGES_FOR_SINGLE_NODE {
+        "unusable"
+    } else {
+        "unavailable"
+    }
 }
 
 /// Scans the local library the same way [`load_candidates`] does (one
@@ -1117,13 +1301,7 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
         let Ok((hash, pdf)) = super::pdf::read_pdf_cached(&path, &cache_dir) else {
             continue;
         };
-        let toc = if toc_confirm.get(&hash).is_some() {
-            "confirmed"
-        } else if !pdf.outline.is_empty() {
-            "embedded"
-        } else {
-            "unavailable"
-        };
+        let toc = listing_toc_label(toc_confirm.get(&hash).is_some(), &pdf);
         // Same empty-title fallback as the streaming listing endpoint — but
         // through `stem_metadata`, so a conventional download stem yields a
         // real title + authors instead of one long blob.
@@ -1885,36 +2063,32 @@ mod tests {
         let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items[0].toc, TocCheck::Embedded { entries: 2 });
-        assert!(!report.items[0].toc.needs_user_confirmation());
     }
 
     #[test]
-    fn toc_falls_through_to_heuristic_and_never_hard_fails_without_bookmarks() {
-        // No embedded outline; a page whose text looks like a table of
-        // contents (heading lines ending in a page number).
+    fn toc_skips_a_contents_page_and_a_short_work_stays_whole() {
+        // No embedded outline; the only structured page is a literal
+        // contents listing. Derivation deliberately skips it (the printed
+        // contents page carries the offset problem the opener signal
+        // avoids), and nothing else looks like a chapter opener — the work
+        // is small, so it stays whole and the check stays non-blocking.
         let toc_page = "Contents\nChapter One .... 1\nChapter Two .... 12\n";
         let (mut doc, _pages) = build_document(
             &[toc_page, "Chapter One body.", "Chapter Two body."],
-            Some("Heuristic Book"),
+            Some("Contents Only Book"),
             None,
         );
-        let (tmp, lib) = place_in_library(&mut doc, "heuristic.pdf");
+        let (tmp, lib) = place_in_library(&mut doc, "contents-only.pdf");
 
         let expected = vec![ExpectedItem {
-            title: "Heuristic Book".into(),
+            title: "Contents Only Book".into(),
             authors: vec![],
             kind: SourceKind::Article,
         }];
         let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
-        assert!(
-            matches!(item.toc, TocCheck::Heuristic { entries } if entries >= 2),
-            "expected a heuristic hit with at least 2 entries, got {:?}",
-            item.toc
-        );
-        assert!(item.toc.needs_user_confirmation());
-        // Never a hard fail on its own, even mid-cascade.
+        assert_eq!(item.toc, TocCheck::Unavailable);
         assert!(!item.blocking_failures().contains(&"toc"));
         assert!(item.passes());
     }
@@ -1937,11 +2111,171 @@ mod tests {
             .expect("validate");
         let item = &report.items[0];
         assert_eq!(item.toc, TocCheck::Unavailable);
-        assert!(item.toc.needs_user_confirmation());
         assert!(
             item.passes(),
             "a missing TOC alone must never block generation: {item:?}"
         );
+    }
+
+    #[test]
+    fn toc_refuses_a_large_structureless_book() {
+        // User decision, 2026-09-10: above the single-node threshold, a
+        // book with no derivable chapter tier is a BLOCKING failure — a
+        // whole-work node over hundreds of pages is not an experience the
+        // app is willing to produce.
+        let pages: Vec<String> = (1..=60)
+            .map(|i| format!("Plain prose page {i}. No headings anywhere."))
+            .collect();
+        let refs: Vec<&str> = pages.iter().map(String::as_str).collect();
+        let (mut doc, _pages) = build_document(&refs, Some("Structureless Book"), None);
+        let (tmp, lib) = place_in_library(&mut doc, "structureless.pdf");
+
+        let expected = vec![ExpectedItem {
+            title: "Structureless Book".into(),
+            authors: vec![],
+            kind: SourceKind::Book,
+        }];
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
+            .expect("validate");
+        let item = &report.items[0];
+        assert!(
+            matches!(item.toc, TocCheck::Unusable { .. }),
+            "expected Unusable, got {:?}",
+            item.toc
+        );
+        assert_eq!(item.blocking_failures(), vec!["toc"]);
+        assert!(!item.passes());
+    }
+
+    #[test]
+    fn toc_derives_the_chapter_tier_from_openers_when_the_book_has_no_bookmarks() {
+        // K&R-shaped: no /Outlines, a contents page that parses to garbage
+        // (skipped by shape), and real `CHAPTER N: Title` openers heading
+        // their own pages.
+        let mut pages: Vec<String> = vec![
+            "Some front matter.".into(),
+            // OCR-mangled header + ≥5 digit-ending lines ⇒ skipped by shape
+            // (the exact K&R contents-page situation, minus the columns).
+            "CONIENTS\nChapter 1 .... 1\nChapter 2 .... 25\nChapter 3 .... 60\nChapter 4 .... 90\nChapter 5 .... 120\n"
+                .into(),
+            "CHAPTER 1: A TUTORIAL INTRODUCTION\n\nbody of chapter one.".into(),
+        ];
+        // Prose cross-reference AFTER the opener window — line index 14,
+        // where K&R's own "Chapter 2 deals with…" sits relative to true
+        // openers. Must not poison first-occurrence.
+        pages.push(format!(
+            "body of chapter one.{}Chapter 2 deals with control flow.",
+            "\n".repeat(14)
+        ));
+        pages.push("CHAPTER 2: TYPES AND EXPRESSIONS\n\nbody.".into());
+        pages.push("filler chapter-two body.".into());
+        pages.push("CHAPTER 3: CONTROL FLOW\n\nbody.".into());
+        pages.push("filler chapter-three body.".into());
+        pages.push("CHAPTER 4: FUNCTIONS\n\nbody.".into());
+        let refs: Vec<&str> = pages.iter().map(String::as_str).collect();
+        let (mut doc, _pages) = build_document(&refs, Some("Opener Book"), None);
+        let (tmp, lib) = place_in_library(&mut doc, "openers.pdf");
+
+        let expected = vec![ExpectedItem {
+            title: "Opener Book".into(),
+            authors: vec![],
+            kind: SourceKind::Book,
+        }];
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
+            .expect("validate");
+        let item = &report.items[0];
+        match &item.toc {
+            TocCheck::Derived { entries } => assert_eq!(*entries, 4),
+            other => panic!("expected Derived with 4 entries, got {other:?}"),
+        }
+        assert!(item.passes());
+    }
+
+    #[test]
+    fn derive_toc_ignores_prose_references_beyond_the_opener_window() {
+        // The discriminating poisoning case: front matter BEFORE the first
+        // real opener mentions a later chapter near its top. First
+        // occurrence would hand chapter 3 a page before chapter 1's, the
+        // monotonicity check would then kill the whole derivation — K&R's
+        // preface/preview pages read exactly like this (measured: its
+        // "Chapter 2 deals with…" sits at line index 20+, far outside the
+        // opener window, which is what saves the real book).
+        let poisoned_intro = format!(
+            "PREFACE\nThis book teaches C.{}Chapter 3: Types is where the real work starts.",
+            "\n".repeat(10)
+        );
+        let pages = vec![
+            poisoned_intro,
+            "Chapter 1: One\n\nbody.".to_string(),
+            "Chapter 2: Two\n\nbody.".to_string(),
+            "Chapter 3: Three\n\nbody.".to_string(),
+        ];
+        let entries = derive_chapter_toc(&pages);
+        assert_eq!(
+            entries.len(),
+            3,
+            "window rule must keep the derivation alive: {entries:?}"
+        );
+        assert_eq!(entries[2].title, "Three");
+        assert_eq!(entries[2].page, Some(4));
+    }
+
+    #[test]
+    fn derive_toc_returns_empty_when_openers_are_not_monotonically_ordered() {
+        // A REPEATED number is silently skipped (first occurrence wins —
+        // running heads), so the inversion that kills the derivation must
+        // be an out-of-order FIRST occurrence: a lower chapter number
+        // showing up on a later page than an already-seen higher one means
+        // the parse grabbed something that isn't a sequence.
+        let pages = vec![
+            "Chapter 2: Two\n\nbody.".to_string(),
+            "Chapter 1: One\n\nbody.".to_string(),
+            "Chapter 3: Three\n\nbody.".to_string(),
+        ];
+        assert!(derive_chapter_toc(&pages).is_empty());
+    }
+
+    #[test]
+    fn derive_toc_strips_running_head_page_numbers_from_titles() {
+        let pages = vec![
+            "Chapter 1: THE METHOD 5\n\nbody.".to_string(),
+            "Chapter 2: STRUCTURES 121\n\nbody.".to_string(),
+            "Chapter 3: CONTROL FLOW 53\n\nbody.".to_string(),
+        ];
+        let entries = derive_chapter_toc(&pages);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].title, "THE METHOD");
+        assert_eq!(entries[1].title, "STRUCTURES");
+        assert_eq!(entries[2].title, "CONTROL FLOW");
+        assert_eq!(entries[0].page, Some(1));
+    }
+
+    #[test]
+    fn derive_toc_needs_three_or_more_chapters() {
+        let pages = vec![
+            "Chapter 1: One\n\nbody.".to_string(),
+            "Chapter 2: Two\n\nbody.".to_string(),
+        ];
+        assert!(derive_chapter_toc(&pages).is_empty());
+    }
+
+    #[test]
+    fn chapter_opener_parsing_accepts_scan_variants_and_rejects_non_openers() {
+        assert_eq!(
+            parse_chapter_opener("CHAPTER  2: Types"),
+            Some((2, "Types".to_string()))
+        );
+        assert_eq!(
+            parse_chapter_opener("Capítulo 1  Título"),
+            Some((1, "Título".to_string()))
+        );
+        assert_eq!(
+            parse_chapter_opener("Chapter 12 - Long Title."),
+            Some((12, "Long Title".to_string()))
+        );
+        assert_eq!(parse_chapter_opener("Chapter One: Title"), None);
+        assert_eq!(parse_chapter_opener("Chapter 1000: Too Many Digits"), None);
+        assert_eq!(parse_chapter_opener("see Chapter 3 for details"), None);
     }
 
     // -- Page map -----------------------------------------------------
@@ -2039,9 +2373,9 @@ mod tests {
     }
 
     /// S27k: once a deduction pass has stored a fully-resolved TOC for this
-    /// hash, `check_toc` must report it as `Deduced` (not fall through to
-    /// the heading heuristic) and `needs_user_confirmation()` must flip to
-    /// false — there is nothing left to ask about.
+    /// hash, `check_toc` must report it as `Deduced` rather than falling
+    /// through to derivation — a stored read of the printed contents page
+    /// outranks a fresh parse of the openers.
     #[test]
     fn toc_check_reports_deduced_and_needs_no_confirmation_when_fully_resolved() {
         let (mut doc, _pages) = build_document(&["Some body text."], Some("Deduced Book"), None);
@@ -2084,13 +2418,11 @@ mod tests {
             }
             other => panic!("expected Deduced, got {other:?}"),
         }
-        assert!(!report.items[0].toc.needs_user_confirmation());
     }
 
     /// Same as above but with a leftover unresolved title — `Deduced` still
-    /// applies (the deduction pass DID run and DID place entries), but
-    /// `needs_user_confirmation()` must stay true: there's still something
-    /// for the S27f screen to ask about.
+    /// applies (the deduction pass DID run and DID place entries); the
+    /// remainder is visible in the variant itself, not a gate failure.
     #[test]
     fn toc_check_deduced_with_unresolved_entries_still_needs_confirmation() {
         let (mut doc, _pages) = build_document(&["Some body text."], Some("Partial Book"), None);
@@ -2133,7 +2465,6 @@ mod tests {
             }
             other => panic!("expected Deduced, got {other:?}"),
         }
-        assert!(report.items[0].toc.needs_user_confirmation());
     }
 
     /// Exercises the real builder end-to-end with a live embedder — proves

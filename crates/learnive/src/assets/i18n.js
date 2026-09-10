@@ -44,6 +44,7 @@ const I18N = {
     "manual.recheck": "Re-check",
     "manual.continue": "Continue",
     "manual.tocUnavailable": "no chapter list, whole work only",
+    "manual.tocUnusable": "too long to use without a chapter list",
     "manual.confirmTitle": "Your reading list",
     "manual.confirmHint":
       "The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.",
@@ -145,7 +146,6 @@ const I18N = {
     "acervo.extractorFailed":
       "This file has a text layer we couldn't read \u2014 the book is fine, our extractor isn't. Re-downloading won't help.",
     "acervo.reviewMatch": "Resolve match",
-    "acervo.reviewToc": "Review chapters",
     "acervo.matches.title": "Match PDFs to your reading list",
     "acervo.matches.hint":
       "Some items match more than one file in your library, or a library file matches none of them yet.",
@@ -158,27 +158,8 @@ const I18N = {
     "acervo.matches.current": "Currently matched: {0}",
     "acervo.matches.saved": "Saved.",
     "acervo.matches.error": "could not save the match: ",
-    "acervo.toc.title": "Confirm table of contents",
-    "acervo.toc.hint":
-      "No bookmarks were found in this PDF — check the deduced chapters below before they're used.",
-    "acervo.toc.back": "Back",
-    "acervo.toc.sourceEmbedded": "From the PDF's own bookmarks",
-    "acervo.toc.sourceDeduced": "Read from the printed contents page",
-    "acervo.toc.sourceHeuristic": "Guessed from the text — please check it",
-    "acervo.toc.sourceConfirmed": "Confirmed by you",
-    "acervo.toc.sourceUnavailable": "Nothing detected yet — add chapters manually",
-    "acervo.toc.add": "Add chapter",
-    "acervo.toc.remove": "Remove",
-    "acervo.toc.titlePlaceholder": "Chapter title",
-    "acervo.toc.pagePlaceholder": "Page",
-    "acervo.toc.moveUp": "Move up",
-    "acervo.toc.moveDown": "Move down",
-    "acervo.toc.save": "Save",
-    "acervo.toc.saved": "Saved.",
-    "acervo.toc.error": "could not save: ",
-    "acervo.toc.needsAtLeastOne": "Add at least one chapter before saving.",
-    "acervo.toc.unresolved":
-      "This item's file isn't resolved yet — match it on the previous screen first.",
+    "acervo.tocUnusable":
+      "This book can't be used as-is: {0}",
     // Status
     "status.objective": "thinking about the objective…",
     "error.failed": "failed: ",
@@ -266,6 +247,7 @@ const I18N = {
     "manual.recheck": "Rechecar",
     "manual.continue": "Continuar",
     "manual.tocUnavailable": "sem lista de capítulos, apenas a obra inteira",
+    "manual.tocUnusable": "longo demais para usar sem lista de capítulos",
     "manual.confirmTitle": "Sua lista de leitura",
     "manual.confirmHint":
       "A ordem aqui é a ordem em que você vai estudar. Use as setas para reordenar e marque o que já sabe como revisar ou pular.",
@@ -356,7 +338,6 @@ const I18N = {
     "acervo.extractorFailed":
       "Este arquivo tem camada de texto que não conseguimos ler \u2014 o livro está certo, o extrator é que falhou. Baixar de novo não resolve.",
     "acervo.reviewMatch": "Resolver correspondência",
-    "acervo.reviewToc": "Revisar capítulos",
     "acervo.matches.title": "Casar PDFs com sua lista de leitura",
     "acervo.matches.hint":
       "Alguns itens correspondem a mais de um arquivo do acervo, ou um arquivo do acervo ainda não corresponde a nenhum deles.",
@@ -369,27 +350,7 @@ const I18N = {
     "acervo.matches.current": "Atualmente correspondido: {0}",
     "acervo.matches.saved": "Salvo.",
     "acervo.matches.error": "não foi possível salvar a correspondência: ",
-    "acervo.toc.title": "Confirmar sumário",
-    "acervo.toc.hint":
-      "Nenhum marcador foi encontrado neste PDF — confira os capítulos deduzidos abaixo antes que sejam usados.",
-    "acervo.toc.back": "Voltar",
-    "acervo.toc.sourceEmbedded": "Dos próprios marcadores do PDF",
-    "acervo.toc.sourceDeduced": "Lido do sumário impresso",
-    "acervo.toc.sourceHeuristic": "Deduzido do texto — confira, por favor",
-    "acervo.toc.sourceConfirmed": "Confirmado por você",
-    "acervo.toc.sourceUnavailable": "Nada detectado ainda — adicione capítulos manualmente",
-    "acervo.toc.add": "Adicionar capítulo",
-    "acervo.toc.remove": "Remover",
-    "acervo.toc.titlePlaceholder": "Título do capítulo",
-    "acervo.toc.pagePlaceholder": "Página",
-    "acervo.toc.moveUp": "Mover para cima",
-    "acervo.toc.moveDown": "Mover para baixo",
-    "acervo.toc.save": "Salvar",
-    "acervo.toc.saved": "Salvo.",
-    "acervo.toc.error": "não foi possível salvar: ",
-    "acervo.toc.needsAtLeastOne": "Adicione ao menos um capítulo antes de salvar.",
-    "acervo.toc.unresolved":
-      "O arquivo deste item ainda não foi resolvido — faça a correspondência na tela anterior primeiro.",
+    "acervo.tocUnusable": "Este livro não pode ser usado como está: {0}",
     "status.objective": "pensando no objetivo…",
     "error.failed": "falhou: ",
     "status.curriculum": "planejando o currículo…",

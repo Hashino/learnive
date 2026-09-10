@@ -346,11 +346,19 @@ function renderLibraryList() {
       // title doesn't — otherwise the row repeats itself twice.
       const title = libraryDisplayTitle(e);
       const showFile = !librarySameText(title, libraryStem(e.filename));
+      // Unusable = too long to stay whole-work with no derivable chapter
+      // tier: the acervo gate would refuse it outright, so the picker
+      // refuses it first — visible, but not pickable.
+      const unusable = e.toc === "unusable";
       const meta = [
         (e.authors || "").trim(),
         e.pages + "p",
         showFile ? e.filename : null,
-        e.toc === "unavailable" ? t("manual.tocUnavailable") : null,
+        e.toc === "unusable"
+          ? t("manual.tocUnusable")
+          : e.toc === "unavailable"
+            ? t("manual.tocUnavailable")
+            : null,
       ]
         .filter(Boolean)
         .map(escapeHtml)
@@ -358,11 +366,13 @@ function renderLibraryList() {
       return (
         '<li><label class="library-row' +
         (chosen.has(e.hash) ? " selected" : "") +
+        (unusable ? " disabled" : "") +
         '">' +
         '<input type="checkbox" data-hash="' +
         e.hash +
         '"' +
         (chosen.has(e.hash) ? " checked" : "") +
+        (unusable ? " disabled" : "") +
         ">" +
         '<span class="library-text">' +
         '<span class="library-title">' +
@@ -452,11 +462,13 @@ el("libraryContinueBtn").addEventListener("click", async () => {
   el("manualTree").innerHTML =
     '<li class="muted">' + escapeHtml(t("manual.loadingChapters")) + "</li>";
   // Chapter tiers come from data already on disk; a book with neither a
-  // confirmed TOC nor bookmarks simply stays whole-work — the picker
-  // screen already said so (`manual.tocUnavailable`).
+  // confirmed TOC nor bookmarks nor derivable openers stays whole-work
+  // (`manual.tocUnavailable`) or is refused outright when too long —
+  // though a refused book can't reach this flow at all, the picker
+  // screen blocks selecting it.
   await Promise.all(
     manualTree.map(async (w) => {
-      if (w.toc === "unavailable") return;
+      if (w.toc === "unavailable" || w.toc === "unusable") return;
       try {
         const resp = await api("/api/library/" + w.hash + "/toc");
         if (!resp.ok) return;
