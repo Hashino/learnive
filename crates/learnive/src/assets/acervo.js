@@ -213,8 +213,7 @@ async function refreshAcervoMatchesBtn() {
 // real local HTTP server, not a webview), so it may silently do nothing —
 // the selectable/copyable path text next to it is the reliable fallback,
 // never the other way around.
-function renderLibraryPath(path) {
-  const container = el("acervoLibraryPath");
+function renderLibraryPath(path, container = el("acervoLibraryPath")) {
   container.innerHTML = "";
   if (!path) return;
 

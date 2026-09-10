@@ -705,6 +705,31 @@ async function streamMoveRequest(rec, id) {
       openChapterRemediate(id);
       return;
     }
+    // A stream that DIED without an `error` frame (Firefox reports it as
+    // "TypeError: Error in input stream") is a connection loss, not a
+    // generation failure — the server may even have finished the move in
+    // the background (the generation task outlives the request, and every
+    // settled move is persisted progressively), and the next request
+    // resumes from the event log. Say that, and offer the continuation
+    // instead of showing a raw TypeError (live 2026-09-10: minutes of
+    // silence during the gate + free-tier 429 retries got the browser's
+    // idle stream killed, twice).
+    if (err instanceof TypeError || /network|stream/i.test(String(err))) {
+      rec.controls.innerHTML = "";
+      const msg = document.createElement("p");
+      msg.className = "error";
+      msg.textContent = t("gen.streamLost");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = t("gen.continue");
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        await streamMoveRequest(rec, id);
+      });
+      rec.controls.appendChild(msg);
+      rec.controls.appendChild(btn);
+      return;
+    }
     rec.controls.innerHTML =
       '<p class="error">' +
       t("gen.error") +

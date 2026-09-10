@@ -98,6 +98,9 @@ const I18N = {
     "status.generating": "generating…",
     "continue.button": "Continue →",
     "gen.error": "generation error: ",
+    "gen.streamLost":
+      "The connection to the server dropped mid-generation. Nothing was lost — continue where you left off.",
+    "gen.continue": "Continue",
     "asked.prefix": "You asked:",
     "iframe.interactive": "Interactive content",
     "iframe.exercise": "Exercise",
@@ -304,6 +307,9 @@ const I18N = {
     "status.generating": "gerando…",
     "continue.button": "Continuar →",
     "gen.error": "erro de geração: ",
+    "gen.streamLost":
+      "A conexão com o servidor caiu no meio da geração. Nada foi perdido — continue de onde parou.",
+    "gen.continue": "Continuar",
     "asked.prefix": "Você perguntou:",
     "iframe.interactive": "Conteúdo interativo",
     "iframe.exercise": "Exercício",

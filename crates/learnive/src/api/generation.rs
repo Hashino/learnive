@@ -76,6 +76,22 @@ pub async fn generate_node(
     // bare "generating…" for a minute or more while nothing content-shaped
     // was running yet.
     let stream = async_stream::stream! {
+        // The work runs in a TASK pushing finished frames through a channel,
+        // and the visible stream multiplexes those frames with SSE
+        // keep-alive comments (spec: lines starting with `:` — ignored by
+        // every client parser, including this app's own `readSse`). Why
+        // (bug reported live twice, 2026-09-10): this stream can
+        // legitimately go MINUTES without a frame — the acervo gate alone
+        // is 60-130s on a real library and free-tier 429 retries add more —
+        // and Firefox kills a response that sends no bytes
+        // ("TypeError: Error in input stream"), indistinguishable from a
+        // server death. The task (unlike the generator itself) also
+        // survives the client going away: the move it was generating still
+        // lands in the event log + the progressive node write (§S6), so the
+        // next attempt resumes instead of re-paying (§14). A crashed task
+        // surfaces as a normal `error` frame via the join below.
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let worker = tokio::spawn(async move {
         let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let prepare_state = state.clone();
         let prepare_doc_id = doc_id.clone();
@@ -95,17 +111,17 @@ pub async fn generate_node(
         let prep = loop {
             tokio::select! {
                 Some(msg) = status_rx.recv() => {
-                    yield Ok::<Bytes, std::io::Error>(sse_frame("status", &msg));
+                    let _ = frame_tx.send(sse_frame("status", &msg));
                 }
                 joined = &mut prepare_task => {
                     break match joined {
                         Ok(Ok(p)) => p,
                         Ok(Err(e)) => {
-                            yield Ok(sse_frame("error", &e));
+                            let _ = frame_tx.send(sse_frame("error", &e));
                             return;
                         }
                         Err(e) => {
-                            yield Ok(sse_frame("error", &e.to_string()));
+                            let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                             return;
                         }
                     };
@@ -117,7 +133,7 @@ pub async fn generate_node(
         let event_log = match state.store.event_log(&doc_id) {
             Ok(l) => l,
             Err(e) => {
-                yield Ok(sse_frame("error", &e.to_string()));
+                let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                 return;
             }
         };
@@ -187,7 +203,7 @@ pub async fn generate_node(
                 match movement::next_move(&ctx) {
                     Ok(mt) => mt,
                     Err(e) => {
-                        yield Ok(sse_frame("error", &e.to_string()));
+                        let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                         return;
                     }
                 }
@@ -205,7 +221,7 @@ pub async fn generate_node(
                     // streamed buffer wholesale (`node.js`'s `live`), so
                     // nothing duplicates.
                     if content_html.is_empty() {
-                        yield Ok(sse_frame(
+                        let _ = frame_tx.send(sse_frame(
                             "token",
                             &format!(
                                 "<h1>{}</h1>\n",
@@ -218,7 +234,7 @@ pub async fn generate_node(
                     {
                         Ok(s) => s,
                         Err(e) => {
-                            yield Ok(sse_frame("error", &e.to_string()));
+                            let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                             return;
                         }
                     };
@@ -232,11 +248,11 @@ pub async fn generate_node(
                         match tokens.next().await {
                             Some(Ok(t)) => {
                                 for frame in gate.push(&t) {
-                                    yield Ok(sse_frame("token", &frame));
+                                    let _ = frame_tx.send(sse_frame("token", &frame));
                                 }
                             }
                             Some(Err(e)) => {
-                                yield Ok(sse_frame("error", &e.to_string()));
+                                let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                                 return;
                             }
                             None => break,
@@ -244,7 +260,7 @@ pub async fn generate_node(
                     }
                     let (accumulated, trailing) = gate.finish();
                     if let Some(t) = trailing {
-                        yield Ok(sse_frame("token", &t));
+                        let _ = frame_tx.send(sse_frame("token", &t));
                     }
                     movement::finish_streamed_move(move_type, &accumulated)
                 }
@@ -252,7 +268,7 @@ pub async fn generate_node(
                     match movement::generate_move(&ai, move_type, &ctx).await {
                         Ok(mv) => mv,
                         Err(e) => {
-                            yield Ok(sse_frame("error", &e.to_string()));
+                            let _ = frame_tx.send(sse_frame("error", &e.to_string()));
                             return;
                         }
                     }
@@ -275,7 +291,7 @@ pub async fn generate_node(
             let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
                 let checking_en = "Checking grounding…";
                 let checking_pt = "Verificando fundamentação…";
-                yield Ok(sse_frame(
+                let _ = frame_tx.send(sse_frame(
                     "grounding_check",
                     crate::locale::pick(locale, checking_en, checking_pt),
                 ));
@@ -341,7 +357,7 @@ pub async fn generate_node(
             // sanitized prose in the app origin — same contract, same client
             // path (`movement.rs` module docs).
             if matches!(move_type.render(), MoveRender::Structured) {
-                yield Ok(sse_frame("token", &generated.html));
+                let _ = frame_tx.send(sse_frame("token", &generated.html));
             }
             // §S6 follow-up: tag and persist this move now rather than
             // waiting for the whole node (through the graded move) to
@@ -367,7 +383,7 @@ pub async fn generate_node(
             // `tagged` still went into `content_html`/the progressive write
             // above, since the stored content layer needs the real script
             // for `blocks/{id}/frame` to serve later.
-            yield Ok(sse_frame(
+            let _ = frame_tx.send(sse_frame(
                 "move_settled",
                 &learnive_core::redact_interactive_blocks(&tagged),
             ));
@@ -378,7 +394,7 @@ pub async fn generate_node(
             // `prepare`'s resume machinery reconstructs `prior_moves`/
             // `node_tail`/the loop index from the event log + persisted
             // content on that next call for this same node.
-            yield Ok(sse_frame("move_paused", &prep.node_id));
+            let _ = frame_tx.send(sse_frame("move_paused", &prep.node_id));
             return;
             }
 
@@ -391,13 +407,34 @@ pub async fn generate_node(
                 // frame endpoint (§4.4) — this event just signals it's ready
                 // and carries the node id needed to build that URL, since
                 // `state.nodeId` isn't set client-side until `done` below.
-                yield Ok(sse_frame("exercise", &prep.node_id));
-                yield Ok(sse_frame("done", &prep.node_id));
+                let _ = frame_tx.send(sse_frame("exercise", &prep.node_id));
+                let _ = frame_tx.send(sse_frame("done", &prep.node_id));
             }
             Err(e) => {
-                yield Ok(sse_frame("error", &e));
-                return;
+                let _ = frame_tx.send(sse_frame("error", &e));
             }
+        }
+        });
+
+        // Frames from the worker, interleaved with keep-alive comments every
+        // 15s of silence. The channel closing (worker returned) ends the
+        // stream; a worker PANIC surfaces as a normal `error` frame instead
+        // of a dead connection.
+        let mut keep_alive = tokio::time::interval(std::time::Duration::from_secs(15));
+        keep_alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                frame = frame_rx.recv() => match frame {
+                    Some(frame) => yield Ok::<Bytes, std::io::Error>(frame),
+                    None => break,
+                },
+                _ = keep_alive.tick() => {
+                    yield Ok(Bytes::from_static(b": keep-alive\n\n"));
+                }
+            }
+        }
+        if let Err(e) = worker.await {
+            yield Ok(sse_frame("error", &format!("generation task crashed: {e}")));
         }
     };
 

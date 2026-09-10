@@ -252,7 +252,12 @@ async function loadLibrary() {
     if (!resp.ok) throw new Error(await resp.text());
     await readSse(resp, (event, data) => {
       if (event === "start") {
-        total = manualPayload(data).total;
+        const started = manualPayload(data);
+        total = started.total;
+        // Same path indicator (with copy button) the acervo check screen
+        // shows — this picker is where a user who still needs to drop a
+        // PDF into the library lands first.
+        renderLibraryPath(started.library_path, el("libraryPickerPath"));
       } else if (event === "entry") {
         manualLibrary.push(manualPayload(data));
         progress.textContent = total == null

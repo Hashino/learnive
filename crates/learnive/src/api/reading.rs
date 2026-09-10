@@ -73,8 +73,17 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
                 return;
             }
         };
-        let start = serde_json::to_string(&serde_json::json!({ "total": entries.len() }))
-            .unwrap_or_default();
+        // The picker screen shows the same absolute library path (with a
+        // copy button) the acervo check screen does — a user about to pick
+        // books is exactly the user who may still need to drop one in
+        // (parity request, 2026-09-10).
+        let library_path = std::fs::canonicalize(library.root())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| data_dir.clone());
+        let start = serde_json::to_string(
+            &serde_json::json!({ "total": entries.len(), "library_path": library_path }),
+        )
+        .unwrap_or_default();
         yield Ok(sse_frame("start", &start));
 
         let cache_dir = source::pdftext_cache_dir(&data_dir);
