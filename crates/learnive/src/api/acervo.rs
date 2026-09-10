@@ -225,6 +225,9 @@ pub async fn get_acervo_report(
         .into_owned();
     let idx_dir = index_cache_dir(&state);
     let toc_dir = toc_confirm_dir(&state);
+    // Read-only GET, but identity itself now consults the manual pairings
+    // (S35, K&R bug) — the store is opened for reading only.
+    let manual = manual_match_store(&state)?;
     let ids: Vec<String> = expected.iter().map(|(id, _)| id.clone()).collect();
     let items_only: Vec<ExpectedItem> = expected.into_iter().map(|(_, item)| item).collect();
 
@@ -292,6 +295,7 @@ pub async fn get_acervo_report(
                 &idx_dir,
                 &toc_dir,
                 None,
+                Some(&manual),
                 move |p| {
                     let _ = tx.send(p);
                 },
@@ -1197,6 +1201,7 @@ mod tests {
             data_dir.join("index").join("library"),
             data_dir.join("index").join("toc"),
             None,
+            None,
         )
         .unwrap();
         assert!(!report.all_pass(), "fixture: empty library must fail");
@@ -1268,6 +1273,7 @@ mod tests {
             &expected,
             data_dir.join("index").join("library"),
             data_dir.join("index").join("toc"),
+            None,
             None,
         )
         .unwrap();

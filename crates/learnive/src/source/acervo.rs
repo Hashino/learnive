@@ -318,6 +318,7 @@ pub fn validate_acervo(
     index_cache_dir: impl AsRef<Path>,
     toc_confirm_dir: impl AsRef<Path>,
     file_index: Option<&LibraryFileIndex>,
+    manual: Option<&ManualMatchStore>,
 ) -> std::io::Result<AcervoReport> {
     validate_acervo_with_progress(
         library,
@@ -325,6 +326,7 @@ pub fn validate_acervo(
         index_cache_dir,
         toc_confirm_dir,
         file_index,
+        manual,
         |_| {},
     )
 }
@@ -395,6 +397,7 @@ pub fn validate_acervo_with_progress(
     index_cache_dir: impl AsRef<Path>,
     toc_confirm_dir: impl AsRef<Path>,
     file_index: Option<&LibraryFileIndex>,
+    manual: Option<&ManualMatchStore>,
     mut on_progress: impl FnMut(AcervoProgress),
 ) -> std::io::Result<AcervoReport> {
     // One `Scanning` tick per item up front, before the shared library scan
@@ -441,6 +444,7 @@ pub fn validate_acervo_with_progress(
                 &candidates,
                 index_cache_dir,
                 &toc_confirm,
+                manual,
                 &mut on_progress,
             )
         })
@@ -502,6 +506,7 @@ fn build_item_report(
     candidates: &[LibraryCandidate],
     index_cache_dir: &Path,
     toc_confirm: &TocConfirmStore,
+    manual: Option<&ManualMatchStore>,
     on_progress: &mut impl FnMut(AcervoProgress),
 ) -> ItemReport {
     let tick = |phase: AcervoPhase, on_progress: &mut dyn FnMut(AcervoProgress)| {
@@ -512,7 +517,23 @@ fn build_item_report(
     };
 
     tick(AcervoPhase::Presence, on_progress);
-    let Some(cand) = find_candidate(item, candidates) else {
+    // S35 (bug reported live 2026-09-09, K&R): the manual picker's explicit
+    // pairing IS the identity — the user picked THIS file for THIS work, so
+    // when that pairing names a file the scan still sees, presence and
+    // identity pass outright and only the mechanical checks (text layer,
+    // toc, page map, index) run against the paired file. Metadata-blind
+    // PDFs would otherwise fail identity forever despite the explicit human
+    // pick: K&R carries no /Info title/author and an OCR-garbled first page
+    // ("KERNICHAN"), so no title normalization can find the expected blob in
+    // the text. The pairing degrades safely: a file renamed or deleted since
+    // the pick falls back to the ordinary candidate search and reports
+    // honestly from there.
+    let manual_cand = manual.and_then(|m| m.get(item)).and_then(|picked| {
+        candidates
+            .iter()
+            .find(|c| c.entry.filename == picked.filename)
+    });
+    let Some(cand) = manual_cand.or_else(|| find_candidate(item, candidates)) else {
         return ItemReport {
             expected: item.clone(),
             presence: PresenceCheck::Missing,
@@ -525,7 +546,11 @@ fn build_item_report(
     };
 
     tick(AcervoPhase::Identity, on_progress);
-    let identity = check_identity(item, cand);
+    let identity = if manual_cand.is_some() {
+        IdentityCheck::Match
+    } else {
+        check_identity(item, cand)
+    };
     tick(AcervoPhase::TextLayer, on_progress);
     let text_layer = check_text_layer(&cand.pdf);
     tick(AcervoPhase::Toc, on_progress);
@@ -1099,14 +1124,20 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
         } else {
             "unavailable"
         };
+        // Same empty-title fallback as the streaming listing endpoint — but
+        // through `stem_metadata`, so a conventional download stem yields a
+        // real title + authors instead of one long blob.
+        let stem_meta = stem_metadata(&filename_stem(&entry.filename));
         out.push(LibraryListingEntry {
-            // Same empty-title fallback as the streaming listing endpoint.
             title: pdf
                 .meta_title
                 .clone()
                 .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| filename_stem(&entry.filename)),
-            authors: pdf.meta_author.clone(),
+                .unwrap_or_else(|| stem_meta.0.clone()),
+            authors: pdf
+                .meta_author
+                .clone()
+                .or_else(|| (!stem_meta.1.is_empty()).then(|| stem_meta.1.join(", "))),
             pages: pdf.pages.page_count,
             hash,
             filename: entry.filename,
@@ -1124,6 +1155,53 @@ pub fn filename_stem(filename: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(filename)
         .to_string()
+}
+
+/// Splits an /Info-less filename stem that follows the common
+/// "Author One, Author Two - Title (year, publisher)" download convention
+/// into its bibliographic parts (S35, bug reported live 2026-09-09: the
+/// whole stem used to become the title, so the manual picker offered
+/// "Brian W. Kernighan, Dennis M. Ritchie - The C Programming Language
+/// (1978, Prentice Hall)" as a TITLE with no authors — an identity the
+/// acervo gate could never confirm against the PDF's own text). Stems that
+/// don't follow the convention fall back to the old behavior: whole stem as
+/// title, no authors, no year.
+pub fn stem_metadata(stem: &str) -> (String, Vec<String>, Option<u32>) {
+    let Some((authors_part, title_part)) = stem.split_once(" - ") else {
+        return (stem.trim().to_string(), Vec::new(), None);
+    };
+    let (authors_part, title_part) = (authors_part.trim(), title_part.trim());
+    if authors_part.is_empty() || title_part.is_empty() {
+        return (stem.trim().to_string(), Vec::new(), None);
+    }
+    let authors = authors_part
+        .split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+        .collect();
+    // A trailing parenthetical is edition metadata ("(1978, Prentice
+    // Hall)", "(2nd ed.)"), not part of the title.
+    let (title, parenthetical) = title_part
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once('('))
+        .map(|(before, inside)| (before.trim().to_string(), inside.to_string()))
+        .filter(|(title, _)| !title.is_empty())
+        .unwrap_or_else(|| (title_part.to_string(), String::new()));
+    (title, authors, first_year(&parenthetical))
+}
+
+/// First standalone four-digit 19xx/20xx number in `text` — the year in a
+/// download stem's parenthetical. Byte-window scan, no regex dependency.
+fn first_year(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(3))
+        .filter(|&i| text.is_char_boundary(i) && (i == 0 || !bytes[i - 1].is_ascii_digit()))
+        .find_map(|i| {
+            let year: u32 = text[i..i + 4].parse().ok()?;
+            let not_longer = i + 4 == bytes.len() || !bytes[i + 4].is_ascii_digit();
+            ((1900..=2099).contains(&year) && not_longer).then_some(year)
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1487,7 +1565,7 @@ mod tests {
             kind: SourceKind::Book,
         }];
 
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items.len(), 1);
         let item = &report.items[0];
@@ -1515,9 +1593,135 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items[0].presence, PresenceCheck::Missing);
+    }
+
+    // -- Manual pairing ------------------------------------------------
+
+    /// S35 (bug reported live 2026-09-09): the picker's explicit pairing IS
+    /// the identity. This fixture is maximally hostile to `check_identity` —
+    /// no `/Info` metadata, empty first page — and the expected title is the
+    /// download-convention stem, which no text search can find in such a
+    /// file. The manual pairing must carry presence + identity on its own;
+    /// the mechanical checks still run against the paired file.
+    #[test]
+    fn manual_pairing_carries_presence_and_identity_for_a_metadata_blind_pdf() {
+        let (mut doc, _pages) = build_document(&["", "interior body text only"], None, None);
+        let (tmp, lib) = place_in_library(
+            &mut doc,
+            "Brian W. Kernighan, Dennis M. Ritchie - The C Programming Language (1978, Prentice \
+             Hall).pdf",
+        );
+        let manual = ManualMatchStore::open(tmp.path().join("data")).expect("open store");
+        let item = ExpectedItem {
+            title: "The C Programming Language".into(),
+            authors: vec!["Brian W. Kernighan".into(), "Dennis M. Ritchie".into()],
+            kind: SourceKind::Book,
+        };
+        manual
+            .set(
+                &item,
+                "Brian W. Kernighan, Dennis M. Ritchie - The C Programming Language \
+             (1978, Prentice Hall).pdf",
+            )
+            .expect("record pairing");
+
+        let report = validate_acervo(
+            &lib,
+            &[item],
+            index_dir(&tmp),
+            toc_dir(&tmp),
+            None,
+            Some(&manual),
+        )
+        .expect("validate");
+        assert_eq!(report.items.len(), 1);
+        let checked = &report.items[0];
+        assert_eq!(
+            checked.presence,
+            PresenceCheck::Found {
+                filename: "Brian W. Kernighan, Dennis M. Ritchie - The C Programming Language \
+                           (1978, Prentice Hall).pdf"
+                    .into()
+            }
+        );
+        assert_eq!(
+            checked.identity,
+            IdentityCheck::Match,
+            "the pairing is the identity"
+        );
+        assert!(
+            matches!(checked.text_layer, TextLayerCheck::Extractable { .. }),
+            "mechanical checks still run against the paired file"
+        );
+        assert!(checked.passes(), "no blocking failure may remain");
+    }
+
+    /// The pairing degrades honestly: a file renamed or deleted since the
+    /// pick is simply not a candidate anymore, and the ordinary search —
+    /// which here finds nothing — reports Missing instead of silently
+    /// trusting a stale pairing.
+    #[test]
+    fn manual_pairing_to_a_vanished_file_falls_back_to_the_ordinary_search() {
+        let (mut doc, _pages) = build_document(
+            &["The Joy of Baking, by Jane Chef."],
+            Some("The Joy of Baking"),
+            None,
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "baking.pdf");
+        let manual = ManualMatchStore::open(tmp.path().join("data")).expect("open store");
+        let item = ExpectedItem {
+            title: "The C Programming Language".into(),
+            authors: vec!["Brian W. Kernighan".into()],
+            kind: SourceKind::Book,
+        };
+        manual
+            .set(&item, "deleted-since-the-pick.pdf")
+            .expect("record pairing");
+
+        let report = validate_acervo(
+            &lib,
+            &[item],
+            index_dir(&tmp),
+            toc_dir(&tmp),
+            None,
+            Some(&manual),
+        )
+        .expect("validate");
+        assert_eq!(report.items[0].presence, PresenceCheck::Missing);
+    }
+
+    // -- Listing stems ---------------------------------------------------
+
+    #[test]
+    fn stem_metadata_splits_the_download_convention() {
+        let (title, authors, year) = stem_metadata(
+            "Brian W. Kernighan, Dennis M. Ritchie - The C Programming Language (1978, Prentice \
+             Hall)",
+        );
+        assert_eq!(title, "The C Programming Language");
+        assert_eq!(authors, vec!["Brian W. Kernighan", "Dennis M. Ritchie"]);
+        assert_eq!(year, Some(1978));
+    }
+
+    #[test]
+    fn stem_metadata_leaves_non_conforming_stems_alone() {
+        // No " - " separator: the whole stem stays the title.
+        assert_eq!(
+            stem_metadata("Some Random Scan v3"),
+            ("Some Random Scan v3".to_string(), Vec::new(), None)
+        );
+        // An empty side of the separator: same fallback (trimmed).
+        assert_eq!(
+            stem_metadata(" - Title Only"),
+            ("- Title Only".to_string(), Vec::new(), None)
+        );
+        // Parenthetical without a parseable year.
+        let (title, _authors, year) = stem_metadata("Jane Chef - The Joy of Baking (2nd ed.)");
+        assert_eq!(title, "The Joy of Baking");
+        assert_eq!(year, None);
     }
 
     // -- Identity -------------------------------------------------------
@@ -1539,7 +1743,7 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Article, // sidestep the book page-count floor
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert_eq!(
@@ -1572,7 +1776,7 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert!(
@@ -1598,7 +1802,7 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert_eq!(item.identity, IdentityCheck::Match);
@@ -1621,7 +1825,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert!(matches!(
             report.items[0].text_layer,
@@ -1643,7 +1847,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items[0].text_layer, TextLayerCheck::NoText);
         assert_eq!(report.items[0].blocking_failures(), vec!["text_layer"]);
@@ -1678,7 +1882,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items[0].toc, TocCheck::Embedded { entries: 2 });
         assert!(!report.items[0].toc.needs_user_confirmation());
@@ -1701,7 +1905,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert!(
@@ -1729,7 +1933,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert_eq!(item.toc, TocCheck::Unavailable);
@@ -1753,7 +1957,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(
             report.items[0].page_map,
@@ -1782,7 +1986,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(
             report.items[0].page_map,
@@ -1802,7 +2006,7 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         assert_eq!(report.items[0].index, IndexCheck::Missing);
         // Missing index is reported but deliberately not a blocker in this
@@ -1829,8 +2033,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report =
-            validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp), None).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp), None, None)
+            .expect("validate");
         assert!(matches!(report.items[0].index, IndexCheck::Cached { .. }));
     }
 
@@ -1868,8 +2072,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report =
-            validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir, None).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir, None, None)
+            .expect("validate");
         match &report.items[0].toc {
             TocCheck::Deduced {
                 resolved,
@@ -1917,8 +2121,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report =
-            validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir, None).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, &toc_confirm_dir, None, None)
+            .expect("validate");
         match &report.items[0].toc {
             TocCheck::Deduced {
                 resolved,
@@ -1961,8 +2165,8 @@ mod tests {
             authors: vec![],
             kind: SourceKind::Article,
         }];
-        let report =
-            validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp), None).expect("validate");
+        let report = validate_acervo(&lib, &expected, &cache_dir, toc_dir(&tmp), None, None)
+            .expect("validate");
         assert_eq!(report.items[0].index, IndexCheck::Cached { path: built });
     }
 
@@ -2169,7 +2373,7 @@ mod tests {
             authors: vec!["Michael Sipser".into()],
             kind: SourceKind::Book,
         }];
-        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None)
+        let report = validate_acervo(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, None)
             .expect("validate");
         let item = &report.items[0];
         assert!(item.passes(), "{item:?}");
@@ -2318,9 +2522,15 @@ mod tests {
         ];
 
         let mut ticks = Vec::new();
-        validate_acervo_with_progress(&lib, &expected, index_dir(&tmp), toc_dir(&tmp), None, |p| {
-            ticks.push(p)
-        })
+        validate_acervo_with_progress(
+            &lib,
+            &expected,
+            index_dir(&tmp),
+            toc_dir(&tmp),
+            None,
+            None,
+            |p| ticks.push(p),
+        )
         .expect("validate");
 
         assert_eq!(ticks[0].phase, AcervoPhase::Scanning);

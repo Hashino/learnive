@@ -102,17 +102,25 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
             } else {
                 "unavailable"
             };
+            // An EMPTY /Info title (not just a missing one) falls back to
+            // the filename stem — several real-world PDFs carry `Title: ""`
+            // and a blank row helps no one (live find, user's library,
+            // 2026-09-09). The stem itself goes through `stem_metadata`, so
+            // a conventional download stem yields a real title + authors
+            // instead of one long blob.
+            let stem_meta = source::acervo::stem_metadata(&source::acervo::filename_stem(
+                &listing_entry.filename,
+            ));
             let entry = source::acervo::LibraryListingEntry {
-                // An EMPTY /Info title (not just a missing one) falls back
-                // to the filename stem — several real-world PDFs carry
-                // `Title: ""` and a blank row helps no one (live find,
-                // user's library, 2026-09-09).
                 title: pdf
                     .meta_title
                     .clone()
                     .filter(|t| !t.trim().is_empty())
-                    .unwrap_or_else(|| source::acervo::filename_stem(&listing_entry.filename)),
-                authors: pdf.meta_author.clone(),
+                    .unwrap_or_else(|| stem_meta.0.clone()),
+                authors: pdf
+                    .meta_author
+                    .clone()
+                    .or_else(|| (!stem_meta.1.is_empty()).then(|| stem_meta.1.join(", "))),
                 pages: pdf.pages.page_count,
                 hash,
                 filename: listing_entry.filename,
@@ -2195,6 +2203,7 @@ pub(super) async fn ensure_document_grounded(
     let idx_dir_for_validate = index_cache_dir.clone();
     let toc_dir_for_validate = toc_confirm_dir.clone();
     let file_index_root = std::path::PathBuf::from(state.data_dir.as_ref()).join("index");
+    let manual_root = state.data_dir.to_string();
     let report = spawn_blocking(move || -> Result<source::acervo::AcervoReport, String> {
         // This is the mutating POST path (unlike `api::acervo`'s read-only
         // gate-report GET, which passes `None`) — S27n's `LibraryFileIndex`
@@ -2202,12 +2211,17 @@ pub(super) async fn ensure_document_grounded(
         // hash, this call has already run and populated it.
         let file_index = source::acervo::LibraryFileIndex::open(&file_index_root)
             .map_err(|e| format!("could not open library file index: {e}"))?;
+        // `manual` itself stays with the caller (the fingerprint below reads
+        // it) — this fresh open is the same store, same directory.
+        let manual_in_task = source::ManualMatchStore::open(&manual_root)
+            .map_err(|e| format!("could not open manual-match store: {e}"))?;
         source::validate_acervo(
             &lib_for_validate,
             &items_for_validate,
             &idx_dir_for_validate,
             &toc_dir_for_validate,
             Some(&file_index),
+            Some(&manual_in_task),
         )
         .map_err(|e| format!("could not validate the acervo gate: {e}"))
     })
