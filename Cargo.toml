@@ -16,3 +16,8 @@ default-members = ["crates/learnive"]
 # page too). See vendor/pdf-extract/PATCH.md for the exact fix.
 [patch.crates-io]
 pdf-extract = { path = "vendor/pdf-extract" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
