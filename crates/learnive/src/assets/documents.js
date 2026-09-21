@@ -172,7 +172,22 @@ function renderOutlineTree() {
   renderPrereqTree(el("outlineTree"), pendingOutlineTree);
 }
 
-async function createLivingDocument(objective_text, nodes) {
+// `skipAcervoGate`: the manual path's own confirm screen already IS an
+// acervo check, one file at a time — every picked book came straight from
+// `GET /api/library` (present, readable) and every chapter came from
+// `GET /api/library/{hash}/toc` (a real TOC already extracted from it).
+// Re-running the courtesy gate screen afterwards would just re-verify
+// what picking the book from the library already proved, for no benefit
+// (2026-09-21, user decision — "esse passo é desnecessário"). This is a
+// CLIENT-side skip only: `ensure_document_grounded` still runs its own
+// server-side check on the first `/generate` regardless of path, and
+// still builds any missing retrieval index there if the gate screen never
+// ran — see `api::reading::build_missing_indexes`, which the S27g fix
+// made run on both the fresh-report and the memo-hit path for exactly
+// this reason. The proposed path (model-picked bibliography, not yet
+// matched to a library file) still needs the real screen: a proposed
+// title may not be in the library at all yet.
+async function createLivingDocument(objective_text, nodes, skipAcervoGate = false) {
   el("startStatus").textContent = t("status.curriculum");
   try {
     const resp = await postJson("/api/documents", {
@@ -195,6 +210,12 @@ async function createLivingDocument(objective_text, nodes) {
     // first thing to open — a confirmed prerequisite tree can gate it, in
     // which case the first available node is a prerequisite leaf instead.
     const first = state.allItems.find((it) => it.state === "available");
+    if (skipAcervoGate) {
+      el("acervoGate").hidden = true;
+      el("doc").hidden = false;
+      if (first) generateNode(first.id);
+      return;
+    }
     // S27f: a courtesy stop before the first token generates — reveals
     // #doc and generates `first` itself once done (or immediately, if this
     // reading list has no book/article sources to check). Never blocking:
@@ -662,8 +683,10 @@ el("manualConfirmBtn").addEventListener("click", async () => {
   pendingObjectiveText = "";
   // createLivingDocument hides all of #coldstart on success (the manual
   // screens live inside it); on error they stay visible behind the shared
-  // #startStatus error line.
-  await createLivingDocument(pendingObjectiveText, nodes);
+  // #startStatus error line. skipAcervoGate=true: every file here was
+  // already picked straight from the library screen, see the doc comment
+  // on createLivingDocument.
+  await createLivingDocument(pendingObjectiveText, nodes, true);
 });
 
 // --- Documents: resume, switch, rename (§S12) -------------------------
