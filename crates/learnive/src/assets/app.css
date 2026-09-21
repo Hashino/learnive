@@ -983,14 +983,39 @@ body.source-resizing #askBar {
    coldstart flow has no button at all, it auto-advances once every item
    passes, 2026-08-29 UX request), anchored right so it reads as a distinct,
    final step — not just another item in the row. */
-/* Cold start's entry question: Yes on the left (jump to the library
-   picker), No on the right (the model-proposed path) — spread across the
-   row rather than stacked, so the two answers read as equally weighted,
-   opposite choices. */
+/* Cold start's entry question: No on the left (the model-proposed path),
+   Yes on the right (jump to the library picker) — each exactly half the
+   row's width, so the two answers read as equally weighted, opposite
+   choices, not a primary action with an afterthought beside it. Distinct
+   fixed colors per choice (below), same "never theme-swapping `--accent`"
+   convention as the skip/review/learn toggle. */
 .coldstart-choice-actions {
   display: flex;
-  justify-content: space-between;
   gap: 1rem;
+}
+.coldstart-choice-actions button {
+  flex: 1 1 50%;
+}
+.coldstart-choice-no {
+  background: var(--nord3);
+  border-color: var(--nord3);
+  color: var(--nord6);
+}
+.coldstart-choice-yes {
+  background: var(--nord14);
+  border-color: var(--nord14);
+  color: var(--nord0);
+}
+/* Override the default button hover (`--btn-hover`, nord9 blue) so each
+   choice darkens toward its own color instead of both washing to the same
+   blue on hover. */
+.coldstart-choice-no:hover:not(:disabled) {
+  background: var(--nord2);
+  border-color: var(--nord2);
+}
+.coldstart-choice-yes:hover:not(:disabled) {
+  background: var(--nord7);
+  border-color: var(--nord7);
 }
 .acervo-actions {
   display: flex;
