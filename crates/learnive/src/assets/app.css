@@ -983,6 +983,15 @@ body.source-resizing #askBar {
    coldstart flow has no button at all, it auto-advances once every item
    passes, 2026-08-29 UX request), anchored right so it reads as a distinct,
    final step — not just another item in the row. */
+/* Cold start's entry question: Yes on the left (jump to the library
+   picker), No on the right (the model-proposed path) — spread across the
+   row rather than stacked, so the two answers read as equally weighted,
+   opposite choices. */
+.coldstart-choice-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
 .acervo-actions {
   display: flex;
   align-items: center;

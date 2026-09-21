@@ -231,11 +231,25 @@ function manualPayload(data) {
   return typeof data === "string" ? JSON.parse(data) : data;
 }
 
-el("manualStartBtn").addEventListener("click", async () => {
+// The entry choice (§6.1 revision, 2026-09-10): "Yes" jumps straight to
+// picking PDFs from the local library (zero model calls); "No" falls
+// through to the model-proposed path (`#startEntry`, the topic textbox).
+el("startChoiceYesBtn").addEventListener("click", () => openLibraryPicker());
+el("startChoiceNoBtn").addEventListener("click", () => {
+  el("startChoice").hidden = true;
+  el("startEntry").hidden = false;
+});
+el("startEntryBackBtn").addEventListener("click", () => {
+  el("startEntry").hidden = true;
+  el("startChoice").hidden = false;
+});
+
+async function openLibraryPicker() {
+  el("startChoice").hidden = true;
   el("startEntry").hidden = true;
   el("libraryPicker").hidden = false;
   if (!manualLibrary.length) await loadLibrary();
-});
+}
 
 async function loadLibrary() {
   if (manualScanning) return;
@@ -422,7 +436,7 @@ el("libraryClearBtn").addEventListener("click", () => {
 
 el("libraryBackBtn").addEventListener("click", () => {
   el("libraryPicker").hidden = true;
-  el("startEntry").hidden = false;
+  el("startChoice").hidden = false;
 });
 
 el("libraryRecheckBtn").addEventListener("click", () => loadLibrary());
@@ -857,7 +871,8 @@ el("newDocBtn").addEventListener("click", () => {
   el("doc").hidden = true;
   el("acervoGate").hidden = true;
   el("coldstart").hidden = false;
-  el("startEntry").hidden = false;
+  el("startChoice").hidden = false;
+  el("startEntry").hidden = true;
   el("libraryPicker").hidden = true;
   el("manualConfirm").hidden = true;
   el("prereqConfirm").hidden = true;

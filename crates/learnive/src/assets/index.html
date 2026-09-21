@@ -117,21 +117,44 @@
     </aside>
 
     <div class="main-container">
-      <!-- Cold start (§6.1): a single generic question. The objective
-           `propose_objective` derives is used internally (it anchors every
-           future generation decision, §5) but is no longer shown for
-           up-front editing — it stays revisable later, from within the
-           document (§5 versioned revision), not gated here. -->
+      <!-- Cold start (§6.1): the very first question is which of the two
+           acquisition paths applies — the learner already has specific
+           PDFs in mind (jump straight to picking from the local library)
+           or not (describe a topic, let the app propose a reading list).
+           The objective `propose_objective` derives (proposed path only) is
+           used internally (it anchors every future generation decision,
+           §5) but is no longer shown for up-front editing — it stays
+           revisable later, from within the document (§5 versioned
+           revision), not gated here. -->
       <section id="coldstart" class="card">
-        <h1 data-i18n="coldstart.title">What are we learning?</h1>
-        <!-- Both entry paths (model-proposed vs. picked-from-library) hide
-             and show together — #startEntry is the unit the flow toggles. -->
-        <div id="startEntry">
+        <!-- The entry choice. Every other view in this section hides and
+             shows on its own — this one is the very first thing a learner
+             sees, before either acquisition path has been picked. -->
+        <div id="startChoice">
+          <h1 data-i18n="coldstart.choiceTitle">Do you already know which PDFs we'll use?</h1>
+          <p class="muted" data-i18n="coldstart.choiceHint">
+            Yes: pick the books and articles straight from your own library.
+            No: describe what you want to learn instead, and the app works
+            out a reading list for you.
+          </p>
+          <p class="coldstart-choice-actions">
+            <button type="button" id="startChoiceYesBtn" data-i18n="coldstart.yes">Yes</button>
+            <button type="button" id="startChoiceNoBtn" data-i18n="coldstart.no">No</button>
+          </p>
+        </div>
+
+        <!-- The model-proposed path ("No"): a single generic question. -->
+        <div id="startEntry" hidden>
+          <h1 data-i18n="coldstart.title">What are we learning?</h1>
+          <p class="muted" data-i18n="coldstart.hint">
+            Describe what you want to learn, in your own words — the app
+            turns it into an objective and proposes a reading list from it.
+          </p>
           <form id="startForm">
             <textarea id="topic" rows="3" autofocus></textarea>
-            <p><button type="submit" data-i18n="start.button">Start</button></p>
+            <p><button type="submit" data-i18n="start.button">Generate reading list</button></p>
           </form>
-          <p><button type="button" id="manualStartBtn" data-i18n="manual.start">I already know what I want to learn</button></p>
+          <p><button type="button" id="startEntryBackBtn" data-i18n="coldstart.back">Back</button></p>
         </div>
 
         <!-- §S15/§S16 (unified 2026-08-19): the confirmation screen shown
@@ -145,7 +168,7 @@
              confirmed nodes verbatim, so what's confirmed here is
              guaranteed identical to what gets created. -->
         <div id="prereqConfirm" hidden>
-          <h2 data-i18n="outline.mainlineTitle">What you'll learn</h2>
+          <h1 data-i18n="outline.mainlineTitle">Reading list</h1>
           <p class="muted" data-i18n="prereq.hint">
             Mark what you already know as review or skip. What you asked for
             is always taught in full and can't be skipped.
@@ -157,11 +180,12 @@
           </p>
         </div>
 
-        <!-- Manual cold start (2026-09-09), screen 1 of 2: pick works
-             straight from the local library. Zero model calls anywhere in
-             this path — the outline is exactly what the learner picks. -->
+        <!-- Manual cold start (2026-09-09), screen 1 of 2 ("Yes"): pick
+             works straight from the local library. Zero model calls
+             anywhere in this path — the outline is exactly what the
+             learner picks. -->
         <div id="libraryPicker" hidden>
-          <h2 data-i18n="manual.libraryTitle">Your library</h2>
+          <h1 data-i18n="manual.libraryTitle">Reading list</h1>
           <p class="muted" data-i18n="manual.libraryHint">Choose the books and articles for this curriculum.</p>
           <p id="libraryPickerPath" class="muted acervo-library-path"></p>
           <div class="library-toolbar">
@@ -183,7 +207,7 @@
              position IS the prerequisite chain, so the arrows reorder the
              curriculum. -->
         <div id="manualConfirm" hidden>
-          <h2 data-i18n="manual.confirmTitle">Your reading list</h2>
+          <h1 data-i18n="manual.confirmTitle">Reading list</h1>
           <p class="muted" data-i18n="manual.confirmHint">The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.</p>
           <ul id="manualTree" class="prereq-tree"></ul>
           <p>
@@ -231,7 +255,7 @@
            in acervo.js. -->
       <section id="acervoGate" hidden class="card" aria-label="Library check">
         <div id="acervoReportView">
-          <h1 data-i18n="acervo.title">Library check</h1>
+          <h1 data-i18n="acervo.title">Library</h1>
           <p class="muted" data-i18n="acervo.hint">
             What your reading list needs, matched against your local
             library.
@@ -247,7 +271,7 @@
         </div>
 
         <div id="acervoMatchesView" hidden>
-          <h1 data-i18n="acervo.matches.title">Match PDFs to your reading list</h1>
+          <h1 data-i18n="acervo.matches.title">Library</h1>
           <p class="muted" data-i18n="acervo.matches.hint">
             Some items match more than one file in your library, or a
             library file matches none of them yet.

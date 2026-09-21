@@ -22,13 +22,19 @@ const I18N = {
     "source.close": "Close",
     "docs.backOutline": "Back to outline",
     // Cold start / objective
+    "coldstart.choiceTitle": "Do you already know which PDFs we'll use?",
+    "coldstart.choiceHint":
+      "Yes: pick the books and articles straight from your own library. No: describe what you want to learn instead, and the app works out a reading list for you.",
+    "coldstart.yes": "Yes",
+    "coldstart.no": "No",
     "coldstart.title": "What are we learning?",
-    "start.button": "Start",
+    "coldstart.hint":
+      "Describe what you want to learn, in your own words — the app turns it into an objective and proposes a reading list from it.",
+    "start.button": "Generate reading list",
     "coldstart.back": "Back",
     // Manual cold start: the learner picks works from the local library
     // instead of the model proposing a list. Zero model calls in this path.
-    "manual.start": "I already know what I want to learn",
-    "manual.libraryTitle": "Your library",
+    "manual.libraryTitle": "Reading list",
     "manual.libraryHint": "Choose the books and articles for this curriculum.",
     "manual.loading": "Reading the library…",
     "manual.scanning": "Reading the library… {0} of {1}",
@@ -45,14 +51,14 @@ const I18N = {
     "manual.continue": "Continue",
     "manual.tocUnavailable": "no chapter list, whole work only",
     "manual.tocUnusable": "too long to use without a chapter list",
-    "manual.confirmTitle": "Your reading list",
+    "manual.confirmTitle": "Reading list",
     "manual.confirmHint":
       "The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.",
     "manual.up": "Move up",
     "manual.down": "Move down",
     // Unified outline confirmation (§S15/§S16): one tree, prerequisites
     // first, ending in the requested topic's own breakdown (locked).
-    "outline.mainlineTitle": "What you'll learn",
+    "outline.mainlineTitle": "Reading list",
     "prereq.hint":
       "Mark what you already know as review or skip. What you asked for is always taught in full and can't be skipped.",
     "prereq.confirm": "Confirm",
@@ -118,7 +124,7 @@ const I18N = {
     // Acervo gate / PDF matching / TOC confirmation (§11.1, S27f) — an
     // on-demand check, never a blocking gate in this slice.
     "acervo.openBtn": "Library check",
-    "acervo.title": "Library check",
+    "acervo.title": "Library",
     "acervo.hint": "What your reading list needs, matched against your local library.",
     "acervo.close": "Close",
     "acervo.recheck": "Re-check",
@@ -146,7 +152,7 @@ const I18N = {
     "acervo.extractorFailed":
       "This file has a text layer we couldn't read \u2014 the book is fine, our extractor isn't. Re-downloading won't help.",
     "acervo.reviewMatch": "Resolve match",
-    "acervo.matches.title": "Match PDFs to your reading list",
+    "acervo.matches.title": "Library",
     "acervo.matches.hint":
       "Some items match more than one file in your library, or a library file matches none of them yet.",
     "acervo.matches.back": "Back",
@@ -227,11 +233,17 @@ const I18N = {
     "source.title": "Fonte",
     "source.close": "Fechar",
     "docs.backOutline": "Voltar ao sumário",
-    "coldstart.title": "O que vamos aprender?",
-    "start.button": "Começar",
+    "coldstart.choiceTitle": "Você já sabe quais PDFs vamos usar?",
+    "coldstart.choiceHint":
+      "Sim: escolha os livros e artigos direto da sua biblioteca. Não: descreva o que você quer aprender, e a aplicação monta uma lista de leitura pra você.",
+    "coldstart.yes": "Sim",
+    "coldstart.no": "Não",
+    "coldstart.title": "O que você quer aprender?",
+    "coldstart.hint":
+      "Descreva o que você quer aprender, com suas próprias palavras — a aplicação transforma isso num objetivo e propõe uma lista de leitura a partir dele.",
+    "start.button": "Gerar lista de leitura",
     "coldstart.back": "Voltar",
-    "manual.start": "Eu já sei o que quero aprender",
-    "manual.libraryTitle": "Sua biblioteca",
+    "manual.libraryTitle": "Lista de leitura",
     "manual.libraryHint": "Escolha os livros e artigos deste currículo.",
     "manual.loading": "Lendo a biblioteca…",
     "manual.scanning": "Lendo a biblioteca… {0} de {1}",
@@ -248,12 +260,12 @@ const I18N = {
     "manual.continue": "Continuar",
     "manual.tocUnavailable": "sem lista de capítulos, apenas a obra inteira",
     "manual.tocUnusable": "longo demais para usar sem lista de capítulos",
-    "manual.confirmTitle": "Sua lista de leitura",
+    "manual.confirmTitle": "Lista de leitura",
     "manual.confirmHint":
       "A ordem aqui é a ordem em que você vai estudar. Use as setas para reordenar e marque o que já sabe como revisar ou pular.",
     "manual.up": "Mover para cima",
     "manual.down": "Mover para baixo",
-    "outline.mainlineTitle": "O que você vai aprender",
+    "outline.mainlineTitle": "Lista de leitura",
     "prereq.hint":
       "Marque o que já sabe como revisar ou pular. O que você pediu é sempre ensinado por completo e não pode ser pulado.",
     "prereq.confirm": "Confirmar",
@@ -309,7 +321,7 @@ const I18N = {
     // (§11.1, S27f) — verificação sob demanda, nunca um portão bloqueante
     // nesta fatia.
     "acervo.openBtn": "Checar acervo",
-    "acervo.title": "Checar acervo",
+    "acervo.title": "Biblioteca",
     "acervo.hint":
       "O que sua lista de leitura precisa, comparado com sua biblioteca local.",
     "acervo.close": "Fechar",
@@ -338,7 +350,7 @@ const I18N = {
     "acervo.extractorFailed":
       "Este arquivo tem camada de texto que não conseguimos ler \u2014 o livro está certo, o extrator é que falhou. Baixar de novo não resolve.",
     "acervo.reviewMatch": "Resolver correspondência",
-    "acervo.matches.title": "Casar PDFs com sua lista de leitura",
+    "acervo.matches.title": "Biblioteca",
     "acervo.matches.hint":
       "Alguns itens correspondem a mais de um arquivo do acervo, ou um arquivo do acervo ainda não corresponde a nenhum deles.",
     "acervo.matches.back": "Voltar",
