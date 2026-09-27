@@ -1,14 +1,9 @@
 alternate mode when no chapters
-go back to model citations
 sipser: sections as chapters
 prefer exercises extracted from source
 better annotation: google docs style
-manual opening of split view pdf viewer
 prefer owned books for reading list generation
-bug: creating note scrolls to top
 reload mid generation restarts generation
-close reader button appearing when closed
-check library at start of session
 configurable data dir
 change default data dir to sensible (OS specific) appdata dir
 reloading mid acervo checking breaks app

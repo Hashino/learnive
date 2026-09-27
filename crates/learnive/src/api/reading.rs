@@ -3659,6 +3659,7 @@ mod tests {
             data_dir: Arc::from(data_dir.to_string_lossy().as_ref()),
             embedder: None,
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
+            generations: Default::default(),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
         (dir, state)

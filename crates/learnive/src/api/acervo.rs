@@ -691,6 +691,7 @@ mod tests {
             // `index: Missing` — and shouldn't.
             embedder: Some(Arc::new(crate::retrieval::Embedder::Mock)),
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
+            generations: Default::default(),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
         (dir, state)

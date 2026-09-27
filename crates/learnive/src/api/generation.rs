@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::cold_start::outline_view;
 use super::grading::sse_frame;
 use super::reading::due_review_view;
@@ -31,6 +33,120 @@ const MAX_MOVES_PER_NODE: usize = 4;
 
 /// Verbatim §14 context budget for the move loop's own node tail (~1.5k chars).
 pub(super) const NODE_TAIL_BUDGET: usize = 1500;
+
+/// One generation per document at a time (bug reported live 2026-09-27:
+/// "reloading the page at some parts of the document generation process
+/// leaves the user with a broken document"). Since 2026-09-10 the
+/// generation worker deliberately outlives the tab that started it, so a
+/// reload used to start a SECOND worker next to the first — reproduced:
+/// reloaded mid chapter-split, both workers split the chapter (4 extra
+/// outline items) and each wrote an `explain` into the same node, leaving
+/// it with two explanations, no exercise and no way to continue.
+///
+/// A `/generate` that finds a worker already running for its document
+/// either ATTACHES to it — same node (the requested id, or the node the
+/// worker resolved to after a chapter redirect): it gets every frame the
+/// worker has sent so far, then the live ones — or WAITS for it to finish
+/// and then runs normally (a different node: running both at once is the
+/// exact race that corrupts the outline). Keep-alives flow either way.
+#[derive(Default)]
+pub struct Generations {
+    inflight: std::sync::Mutex<std::collections::HashMap<String, Arc<InFlight>>>,
+}
+
+pub struct InFlight {
+    requested: String,
+    state: std::sync::Mutex<FlightState>,
+    done_tx: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Default)]
+struct FlightState {
+    /// The node the worker actually generates, once `prepare` resolved it
+    /// (a chapter request redirects into its first child).
+    target: Option<String>,
+    /// Every frame sent so far, replayed to a late attacher so it renders
+    /// the move from its first token, like the tab that started it.
+    history: Vec<Bytes>,
+    subscribers: Vec<tokio::sync::mpsc::UnboundedSender<Bytes>>,
+}
+
+enum Joined {
+    Start(Arc<InFlight>),
+    Attached,
+    Busy(tokio::sync::watch::Receiver<bool>),
+}
+
+impl Generations {
+    fn join(
+        &self,
+        doc_id: &str,
+        item_id: &str,
+        sub: tokio::sync::mpsc::UnboundedSender<Bytes>,
+    ) -> Joined {
+        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = map.get(doc_id) {
+            let mut st = flight.state.lock().unwrap_or_else(|e| e.into_inner());
+            if flight.requested == item_id || st.target.as_deref() == Some(item_id) {
+                for frame in &st.history {
+                    let _ = sub.send(frame.clone());
+                }
+                st.subscribers.push(sub);
+                return Joined::Attached;
+            }
+            return Joined::Busy(flight.done_tx.subscribe());
+        }
+        let (done_tx, _) = tokio::sync::watch::channel(false);
+        let flight = Arc::new(InFlight {
+            requested: item_id.to_string(),
+            state: std::sync::Mutex::new(FlightState {
+                subscribers: vec![sub],
+                ..Default::default()
+            }),
+            done_tx,
+        });
+        map.insert(doc_id.to_string(), flight.clone());
+        Joined::Start(flight)
+    }
+
+    /// Unregisters the flight and ends every attached stream. Map lock is
+    /// taken before the state lock, same order as [`Self::join`].
+    fn finish(&self, doc_id: &str, flight: &Arc<InFlight>) {
+        let mut map = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(doc_id).is_some_and(|f| Arc::ptr_eq(f, flight)) {
+            map.remove(doc_id);
+        }
+        flight
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .subscribers
+            .clear();
+        drop(map);
+        let _ = flight.done_tx.send(true);
+    }
+}
+
+impl InFlight {
+    fn set_target(&self, node_id: &str) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).target = Some(node_id.to_string());
+    }
+}
+
+/// The worker's frame sink: records each frame for late attachers and
+/// fans it out to every attached stream (a disconnected one just drops
+/// out). Same `send` shape as the channel it replaced, so the worker body
+/// reads unchanged.
+struct FrameSink(Arc<InFlight>);
+
+impl FrameSink {
+    fn send(&self, frame: Bytes) -> Result<(), ()> {
+        let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.history.push(frame.clone());
+        st.subscribers.retain(|s| s.send(frame.clone()).is_ok());
+        Ok(())
+    }
+}
 
 /// Streams the SSE format over a POST — one real move per request as of
 /// §S18 (module docs above). Events: `token` (prose — both streamed moves
@@ -90,7 +206,38 @@ pub async fn generate_node(
         // lands in the event log + the progressive node write (§S6), so the
         // next attempt resumes instead of re-paying (§14). A crashed task
         // surfaces as a normal `error` frame via the join below.
-        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let mut keep_alive = tokio::time::interval(std::time::Duration::from_secs(15));
+        keep_alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let (sub_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        // One generation per document (`Generations`): start one, attach to
+        // the running one for this node, or wait out a running one for
+        // another node — with keep-alives while waiting.
+        let flight = loop {
+            match state.generations.join(&doc_id, &item_id, sub_tx.clone()) {
+                Joined::Start(flight) => break Some(flight),
+                Joined::Attached => break None,
+                Joined::Busy(mut done_rx) => loop {
+                    // Read into a plain bool: a `watch` borrow guard is not
+                    // `Send` and must not live across the await below.
+                    let finished = *done_rx.borrow_and_update();
+                    if finished {
+                        break;
+                    }
+                    tokio::select! {
+                        changed = done_rx.changed() => if changed.is_err() { break },
+                        _ = keep_alive.tick() => {
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keep-alive\n\n"));
+                        }
+                    }
+                },
+            }
+        };
+        drop(sub_tx);
+        if let Some(flight) = flight {
+        let frame_tx = FrameSink(flight.clone());
+        let registry_state = state.clone();
+        let registry_doc = doc_id.clone();
+        let worker_flight = flight.clone();
         let worker = tokio::spawn(async move {
         let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let prepare_state = state.clone();
@@ -128,6 +275,9 @@ pub async fn generate_node(
                 }
             }
         };
+        // From here on a reload asking for the node `prepare` resolved to
+        // (a chapter request redirects into its child) attaches here.
+        worker_flight.set_target(&prep.node_id);
 
         let ai = state.ai.load_full();
         let event_log = match state.store.event_log(&doc_id) {
@@ -423,8 +573,17 @@ pub async fn generate_node(
         // 15s of silence. The channel closing (worker returned) ends the
         // stream; a worker PANIC surfaces as a normal `error` frame instead
         // of a dead connection.
-        let mut keep_alive = tokio::time::interval(std::time::Duration::from_secs(15));
-        keep_alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Supervisor, spawned so it runs even after every tab is gone: a
+        // crashed worker still reaches attached streams as an `error`
+        // frame, and the flight is always unregistered.
+        tokio::spawn(async move {
+            if let Err(e) = worker.await {
+                let _ = FrameSink(flight.clone())
+                    .send(sse_frame("error", &format!("generation task crashed: {e}")));
+            }
+            registry_state.generations.finish(&registry_doc, &flight);
+        });
+        }
         loop {
             tokio::select! {
                 frame = frame_rx.recv() => match frame {
@@ -435,9 +594,6 @@ pub async fn generate_node(
                     yield Ok(Bytes::from_static(b": keep-alive\n\n"));
                 }
             }
-        }
-        if let Err(e) = worker.await {
-            yield Ok(sse_frame("error", &format!("generation task crashed: {e}")));
         }
     };
 
@@ -898,4 +1054,96 @@ fn sandbox_frame_response(page: String) -> Response {
         )
         .body(Body::from(page))
         .expect("valid frame response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn frame(s: &'static str) -> Bytes {
+        Bytes::from_static(s.as_bytes())
+    }
+
+    /// A reload asking for the node already being generated attaches: it
+    /// gets every frame sent so far, then the live ones, and its stream
+    /// ends when the worker does.
+    #[tokio::test]
+    async fn same_node_attaches_with_replay_then_live() {
+        let reg = Generations::default();
+        let (tx1, mut rx1) = unbounded_channel();
+        let Joined::Start(flight) = reg.join("doc", "n1", tx1) else {
+            panic!("first request starts");
+        };
+        let sink = FrameSink(flight.clone());
+        sink.send(frame("a")).unwrap();
+
+        let (tx2, mut rx2) = unbounded_channel();
+        assert!(matches!(reg.join("doc", "n1", tx2), Joined::Attached));
+        sink.send(frame("b")).unwrap();
+
+        assert_eq!(rx2.recv().await.unwrap(), frame("a"), "replayed");
+        assert_eq!(rx2.recv().await.unwrap(), frame("b"), "live");
+        assert_eq!(rx1.recv().await.unwrap(), frame("a"));
+        assert_eq!(rx1.recv().await.unwrap(), frame("b"));
+
+        reg.finish("doc", &flight);
+        assert!(rx1.recv().await.is_none(), "stream ends with the worker");
+        assert!(rx2.recv().await.is_none());
+    }
+
+    /// A chapter request redirects into its child: once the worker set its
+    /// target, a request for the CHILD attaches too.
+    #[test]
+    fn resolved_target_attaches() {
+        let reg = Generations::default();
+        let (tx, _rx) = unbounded_channel();
+        let Joined::Start(flight) = reg.join("doc", "chapter", tx) else {
+            panic!()
+        };
+        let (tx, _rx2) = unbounded_channel();
+        assert!(matches!(reg.join("doc", "child", tx), Joined::Busy(_)));
+        flight.set_target("child");
+        let (tx, _rx3) = unbounded_channel();
+        assert!(matches!(reg.join("doc", "child", tx), Joined::Attached));
+    }
+
+    /// A different node waits for the running one; after it finishes the
+    /// document is free and the waiter starts its own; other documents are
+    /// never blocked.
+    #[tokio::test]
+    async fn other_node_waits_until_the_flight_finishes() {
+        let reg = Generations::default();
+        let (tx, _rx) = unbounded_channel();
+        let Joined::Start(flight) = reg.join("doc", "n1", tx) else {
+            panic!()
+        };
+        let (tx, _rx2) = unbounded_channel();
+        let Joined::Busy(mut done) = reg.join("doc", "n2", tx) else {
+            panic!("different node must wait");
+        };
+        let (tx, _rx3) = unbounded_channel();
+        assert!(matches!(reg.join("other-doc", "n9", tx), Joined::Start(_)));
+
+        reg.finish("doc", &flight);
+        done.changed().await.unwrap();
+        assert!(*done.borrow());
+        let (tx, _rx4) = unbounded_channel();
+        assert!(matches!(reg.join("doc", "n2", tx), Joined::Start(_)));
+    }
+
+    /// A tab that went away just drops out of the fan-out; the worker's
+    /// sends keep succeeding for everyone else.
+    #[test]
+    fn a_closed_subscriber_drops_out() {
+        let reg = Generations::default();
+        let (tx, rx) = unbounded_channel();
+        let Joined::Start(flight) = reg.join("doc", "n1", tx) else {
+            panic!()
+        };
+        drop(rx);
+        let sink = FrameSink(flight.clone());
+        assert!(sink.send(frame("x")).is_ok());
+        assert!(flight.state.lock().unwrap().subscribers.is_empty());
+    }
 }

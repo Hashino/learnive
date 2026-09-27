@@ -71,6 +71,9 @@ pub struct AppState {
     /// split writes bump the outline constantly, and folding it into the key
     /// (S29's design) made every resolution re-validate the whole library.
     /// Validation verdicts are cached; I/O errors are not (nothing to cache).
+    /// One generation per document at a time — see
+    /// [`crate::api::Generations`].
+    pub generations: Arc<crate::api::Generations>,
     pub acervo_cache: Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<(u64, u64), crate::source::acervo::AcervoReport>,
@@ -133,6 +136,7 @@ impl AppState {
             data_dir: Arc::from(data_dir.as_str()),
             embedder,
             bibliography_client: Arc::new(crate::source::BibliographyClient::new()),
+            generations: Default::default(),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
