@@ -47,6 +47,7 @@ pub mod toc;
 #[cfg(test)]
 mod toc_bench;
 pub mod toc_confirm;
+pub mod toc_tree;
 
 pub use acervo::{
     AcervoReport, CachedChunk, CandidateMatch, ExpectedItem, IdentityCheck, IndexCheck, ItemReport,

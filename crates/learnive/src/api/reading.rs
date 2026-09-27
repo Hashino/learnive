@@ -144,18 +144,6 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
         .expect("valid stream response"))
 }
 
-/// One chapter the manual path can offer for a book.
-#[derive(serde::Serialize)]
-pub struct LibraryTocEntryResp {
-    /// Printed chapter/section number split off the bookmark title
-    /// (`toc_confirm::split_printed_number`) when the embedded outline
-    /// carries one — `match_chapter` tries it first, so a chapter picked
-    /// here resolves to its page without any name-fuzzying.
-    pub number: Option<String>,
-    pub title: String,
-    pub page: Option<usize>,
-}
-
 #[derive(serde::Serialize)]
 pub struct LibraryTocResp {
     pub hash: String,
@@ -167,7 +155,11 @@ pub struct LibraryTocResp {
     /// with none of the three offers no chapter picking (`entries: []`),
     /// and the client falls back to whole-work selection.
     pub source: &'static str,
-    pub entries: Vec<LibraryTocEntryResp>,
+    /// The book's table of contents as a TREE with each entry's own page
+    /// range (`source::toc_tree`, 2026-09-27) — the manual picker mirrors
+    /// the book's real Part → Chapter → section structure instead of one
+    /// flat list.
+    pub entries: Vec<source::toc_tree::TocNode>,
 }
 
 /// The chapter list one library book offers the manual cold start's second
@@ -211,40 +203,26 @@ pub async fn library_toc(
         let (hash2, pdf) = source::read_pdf_cached(&path, &cache_dir)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         let toc_confirm = source::toc_confirm::TocConfirmStore::open(&data_dir).map_err(io)?;
+        let page_count = pdf.pages.page_count;
         if let Some(confirmed) = toc_confirm.get(&hash2) {
             return Ok(LibraryTocResp {
                 hash: hash2,
                 filename,
                 source: "confirmed",
-                entries: confirmed
-                    .entries
-                    .into_iter()
-                    .map(|e| LibraryTocEntryResp {
-                        number: e.number,
-                        title: e.title,
-                        page: e.page,
-                    })
-                    .collect(),
+                entries: source::toc_tree::tree_from_flat(&confirmed.entries, page_count),
             });
         }
-        let mut entries = Vec::new();
-        if !pdf.outline.is_empty() {
-            flatten_library_outline(&pdf.outline, &mut entries);
-        }
+        let mut entries = source::toc_tree::tree_from_outline(&pdf.outline, page_count);
         if entries.is_empty() {
             // No bookmarks either — the book's own chapter openers, derived
             // and verified from the cached text (S36). This is the tier
             // that makes a bookmark-less scan like K&R pickable per
             // chapter; derivation is pure and zero-token over the cache,
             // so it runs inline here without any confirmation step.
-            entries = source::acervo::derive_chapter_toc(&pdf.page_texts)
-                .into_iter()
-                .map(|e| LibraryTocEntryResp {
-                    number: e.number,
-                    title: e.title,
-                    page: e.page,
-                })
-                .collect();
+            entries = source::toc_tree::tree_from_flat(
+                &source::acervo::derive_chapter_toc(&pdf.page_texts),
+                page_count,
+            );
         }
         Ok(LibraryTocResp {
             hash: hash2,
@@ -262,73 +240,6 @@ pub async fn library_toc(
     .await
     .map_err(|e| ApiError::Internal(format!("library TOC task panicked: {e}")))?;
     Ok(Json(result?))
-}
-
-/// The embedded-outline flatten [`get_acervo_toc`] does for the document TOC
-/// screen, plus `split_printed_number` so each entry carries its printed
-/// number separately. All depths, document order — the acervo editor's own
-/// flatten made "flat chapter list" the established shape. Front matter
-/// ([`is_front_matter`]) is dropped, though its children are still walked —
-/// a wrong drop here costs real content, so only the entry itself filters.
-fn flatten_library_outline(
-    entries: &[source::pdf::OutlineEntry],
-    out: &mut Vec<LibraryTocEntryResp>,
-) {
-    for e in entries {
-        let (number, title) = source::toc_confirm::split_printed_number(&e.title);
-        if !is_front_matter(&e.title) {
-            out.push(LibraryTocEntryResp {
-                number,
-                title,
-                page: Some(e.page),
-            });
-        }
-        flatten_library_outline(&e.children, out);
-    }
-}
-
-/// Front matter a real book carries in its outline but nobody studies as a
-/// chapter. The manual reading list lists every outline entry as a learnable
-/// row, so a real book (live: Axler's "About the Author", "Contents",
-/// "Acknowledgments", "Photo Credits", "Symbol Index"; Stewart's "Front
-/// matter", "To the student" — user's library, 2026-09-09) buries its actual
-/// chapters in page-matter. Zero-token by the §12.2 rule and deliberately
-/// conservative: an exact match on the normalized title, or a prefix from the
-/// short lead list — a miss costs one noisy row, a wrong drop costs a real
-/// chapter.
-fn is_front_matter(title: &str) -> bool {
-    let t = title.trim().to_lowercase();
-    let t = t.trim_end_matches(':');
-    matches!(
-        t,
-        "contents"
-            | "table of contents"
-            | "acknowledgments"
-            | "acknowledgements"
-            | "index"
-            | "cover"
-            | "title page"
-            | "copyright"
-            // Observed in Stewart's live outline (user's library, 2026-09-09).
-            | "front matter"
-            | "to the student"
-            | "answers"
-            | "answers to odd-numbered exercises"
-            | "answers to selected exercises"
-            | "answer key"
-            // Observed at the tail of Axler's live outline (2026-09-09):
-            // reference pages after the last real chapter.
-            | "photo credits"
-            | "credits"
-            | "symbol index"
-            | "subject index"
-            | "name index"
-    ) || t.starts_with("preface")
-        || t.starts_with("foreword")
-        || t.starts_with("about the")
-        || t.starts_with("about this")
-        || t.starts_with("colophon")
-        || t.starts_with("index of")
 }
 
 /// Meta companion to [`get_library_pdf`] (S27n): title/authors for the
@@ -942,6 +853,7 @@ pub async fn ask_question(
                     source: None,
                     chapter_number: None,
                     resolved_page: None,
+                    resolved_end_page: None,
                 });
                 serde_json::to_string(&outline).map_err(|e| e.to_string())
             })?;
@@ -1425,6 +1337,7 @@ async fn maybe_materialize_review(
         source: None,
         chapter_number: None,
         resolved_page: None,
+        resolved_end_page: None,
     };
     let persisted = item.clone();
     state
@@ -2497,7 +2410,17 @@ async fn resolve_outline_structure(
     // (book id, [(chapter id, resolved physical page)]) — computed here,
     // outside the outline-mutating closure below, since resolution needs
     // blocking file reads this closure (locked, synchronous) must not do.
-    type ChapterResolutions = Vec<(String, Vec<(String, Option<usize>)>)>;
+    // (book id, [(chapter id, first page, last page, the book's own
+    // sections under it — grafted as children, TOC tree 2026-09-27)])
+    type ChapterResolutions = Vec<(
+        String,
+        Vec<(
+            String,
+            Option<usize>,
+            Option<usize>,
+            Vec<source::toc_tree::TocNode>,
+        )>,
+    )>;
     let mut resolutions: ChapterResolutions = Vec::new();
     for book in &needs_chapter_match {
         let Some(ptr) = &book.source else { continue };
@@ -2563,23 +2486,46 @@ async fn resolve_outline_structure(
                 .items
                 .iter()
                 .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
-                .map(|chapter| (chapter.id.clone(), None))
+                .map(|chapter| (chapter.id.clone(), None, None, Vec::new()))
                 .collect();
             resolutions.push((book.id.clone(), chapters));
             continue;
         }
-        let chapters: Vec<(String, Option<usize>)> = outline
+        // The same TOC as a tree with page ranges: a matched chapter takes
+        // its exact range, and — when the book nests sections under it —
+        // those sections, so the outline is never flatter than the book.
+        let tree = if !pdf.outline.is_empty() {
+            source::toc_tree::tree_from_outline(&pdf.outline, pdf.pages.page_count)
+        } else {
+            source::toc_tree::tree_from_flat(&entries, pdf.pages.page_count)
+        };
+        let tree_nodes = source::toc_tree::flatten(&tree);
+        let chapters: Vec<_> = outline
             .items
             .iter()
             .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
             .map(|chapter| {
-                let page = source::match_chapter(
+                let hit = source::match_chapter(
                     &entries,
                     chapter.chapter_number.as_deref(),
                     &chapter.title,
-                )
-                .and_then(|hit| hit.page);
-                (chapter.id.clone(), page)
+                );
+                let page = hit.and_then(|h| h.page);
+                let node = hit.and_then(|h| {
+                    tree_nodes
+                        .iter()
+                        .find(|n| n.page == h.page && (n.number == h.number || n.title == h.title))
+                        .copied()
+                });
+                let end = node.and_then(|n| n.end_page);
+                // A review-mode chapter is a short pass over the whole
+                // chapter: its sections are not materialized (same rule as
+                // at confirmation).
+                let sections = match node {
+                    Some(n) if chapter.mode == NodeMode::Learn => n.children.clone(),
+                    _ => Vec::new(),
+                };
+                (chapter.id.clone(), page, end, sections)
             })
             .collect();
         resolutions.push((book.id.clone(), chapters));
@@ -2593,12 +2539,29 @@ async fn resolve_outline_structure(
                     if let Some(book_item) = outline.items.iter_mut().find(|i| &i.id == book_id) {
                         book_item.expansion = ExpansionState::Expanded;
                     }
-                    for (chapter_id, page) in chapters {
+                    for (chapter_id, page, end, sections) in chapters {
                         let Some(page) = page else { continue };
-                        if let Some(chapter_item) =
+                        let Some(chapter_item) =
                             outline.items.iter_mut().find(|i| &i.id == chapter_id)
+                        else {
+                            continue;
+                        };
+                        chapter_item.resolved_page = Some(*page);
+                        chapter_item.resolved_end_page = *end;
+                        let gate = chapter_item.prerequisites.clone();
+                        let mut grafted = Vec::new();
+                        if let Some(exit) =
+                            graft_toc_sections(sections, chapter_id, gate, &mut grafted)
                         {
-                            chapter_item.resolved_page = Some(*page);
+                            // The chapter is now a container: it is reached
+                            // once its last section is (same shape as a
+                            // confirmed decomposition, `materialize_outline_node`).
+                            if let Some(chapter_item) =
+                                outline.items.iter_mut().find(|i| &i.id == chapter_id)
+                            {
+                                chapter_item.prerequisites = vec![exit];
+                            }
+                            outline.items.extend(grafted);
                         }
                     }
                 }
@@ -2607,6 +2570,45 @@ async fn resolve_outline_structure(
             .map_err(|e| format!("could not persist chapter resolution: {e}"))?;
     }
     Ok(())
+}
+
+/// Materializes a matched chapter's own sections (TOC tree, 2026-09-27) as
+/// `Chapter` children with their exact pages, chained in book order the same
+/// way `cold_start::materialize_outline_node` chains a confirmed tree: each
+/// section gated on the one before it, a section with sub-sections reached
+/// once its last sub-section is. Exercise-type sections are left out — the
+/// proposed path has no selector at this point, and "skip" is their default
+/// (user decision). Returns the id the parent chapter should now gate on,
+/// or `None` when nothing was grafted.
+fn graft_toc_sections(
+    sections: &[source::toc_tree::TocNode],
+    parent_id: &str,
+    incoming_gate: Vec<String>,
+    out: &mut Vec<OutlineItem>,
+) -> Option<String> {
+    let mut gate = incoming_gate;
+    let mut last = None;
+    for s in sections.iter().filter(|s| !s.default_skip) {
+        let id = engine::new_id();
+        let child_exit = graft_toc_sections(&s.children, &id, gate.clone(), out);
+        out.push(OutlineItem {
+            id: id.clone(),
+            title: s.label.clone(),
+            prerequisites: child_exit.map(|e| vec![e]).unwrap_or(gate),
+            parent_id: Some(parent_id.to_string()),
+            mode: NodeMode::Learn,
+            source_doc_id: None,
+            item_type: OutlineItemType::Chapter,
+            expansion: ExpansionState::NotExpanded,
+            source: None,
+            chapter_number: s.number.clone(),
+            resolved_page: s.page,
+            resolved_end_page: s.end_page,
+        });
+        gate = vec![id.clone()];
+        last = Some(id);
+    }
+    last
 }
 
 /// Cheap filesystem fingerprint of every LIBRARY-side input
@@ -2778,15 +2780,22 @@ fn redirect_into_chapter_child(
     item: OutlineItem,
     already_generated: &dyn Fn(&str) -> bool,
 ) -> OutlineItem {
-    if item.item_type != OutlineItemType::Chapter || engine::is_generable(outline, &item) {
-        return item;
+    // Descends as deep as the book nests (TOC tree, 2026-09-27: Part →
+    // Chapter → section): a child that is itself a container is redirected
+    // into again, down to the first leaf not generated yet.
+    let mut item = item;
+    while item.item_type == OutlineItemType::Chapter && !engine::is_generable(outline, &item) {
+        let Some(child) = outline
+            .items
+            .iter()
+            .find(|i| i.parent_id.as_deref() == Some(item.id.as_str()) && !already_generated(&i.id))
+            .cloned()
+        else {
+            break;
+        };
+        item = child;
     }
-    outline
-        .items
-        .iter()
-        .find(|i| i.parent_id.as_deref() == Some(item.id.as_str()) && !already_generated(&i.id))
-        .cloned()
-        .unwrap_or(item)
+    item
 }
 
 /// Walks from `item` up through `parent_id` to the nearest `Chapter`
@@ -2838,6 +2847,12 @@ fn nearest_chapter<'a>(outline: &'a Outline, item: &OutlineItem) -> Option<&'a O
 fn chapter_page_range(outline: &Outline, item: &OutlineItem) -> Option<(usize, Option<usize>)> {
     let chapter = nearest_chapter(outline, item)?;
     let start = chapter.resolved_page?;
+    // The book's own table of contents said where this chapter/section
+    // ends (TOC tree, 2026-09-27) — exact, and the only reading that is
+    // right once sections nest under chapters.
+    if let Some(end) = chapter.resolved_end_page {
+        return Some((start, Some(end.max(start))));
+    }
     let end = outline
         .items
         .iter()
@@ -3158,6 +3173,7 @@ fn materialize_split_children(
             source: None,
             chapter_number: None,
             resolved_page: None,
+            resolved_end_page: None,
         });
         gate = Some(id);
     }
@@ -3658,6 +3674,71 @@ pub(super) async fn finalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A matched chapter's own sections are grafted as nested `Chapter`
+    /// items with their exact pages, chained in book order, the chapter
+    /// becoming a container reached through its last section; exercise-type
+    /// sections are left out (TOC tree, 2026-09-27).
+    #[test]
+    fn grafted_sections_nest_chain_and_skip_exercises() {
+        use source::toc_tree::TocNode;
+        let node = |n: Option<&str>, t: &str, p: usize, e: usize, kids: Vec<TocNode>| TocNode {
+            number: n.map(String::from),
+            title: t.to_string(),
+            label: match n {
+                Some(n) => format!("{n} {t}"),
+                None => t.to_string(),
+            },
+            page: Some(p),
+            end_page: Some(e),
+            default_skip: source::toc_tree::is_exercise_section(t),
+            children: kids,
+        };
+        let sections = vec![
+            node(
+                Some("1.1"),
+                "Finite Automata",
+                55,
+                70,
+                vec![
+                    node(None, "Formal definition", 55, 60, vec![]),
+                    node(None, "Examples", 61, 70, vec![]),
+                ],
+            ),
+            node(Some("1.2"), "Nondeterminism", 71, 117, vec![]),
+            node(None, "Exercises", 118, 124, vec![]),
+        ];
+        let mut out = Vec::new();
+        let exit = graft_toc_sections(&sections, "ch1", vec!["before".into()], &mut out)
+            .expect("something grafted");
+
+        assert!(
+            !out.iter().any(|i| i.title.contains("Exercises")),
+            "exercises left out"
+        );
+        assert_eq!(out.len(), 4, "1.1 + its two subsections + 1.2");
+        let by_title = |t: &str| out.iter().find(|i| i.title == t).unwrap();
+        let s11 = by_title("1.1 Finite Automata");
+        let def = by_title("Formal definition");
+        let ex = by_title("Examples");
+        let s12 = by_title("1.2 Nondeterminism");
+        assert_eq!(s11.parent_id.as_deref(), Some("ch1"));
+        assert_eq!(def.parent_id.as_deref(), Some(s11.id.as_str()));
+        assert_eq!(
+            (s12.resolved_page, s12.resolved_end_page),
+            (Some(71), Some(117))
+        );
+        // Chain: before -> Formal definition -> Examples -> (1.1 done) -> 1.2
+        assert_eq!(def.prerequisites, vec!["before".to_string()]);
+        assert_eq!(ex.prerequisites, vec![def.id.clone()]);
+        assert_eq!(
+            s11.prerequisites,
+            vec![ex.id.clone()],
+            "container reached via last child"
+        );
+        assert_eq!(s12.prerequisites, vec![s11.id.clone()]);
+        assert_eq!(exit, s12.id);
+    }
 
     #[test]
     fn bookmark_clamp_bounds_a_lone_materialized_chapter() {

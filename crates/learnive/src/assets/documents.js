@@ -515,14 +515,7 @@ el("libraryContinueBtn").addEventListener("click", async () => {
         const resp = await api("/api/library/" + w.hash + "/toc");
         if (!resp.ok) return;
         const data = await resp.json();
-        w.children = (data.entries || []).map((en, i) => ({
-          id: w.id + "c" + i,
-          title: en.title,
-          action: "learn",
-          item_type: "chapter",
-          chapter_number: en.number,
-          children: [],
-        }));
+        w.children = manualTocChildren(w.id, data.entries || []);
       } catch {
         // leave the work whole — a missing chapter tier never blocks
       }
@@ -530,6 +523,29 @@ el("libraryContinueBtn").addEventListener("click", async () => {
   );
   renderManualConfirm();
 });
+
+// The book's table of contents as nested `Chapter` rows (2026-09-27): the
+// reading list mirrors the book's real Part → Chapter → section tree — the
+// app only ever splits the deepest sections further into nodes, never
+// flattens or reshapes the book's structure (user decision). Each row
+// carries its pages, so the server places it without guessing by name, and
+// exercise-type sections ("Exercises", "Problems", "Selected Solutions")
+// start as "skip" — still in the tree, one click to study them.
+function manualTocChildren(parentId, entries) {
+  return entries.map((en, i) => {
+    const id = parentId + "c" + i;
+    return {
+      id,
+      title: en.label || en.title,
+      action: en.default_skip ? "skip" : "learn",
+      item_type: "chapter",
+      chapter_number: en.number,
+      page: en.page,
+      end_page: en.end_page,
+      children: manualTocChildren(id, en.children || []),
+    };
+  });
+}
 
 // One row of the manual confirmation tree: optional reorder arrows (works
 // only — chapters keep their book's order), then the same 3-segment
@@ -587,10 +603,21 @@ function manualRowHtml(node, withReorder) {
   );
 }
 
+// A chapter row and, nested below it, its own sections — any depth.
+function manualSubtreeHtml(node) {
+  const kids = node.children || [];
+  return (
+    "<li>" +
+    manualRowHtml(node, false) +
+    (kids.length ? "<ul>" + kids.map(manualSubtreeHtml).join("") + "</ul>" : "") +
+    "</li>"
+  );
+}
+
 function renderManualConfirm() {
   el("manualTree").innerHTML = manualTree
     .map((w) => {
-      const chapters = (w.children || []).map((c) => "<li>" + manualRowHtml(c, false) + "</li>");
+      const chapters = (w.children || []).map(manualSubtreeHtml);
       return (
         "<li>" +
         manualRowHtml(w, true) +
@@ -638,10 +665,21 @@ el("manualBackBtn").addEventListener("click", () => {
 // this normalization is the backstop.
 function manualNodeToPayload(n) {
   const hasChildren = (n.children || []).length > 0;
+  // A chapter left on "learn" whose sections were ALL set to skip would
+  // otherwise materialize childless — and a childless chapter is a
+  // generable leaf, so the whole chapter would be taught after all.
+  const allChildrenSkipped =
+    hasChildren && n.children.every((c) => manualLeafCount([manualNodeToPayload(c)]) === 0);
+  const action =
+    n.item_type === "book" && hasChildren
+      ? "learn"
+      : n.item_type === "chapter" && allChildrenSkipped
+        ? "skip"
+        : n.action;
   return {
     id: n.id,
     title: n.title,
-    action: n.item_type === "book" && hasChildren ? "learn" : n.action,
+    action,
     children: (n.children || []).map(manualNodeToPayload),
     item_type: n.item_type,
     bibliography: n.bibliography || undefined,
@@ -653,6 +691,10 @@ function manualNodeToPayload(n) {
     // chapter resolution ambiguous again). Chapters have no `hash`; it
     // drops out of the JSON as undefined.
     file_hash: n.hash || undefined,
+    // Where this chapter/section lives in the PDF, straight from the book's
+    // table of contents — the server places it with no name matching.
+    page: n.page || undefined,
+    end_page: n.end_page || undefined,
   };
 }
 

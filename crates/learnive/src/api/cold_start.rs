@@ -471,6 +471,25 @@ pub struct ConfirmedNode {
     /// despite the learner's explicit pick).
     #[serde(default)]
     file_hash: Option<String>,
+    /// First/last physical page of a `Chapter` the manual picker took
+    /// straight from the book's table of contents (2026-09-27, the TOC
+    /// tree): the pick already KNOWS where each chapter/section lives, so it
+    /// is written as `resolved_page`/`resolved_end_page` at creation instead
+    /// of being re-guessed by name later (a book has one "Exercises" per
+    /// chapter — name matching can't tell them apart).
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    end_page: Option<usize>,
+}
+
+/// True when every `Chapter` in a confirmed subtree already carries its
+/// page (the manual picker's tree) — its book then needs no placement pass.
+fn chapters_all_placed(nodes: &[ConfirmedNode]) -> bool {
+    nodes.iter().all(|n| {
+        (n.item_type != OutlineItemType::Chapter || n.page.is_some())
+            && chapters_all_placed(&n.children)
+    })
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -577,6 +596,7 @@ fn materialize_outline_node(
                 source: source_pointer_from(node),
                 chapter_number: node.chapter_number.clone(),
                 resolved_page: None,
+                resolved_end_page: None,
             });
             return known.node_id.clone();
         }
@@ -596,7 +616,8 @@ fn materialize_outline_node(
                 expansion: ExpansionState::NotExpanded,
                 source: source_pointer_from(node),
                 chapter_number: node.chapter_number.clone(),
-                resolved_page: None,
+                resolved_page: node.page,
+                resolved_end_page: node.end_page,
             });
         }
         PrereqAction::Learn => {
@@ -616,7 +637,13 @@ fn materialize_outline_node(
                 OutlineItemType::Book | OutlineItemType::Article
             ) && !node.children.is_empty()
             {
-                ExpansionState::ChaptersProposed
+                // A picked tree already knows every chapter's pages: the
+                // placement pass has nothing to resolve.
+                if chapters_all_placed(&node.children) {
+                    ExpansionState::Expanded
+                } else {
+                    ExpansionState::ChaptersProposed
+                }
             } else {
                 ExpansionState::NotExpanded
             };
@@ -638,7 +665,8 @@ fn materialize_outline_node(
                 expansion,
                 source: source_pointer_from(node),
                 chapter_number: node.chapter_number.clone(),
-                resolved_page: None,
+                resolved_page: node.page,
+                resolved_end_page: node.end_page,
             });
         }
     }
@@ -747,6 +775,8 @@ fn auto_confirm_learn(nodes: &[engine::ProposedOutlineNode]) -> Vec<ConfirmedNod
             verification: n.verification.clone(),
             chapter_number: n.chapter_number.clone(),
             file_hash: None,
+            page: None,
+            end_page: None,
         })
         .collect()
 }
@@ -1607,6 +1637,8 @@ mod tests {
             verification: None,
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         }
     }
 
@@ -1622,6 +1654,8 @@ mod tests {
             verification: None,
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         }
     }
 
@@ -1723,6 +1757,8 @@ mod tests {
             verification: None,
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1760,6 +1796,8 @@ mod tests {
             verification: None,
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1792,6 +1830,8 @@ mod tests {
             verification: None,
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         }];
         let mut items = Vec::new();
         let mut to_skip = Vec::new();
@@ -1838,6 +1878,8 @@ mod tests {
                 }),
                 chapter_number: None,
                 file_hash: None,
+                page: None,
+                end_page: None,
             }
         }
         let tree = vec![book("b1", "Pré-Cálculo"), book("b2", "Cálculo, Volume 1")];
@@ -1893,6 +1935,8 @@ mod tests {
                 verification: None,
                 chapter_number: number.map(String::from),
                 file_hash: None,
+                page: None,
+                end_page: None,
             }
         }
         let book = ConfirmedNode {
@@ -1919,6 +1963,8 @@ mod tests {
             }),
             chapter_number: None,
             file_hash: None,
+            page: None,
+            end_page: None,
         };
         let mut items = Vec::new();
         let mut to_skip = Vec::new();

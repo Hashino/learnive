@@ -293,9 +293,50 @@ fn read_info(doc: &lopdf::Document) -> (Option<String>, Option<String>) {
         info_dict
             .and_then(|d| d.get(name).ok())
             .and_then(|o| o.as_str().ok())
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .map(decode_pdf_text_string)
     };
     (field(b"Title"), field(b"Author"))
+}
+
+/// Decodes a PDF text string (PDF 32000 §7.9.2.2): UTF-16BE behind a
+/// `FE FF` byte-order mark (UTF-16LE behind `FF FE` in the wild), UTF-8
+/// behind `EF BB BF`, otherwise PDFDocEncoding — read here as Latin-1, which
+/// it matches on every printable ASCII/Latin-1 code point. Found live
+/// 2026-09-27: Sipser's `/Info` Title is UTF-16BE, and decoding it as UTF-8
+/// produced "��\0I\0n\0t…" — a garbled reading-list title and a document
+/// slug of "i-n-t-…".
+pub(crate) fn decode_pdf_text_string(bytes: &[u8]) -> String {
+    let utf16 = |be: bool| {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| {
+                if be {
+                    u16::from_be_bytes([c[0], c[1]])
+                } else {
+                    u16::from_le_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    let s = match bytes {
+        [0xFE, 0xFF, ..] => utf16(true),
+        [0xFF, 0xFE, ..] => utf16(false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => bytes.iter().map(|&b| b as char).collect(),
+        },
+    };
+    s.trim_matches(char::from(0)).to_string()
+}
+
+/// A cached `/Info` string written by the old UTF-8-only decoder from a
+/// UTF-16 source — NULs between the letters, replacement characters where
+/// the byte-order mark was. Such entries are re-read once.
+fn garbled_info(s: &Option<String>) -> bool {
+    s.as_deref()
+        .is_some_and(|s| s.contains('\u{0}') || s.starts_with('\u{FFFD}'))
 }
 
 /// Path-based variant of [`read_info`] for callers holding only a file path:
@@ -367,7 +408,10 @@ pub fn read_pdf_cached(
         // (with `meta_probed: true`), so no later validation reparses.
         // A PDF with no `/Info` at all probes once, records `meta_probed`
         // with `None`s, and never probes again.
-        if !cached.meta_probed {
+        if !cached.meta_probed
+            || garbled_info(&cached.meta_title)
+            || garbled_info(&cached.meta_author)
+        {
             let (title, author) = read_info_metadata(path);
             cached.meta_title = title;
             cached.meta_author = author;
@@ -679,6 +723,25 @@ fn to_alpha(n: i64, upper: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decodes_pdf_text_string_encodings() {
+        let mut be = vec![0xFE, 0xFF];
+        for u in "Introduction to the Theory".encode_utf16() {
+            be.extend_from_slice(&u.to_be_bytes());
+        }
+        assert_eq!(decode_pdf_text_string(&be), "Introduction to the Theory");
+        assert_eq!(decode_pdf_text_string(b"Plain ASCII"), "Plain ASCII");
+        assert_eq!(
+            decode_pdf_text_string(&[b'C', 0xE1, b'l']),
+            "C\u{e1}l",
+            "Latin-1 fallback"
+        );
+        assert!(garbled_info(&Some(
+            "\u{FFFD}\u{FFFD}\u{0}I\u{0}n".to_string()
+        )));
+        assert!(!garbled_info(&Some("Sipser".to_string())));
+    }
+
     use super::*;
     use lopdf::content::{Content, Operation};
     use lopdf::{Bookmark, Document, Object, ObjectId, Stream, dictionary};

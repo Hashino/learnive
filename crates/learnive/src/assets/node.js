@@ -647,6 +647,10 @@ async function streamMoveRequest(rec, id) {
         // later `/continue`/read-to-end/answer of this section must target
         // the id that actually has the node file.
         if (data) rec.nodeId = data;
+        // The node this move landed in may not exist in the page's outline
+        // yet — the first visit to a chapter splits it into nodes on the
+        // server — so the sidebar would hide them until a reload.
+        if (data && !(state.allItems || []).some((it) => it.id === data)) refreshOutline();
         rec.controls.innerHTML = "";
         rec.generationPaused = true;
         armReadToEndWatcher(rec);
@@ -696,6 +700,7 @@ async function streamMoveRequest(rec, id) {
         if (data) {
           state.nodeId = data;
           rec.prose.dataset.nodeId = data;
+          if (!(state.allItems || []).some((it) => it.id === data)) refreshOutline();
           rec.controls.innerHTML = "";
           renderSkipControl(rec);
           // Every move's prose already carries its real `data-block-id`s

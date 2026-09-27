@@ -145,6 +145,14 @@ pub struct OutlineItem {
     /// S27j's PDF viewer route exists; nothing consumes it yet.
     #[serde(default)]
     pub resolved_page: Option<usize>,
+    /// The last physical page (inclusive) of this `Chapter`, when the book's
+    /// own table of contents says where it ends (2026-09-27, the TOC tree:
+    /// `source::toc_tree`). With the book's real hierarchy in the outline a
+    /// section's range is its OWN pages — "until the next sibling" was only
+    /// ever right for flat chapter lists. `None` keeps the older inference
+    /// (`api::reading::chapter_page_range`).
+    #[serde(default)]
+    pub resolved_end_page: Option<usize>,
 }
 
 /// What an outline item actually is (S27e, PLAN.md §27): only `Node` is
@@ -1235,6 +1243,7 @@ mod tests {
             source: None,
             chapter_number: None,
             resolved_page: None,
+            resolved_end_page: None,
         }
     }
 

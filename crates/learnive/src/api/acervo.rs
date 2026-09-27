@@ -770,6 +770,7 @@ mod tests {
             }),
             chapter_number: None,
             resolved_page: None,
+            resolved_end_page: None,
         }
     }
 

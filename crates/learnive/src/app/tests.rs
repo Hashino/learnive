@@ -776,6 +776,7 @@ async fn a_structural_failure_hints_the_chapter_review_due_now() {
                     source: None,
                     chapter_number: None,
                     resolved_page: None,
+                    resolved_end_page: None,
                 };
             let mut chapter = plain("ch1", "Limits", None, &[]);
             chapter.item_type = OutlineItemType::Chapter;
