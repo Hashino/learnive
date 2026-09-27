@@ -548,6 +548,8 @@ const GEN_RETRY_MAX = 3;
 const GEN_RETRY_DELAY_S = 30;
 
 class RetryableGenError extends Error {}
+class LibraryGenError extends Error {}
+class ChapterMatchError extends Error {}
 
 function scheduleGenerationRetry(rec, id, reason) {
   rec.genRetries = (rec.genRetries || 0) + 1;
@@ -735,6 +737,10 @@ async function streamMoveRequest(rec, id) {
           scheduleReadingLine();
           armEdgeLoading();
         }
+      } else if (event === "chapter_match_failed") {
+        throw new ChapterMatchError(data);
+      } else if (event === "library_error") {
+        throw new LibraryGenError(data);
       } else if (event === "retryable_error") {
         throw new RetryableGenError(data);
       } else if (event === "error") {
@@ -763,6 +769,28 @@ async function streamMoveRequest(rec, id) {
     // instead of showing a raw TypeError (live 2026-09-10: minutes of
     // silence during the gate + free-tier 429 retries got the browser's
     // idle stream killed, twice).
+    // The library check refused the document (a PDF missing, unreadable,
+    // or with no usable text): open that check on this document — it
+    // lists what is wrong and where the library folder is, and its
+    // Re-check resumes this node's generation once everything passes.
+    // The server refused this chapter as unplaceable in its book's table of
+    // contents: open the remediation window. The outline copy here may
+    // predate the flag, so refresh it first — the window reads the chapter
+    // and its book from it.
+    if (err instanceof ChapterMatchError) {
+      rec.controls.innerHTML = "";
+      await refreshOutline();
+      openChapterRemediate(id);
+      return;
+    }
+    if (err instanceof LibraryGenError) {
+      rec.controls.innerHTML = "";
+      openAcervoGate("coldstart", state.docId, id);
+      // Unlike a fresh document's stop, the learner may not be able to fix
+      // this right now — let them back out to what they were reading.
+      el("acervoCloseBtn").hidden = false;
+      return;
+    }
     if (err instanceof RetryableGenError) {
       scheduleGenerationRetry(rec, id, err.message);
       return;

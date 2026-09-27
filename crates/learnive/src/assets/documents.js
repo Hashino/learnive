@@ -384,16 +384,23 @@ function renderLibraryList() {
       // Unusable = too long to stay whole-work with no derivable chapter
       // tier: the acervo gate would refuse it outright, so the picker
       // refuses it first — visible, but not pickable.
-      const unusable = e.toc === "unusable";
+      // Same for a PDF with no text to ground on (2026-09-27): the check
+      // would refuse it, so it is shown, labelled, and not pickable.
+      const noText = e.text === "no_text" || e.text === "extractor_failed";
+      const unusable = e.toc === "unusable" || noText;
       const meta = [
         (e.authors || "").trim(),
         e.pages + "p",
         showFile ? e.filename : null,
-        e.toc === "unusable"
-          ? t("manual.tocUnusable")
-          : e.toc === "unavailable"
-            ? t("manual.tocUnavailable")
-            : null,
+        e.text === "no_text"
+          ? t("manual.noText")
+          : e.text === "extractor_failed"
+            ? t("manual.extractorFailed")
+            : e.toc === "unusable"
+              ? t("manual.tocUnusable")
+              : e.toc === "unavailable"
+                ? t("manual.tocUnavailable")
+                : null,
       ]
         .filter(Boolean)
         .map(escapeHtml)

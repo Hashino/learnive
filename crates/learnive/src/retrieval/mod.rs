@@ -63,6 +63,90 @@ pub enum Embedder {
     Mock,
 }
 
+/// The app's one embedder, loaded on demand (2026-09-27). The model is
+/// downloaded on first run; it used to be loaded exactly once, at startup,
+/// so a single failed download (offline first launch, a network blip) left
+/// grounding off until the server was restarted — every node then failed
+/// with "no embedding model is loaded". Now a missing model is retried the
+/// next time something needs it, at most once per [`Self::RETRY_COOLDOWN`],
+/// and the generation that needed it goes through the client's automatic
+/// retry meanwhile.
+pub struct EmbedderSlot {
+    loaded: std::sync::RwLock<Option<Arc<Embedder>>>,
+    loader: Option<fn() -> Result<Embedder, String>>,
+    last_attempt: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl EmbedderSlot {
+    const RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Production: try the default model now; retry on demand if it fails.
+    pub fn default_model() -> Self {
+        let slot = Self {
+            loaded: std::sync::RwLock::new(None),
+            loader: Some(Embedder::default_model),
+            last_attempt: std::sync::Mutex::new(None),
+        };
+        if let Err(e) = slot.try_load() {
+            eprintln!("grounding unavailable for now (embedding model): {e} — retried on demand");
+        }
+        slot
+    }
+
+    /// An already-loaded embedder (tests).
+    pub fn ready(embedder: Embedder) -> Self {
+        Self {
+            loaded: std::sync::RwLock::new(Some(Arc::new(embedder))),
+            loader: None,
+            last_attempt: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// No embedder and no way to load one (tests of the missing-model path).
+    pub fn unavailable() -> Self {
+        Self {
+            loaded: std::sync::RwLock::new(None),
+            loader: None,
+            last_attempt: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The embedder, loading it first if it isn't yet and the cooldown
+    /// allows. Blocking (a first load downloads the model) — call from
+    /// `spawn_blocking` or accept the stall on a path that needs it anyway.
+    pub fn get(&self) -> Option<Arc<Embedder>> {
+        if let Some(e) = self
+            .loaded
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Some(e.clone());
+        }
+        match self.try_load() {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("embedding model still unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    fn try_load(&self) -> Result<Arc<Embedder>, String> {
+        let loader = self.loader.ok_or("no embedding model configured")?;
+        {
+            let mut last = self.last_attempt.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < Self::RETRY_COOLDOWN) {
+                return Err("retry cooldown".to_string());
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let embedder = Arc::new(loader()?);
+        *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(embedder.clone());
+        Ok(embedder)
+    }
+}
+
 /// Fixed dimensionality of [`Embedder::Mock`]'s vectors — arbitrary, just
 /// small enough to be cheap and large enough that hash collisions between
 /// unrelated words are rare in test-sized vocabularies.

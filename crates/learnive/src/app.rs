@@ -50,7 +50,7 @@ pub struct AppState {
     /// Text→vector embedder (§10) behind grounding (`source::search_index_cache`
     /// and the outline's prerequisite matcher). `None` when the embedding model
     /// could not be loaded — the loop then runs ungrounded rather than failing.
-    pub embedder: Option<Arc<crate::retrieval::Embedder>>,
+    pub embedder: Arc<crate::retrieval::EmbedderSlot>,
     /// S27d/S27e: the real HTTP client `api::cold_start::verify_reading_list`
     /// checks every proposed book/article against. Swappable the same way
     /// `ai`/`source` are: `app::tests::test_state_with_ai` wires
@@ -115,13 +115,7 @@ impl AppState {
 
         // Load the embedding model (§10). Non-fatal: offline /
         // first-run-download failures just disable grounding.
-        let embedder = match crate::retrieval::Embedder::default_model() {
-            Ok(e) => Some(Arc::new(e)),
-            Err(e) => {
-                eprintln!("grounding disabled (embedding model): {e}");
-                None
-            }
-        };
+        let embedder = Arc::new(crate::retrieval::EmbedderSlot::default_model());
 
         let ai = Arc::new(ArcSwap::from_pointee(api::build_ai(&config, &secret)));
 

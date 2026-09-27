@@ -44,6 +44,14 @@ use super::matching::{normalize, primary_title, surname_of};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManualMatch {
     pub filename: String,
+    /// The picked file's content hash, when the pick came from the library
+    /// screen (which knows it). Lets a pairing survive the file being
+    /// renamed or moved inside the library: resolution finds the same bytes
+    /// under their new name and re-saves the pairing (2026-09-27). Absent
+    /// on pairings made before this field existed, and on ones chosen on
+    /// the matching screen by filename alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 /// Global, per-library store of manual pairings (module doc) — stored
@@ -70,9 +78,21 @@ impl ManualMatchStore {
     /// Persists a pairing, atomically (tmp file + rename, same idiom as
     /// [`super::acervo::build_index_cache`]/`BibliographyCache::put`).
     pub fn set(&self, item: &ExpectedItem, filename: &str) -> std::io::Result<()> {
+        self.set_with_hash(item, filename, None)
+    }
+
+    /// [`Self::set`], also recording the file's content hash (see
+    /// [`ManualMatch::hash`]).
+    pub fn set_with_hash(
+        &self,
+        item: &ExpectedItem,
+        filename: &str,
+        hash: Option<&str>,
+    ) -> std::io::Result<()> {
         let path = self.path_for(item);
         let record = ManualMatch {
             filename: filename.to_string(),
+            hash: hash.map(str::to_string),
         };
         let json = serde_json::to_vec_pretty(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -140,7 +160,8 @@ mod tests {
         assert_eq!(
             store.get(&it),
             Some(ManualMatch {
-                filename: "sipser.pdf".into()
+                filename: "sipser.pdf".into(),
+                hash: None,
             })
         );
     }
@@ -156,7 +177,8 @@ mod tests {
         assert_eq!(
             store.get(&it),
             Some(ManualMatch {
-                filename: "second.pdf".into()
+                filename: "second.pdf".into(),
+                hash: None,
             })
         );
     }

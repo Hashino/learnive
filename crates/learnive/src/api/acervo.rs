@@ -689,7 +689,9 @@ mod tests {
             // layer down, live 2026-09-09), a test state without an
             // embedder can no longer run a memoized gate whose report says
             // `index: Missing` — and shouldn't.
-            embedder: Some(Arc::new(crate::retrieval::Embedder::Mock)),
+            embedder: Arc::new(crate::retrieval::EmbedderSlot::ready(
+                crate::retrieval::Embedder::Mock,
+            )),
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
             generations: Default::default(),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

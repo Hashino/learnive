@@ -54,7 +54,9 @@ fn test_state_with_ai(ai: crate::ai::Ai) -> AppState {
         config: Arc::new(RwLock::new(AppConfig::default())),
         secret: Arc::new(SecretStore::open(&dir)),
         data_dir: Arc::from(dir.to_string_lossy().as_ref()),
-        embedder: Some(Arc::new(crate::retrieval::Embedder::Mock)),
+        embedder: Arc::new(crate::retrieval::EmbedderSlot::ready(
+            crate::retrieval::Embedder::Mock,
+        )),
         // S27e: never hit a real catalog host from an integration test —
         // see the field's own doc comment on `AppState`.
         bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),

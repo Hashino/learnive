@@ -52,6 +52,8 @@ const I18N = {
     "manual.continue": "Continue",
     "manual.tocUnavailable": "no chapter list, whole work only",
     "manual.tocUnusable": "too long to use without a chapter list",
+    "manual.noText": "no extractable text (scanned image?) — needs a copy with a text layer",
+    "manual.extractorFailed": "text layer could not be read",
     "manual.confirmTitle": "Reading list",
     "manual.confirmHint":
       "The order here is the order you will study in. Use the arrows to reorder, and mark what you already know as review or skip.",
@@ -265,6 +267,8 @@ const I18N = {
     "manual.continue": "Continuar",
     "manual.tocUnavailable": "sem lista de capítulos, apenas a obra inteira",
     "manual.tocUnusable": "longo demais para usar sem lista de capítulos",
+    "manual.noText": "sem texto extraível (imagem escaneada?) — precisa de uma cópia com camada de texto",
+    "manual.extractorFailed": "não foi possível ler a camada de texto",
     "manual.confirmTitle": "Lista de leitura",
     "manual.confirmHint":
       "A ordem aqui é a ordem em que você vai estudar. Use as setas para reordenar e marque o que já sabe como revisar ou pular.",

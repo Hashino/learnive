@@ -364,7 +364,13 @@ async fn resolve_outline_forest(
     tree: &[engine::ProposedOutlineNode],
     known: &[KnownConcept],
 ) -> Vec<ProposedNode> {
-    let embedder = state.embedder.as_deref().cloned();
+    // Off the async runtime: a not-yet-loaded model downloads here.
+    let slot = state.embedder.clone();
+    let embedder = tokio::task::spawn_blocking(move || slot.get())
+        .await
+        .ok()
+        .flatten()
+        .map(|e| (*e).clone());
     let known_vecs = embedder.as_ref().map(|e| {
         let titles: Vec<String> = known.iter().map(|k| k.title.clone()).collect();
         e.embed_batch(&titles)
@@ -704,7 +710,7 @@ async fn record_manual_file_pairings(
             kind: bib.kind,
         };
         manual
-            .set(&expected, &entry.filename)
+            .set_with_hash(&expected, &entry.filename, Some(&hash))
             .map_err(|e| ApiError::Internal(format!("could not record the file pairing: {e}")))?;
     }
     Ok(())

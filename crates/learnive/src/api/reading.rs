@@ -106,6 +106,7 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
             };
             let toc =
                 source::acervo::listing_toc_label(toc_confirm.get(&hash).is_some(), &pdf);
+            let text = source::acervo::listing_text_label(&pdf);
             // An EMPTY /Info title (not just a missing one) falls back to
             // the filename stem — several real-world PDFs carry `Title: ""`
             // and a blank row helps no one (live find, user's library,
@@ -129,6 +130,7 @@ pub async fn library_list(State(state): State<AppState>) -> Result<Response, Api
                 hash,
                 filename: listing_entry.filename,
                 toc,
+                text,
             };
             yield Ok(sse_frame("entry", &serde_json::to_string(&entry).unwrap_or_default()));
         }
@@ -1773,7 +1775,7 @@ pub(super) async fn prepare(
     // the page by hand, skip the book, or restart cold start) — never
     // silent degraded generation.
     if engine::chapter_match_failed(&outline.items, &item) {
-        let reason = "this chapter could not be matched against its book's table of contents; resolve it from the library check before it can generate".to_string();
+        let reason = CHAPTER_MATCH_FAILED.to_string();
         if let Err(e) = event_log.append(
             Some(&item.id),
             EventKind::GenerationBlocked {
@@ -2108,11 +2110,33 @@ fn acervo_refusal(report: &source::acervo::AcervoReport) -> String {
             )
         })
         .collect();
-    format!(
-        "the acervo gate isn't clear yet — check it before this document can generate: {}",
-        failing.join("; ")
-    )
+    format!("{ACERVO_REFUSAL_PREFIX}: {}", failing.join("; "))
 }
+
+/// Opening words of every library-check refusal ([`acervo_refusal`]) —
+/// `generate_node` recognizes it and sends the refusal as `library_error`,
+/// which the client answers by opening the library check screen on this
+/// document instead of a dead-end error line (2026-09-27).
+/// Opening words of the missing-embedding-model refusal. Transient by
+/// nature (the model download is retried on demand, `EmbedderSlot`), so
+/// `generate_node` sends it as `retryable_error`.
+pub(super) const NO_EMBEDDER: &str = "no embedding model is loaded";
+
+/// Opening words of a failed per-book index build — usually transient
+/// (disk, or the embedding model still downloading), so also
+/// `retryable_error`.
+pub(super) const INDEX_BUILD_FAILED: &str = "could not index";
+
+/// `prepare`'s refusal for a chapter its book's table of contents could not
+/// place. Sent as its own `chapter_match_failed` event: the client refreshes
+/// the outline and opens the remediation window (pick the page, skip the
+/// book, restart) — found live 2026-09-27 that the client only did so when
+/// its possibly-stale outline copy already carried the flag, otherwise the
+/// learner got a dead-end error line.
+pub(super) const CHAPTER_MATCH_FAILED: &str = "this chapter could not be matched against its book's table of contents; resolve it from the library check before it can generate";
+
+pub(super) const ACERVO_REFUSAL_PREFIX: &str =
+    "the acervo gate isn't clear yet — check it before this document can generate";
 
 pub(super) async fn ensure_document_grounded(
     state: &AppState,
@@ -2337,8 +2361,14 @@ async fn build_missing_indexes(
         return Ok(0);
     }
 
-    let Some(embedder) = state.embedder.as_deref().cloned() else {
-        return Err("no embedding model is loaded — cannot index the library".to_string());
+    let slot = state.embedder.clone();
+    let Some(embedder) = spawn_blocking(move || slot.get())
+        .await
+        .ok()
+        .flatten()
+        .map(|e| (*e).clone())
+    else {
+        return Err(format!("{NO_EMBEDDER}: cannot index the library"));
     };
     let library = source::LocalPdfSource::open(state.data_dir.as_ref())
         .map_err(|e| format!("could not open local library: {e}"))?;
@@ -2366,7 +2396,7 @@ async fn build_missing_indexes(
             source::read_pdf_cached(&path, source::pdftext_cache_dir(state.data_dir.as_ref()))
                 .map_err(|e| format!("could not read {filename}: {e}"))?;
         source::build_index_cache(&pdf, &hash, &index_cache_dir, &embedder)
-            .map_err(|e| format!("could not index {filename}: {e}"))?;
+            .map_err(|e| format!("{INDEX_BUILD_FAILED} {filename}: {e}"))?;
     }
     Ok(missing_index.len())
 }
@@ -2420,6 +2450,11 @@ async fn resolve_outline_structure(
     toc_confirm_dir: &std::path::Path,
     needs_toc_deduction: &[source::ExpectedItem],
 ) -> Result<(), String> {
+    // Content hashes whose contents-page deduction failed TRANSIENTLY this
+    // call (the model call itself) — pass 2 must not conclude "no table of
+    // contents" for those, the next visit retries the deduction.
+    let mut deduction_deferred: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     if !needs_toc_deduction.is_empty() {
         let toc_confirm = source::TocConfirmStore::open_at(toc_confirm_dir)
             .map_err(|e| format!("could not open TOC-confirmation store: {e}"))?;
@@ -2439,6 +2474,7 @@ async fn resolve_outline_structure(
             };
             let contents_pages = source::toc::contents_page_chunks(&pdf, range);
             let Ok(llm_entries) = engine::propose_toc(&ai, &contents_pages).await else {
+                deduction_deferred.insert(hash);
                 continue;
             };
             let resolution = source::toc::resolve_toc(&pdf, &llm_entries, range.1);
@@ -2510,6 +2546,26 @@ async fn resolve_outline_structure(
             source::acervo::derive_chapter_toc(&pdf.page_texts)
         };
         if entries.is_empty() {
+            // No table of contents anywhere — no bookmarks, nothing
+            // confirmed or deduced, no chapter openers to derive. That is
+            // deterministic: waiting can't change it, and leaving the book
+            // `ChaptersProposed` used to strand its chapters forever
+            // ("…generates only after that matching pass resolves it",
+            // with nothing ever resolving it). Conclude the pass with every
+            // chapter unplaced: `chapter_match_failed` then routes each one
+            // to the remediation window (pick the page by hand, skip the
+            // book, restart) — 2026-09-27. Unless the deduction just failed
+            // transiently: then the next visit retries it first.
+            if deduction_deferred.contains(&hash) {
+                continue;
+            }
+            let chapters = outline
+                .items
+                .iter()
+                .filter(|i| i.parent_id.as_deref() == Some(book.id.as_str()))
+                .map(|chapter| (chapter.id.clone(), None))
+                .collect();
+            resolutions.push((book.id.clone(), chapters));
             continue;
         }
         let chapters: Vec<(String, Option<usize>)> = outline
@@ -3175,6 +3231,32 @@ struct GroundedBook {
     title: String,
     embedder: crate::retrieval::Embedder,
     index_cache_dir: std::path::PathBuf,
+    /// The library file itself — what a corrupt index is rebuilt from
+    /// ([`heal_book_index`]).
+    path: std::path::PathBuf,
+}
+
+/// Deletes a book's page index and rebuilds it from the PDF (2026-09-27).
+/// The index is a derived cache (§4: files are the source of truth, indexes
+/// are rebuildable), so an unreadable one — truncated write, disk hiccup,
+/// format drift — is never a reason to refuse a node: `ground_node` calls
+/// this once when reading the index fails, then retries the read.
+async fn heal_book_index(state: &AppState, book: &GroundedBook) -> Result<(), String> {
+    let path = book.path.clone();
+    let hash = book.hash.clone();
+    let dir = book.index_cache_dir.clone();
+    let embedder = book.embedder.clone();
+    let pdftext = source::pdftext_cache_dir(state.data_dir.as_ref());
+    spawn_blocking(move || -> Result<(), String> {
+        let _ = fs::remove_file(dir.join(format!("{hash}.json")));
+        let (_, pdf) = source::read_pdf_cached(&path, pdftext)
+            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        source::build_index_cache(&pdf, &hash, &dir, &embedder)
+            .map(|_| ())
+            .map_err(|e| format!("{INDEX_BUILD_FAILED} {}: {e}", path.display()))
+    })
+    .await
+    .map_err(|e| format!("{INDEX_BUILD_FAILED}: rebuild task failed: {e}"))?
 }
 
 /// Resolves a bibliographic pointer ([`engine::SourcePointer`]) to the
@@ -3208,8 +3290,14 @@ async fn resolve_grounded_book(
         ));
     };
 
-    let Some(embedder) = state.embedder.as_deref().cloned() else {
-        return Err("no embedding model is loaded — cannot ground this node".to_string());
+    let slot = state.embedder.clone();
+    let Some(embedder) = spawn_blocking(move || slot.get())
+        .await
+        .ok()
+        .flatten()
+        .map(|e| (*e).clone())
+    else {
+        return Err(format!("{NO_EMBEDDER}: cannot ground this node"));
     };
 
     let path = library.root().join(&filename);
@@ -3221,6 +3309,7 @@ async fn resolve_grounded_book(
         title: expected.title,
         embedder,
         index_cache_dir,
+        path,
     })
 }
 
@@ -3253,26 +3342,38 @@ async fn ground_node(
     // `pages_text_from_cache` in page order up to the char budget — see its
     // doc for why the old top-4 budget stopped matching the chapter-sized
     // node unit (2026-09-04).
-    let anchor = source::search_index_cache(
-        &book.index_cache_dir,
-        &book.hash,
-        &book.embedder,
-        &item.title,
-        1,
-        page_range,
-    )
-    .map_err(|e| format!("could not search the index for {}: {e}", book.title))?
-    .into_iter()
-    .next()
-    .map(|(page, _, _)| page);
-    let pages = source::acervo::pages_text_from_cache(
-        &book.index_cache_dir,
-        &book.hash,
-        page_range,
-        anchor,
-        source::acervo::SECTION_TEXT_CHAR_BUDGET,
-    )
-    .map_err(|e| format!("could not read the section text of {}: {e}", book.title))?;
+    let read = || -> Result<Vec<(usize, String)>, String> {
+        let anchor = source::search_index_cache(
+            &book.index_cache_dir,
+            &book.hash,
+            &book.embedder,
+            &item.title,
+            1,
+            page_range,
+        )
+        .map_err(|e| format!("could not search the index for {}: {e}", book.title))?
+        .into_iter()
+        .next()
+        .map(|(page, _, _)| page);
+        source::acervo::pages_text_from_cache(
+            &book.index_cache_dir,
+            &book.hash,
+            page_range,
+            anchor,
+            source::acervo::SECTION_TEXT_CHAR_BUDGET,
+        )
+        .map_err(|e| format!("could not read the section text of {}: {e}", book.title))
+    };
+    // An unreadable index is rebuilt from the PDF once, then read again —
+    // never a refusal on its own (see `heal_book_index`).
+    let pages = match read() {
+        Ok(pages) => pages,
+        Err(first) => {
+            eprintln!("index unreadable, rebuilding: {first}");
+            heal_book_index(state, &book).await?;
+            read()?
+        }
+    };
     if pages.is_empty() {
         return Err(format!(
             "internal error: \"{}\" produced no retrievable content — this should not happen after the acervo gate passed",
@@ -3665,7 +3766,7 @@ mod tests {
             config: Arc::new(RwLock::new(crate::config::AppConfig::default())),
             secret: Arc::new(crate::secret::SecretStore::open(&data_dir)),
             data_dir: Arc::from(data_dir.to_string_lossy().as_ref()),
-            embedder: None,
+            embedder: Arc::new(crate::retrieval::EmbedderSlot::unavailable()),
             bibliography_client: Arc::new(crate::source::BibliographyClient::unreachable_for_test()),
             generations: Default::default(),
             acervo_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

@@ -541,10 +541,22 @@ fn build_item_report(
     // the text. The pairing degrades safely: a file renamed or deleted since
     // the pick falls back to the ordinary candidate search and reports
     // honestly from there.
-    let manual_cand = manual.and_then(|m| m.get(item)).and_then(|picked| {
-        candidates
+    let manual_cand = manual.and_then(|store| {
+        let picked = store.get(item)?;
+        if let Some(c) = candidates
             .iter()
             .find(|c| c.entry.filename == picked.filename)
+        {
+            return Some(c);
+        }
+        // Renamed or moved since the pick: the same bytes under a new name
+        // are still the user's pick — follow them and re-save the pairing.
+        let hash = picked.hash.as_deref()?;
+        let c = candidates.iter().find(|c| c.hash == hash)?;
+        if let Err(e) = store.set_with_hash(item, &c.entry.filename, Some(hash)) {
+            eprintln!("could not re-save the pairing after a rename: {e}");
+        }
+        Some(c)
     });
     let Some(cand) = manual_cand.or_else(|| find_candidate(item, candidates)) else {
         return ItemReport {
@@ -772,7 +784,21 @@ pub fn resolve_matched_filename(
     item: &ExpectedItem,
 ) -> std::io::Result<Option<String>> {
     if let Some(m) = manual.get(item) {
-        return Ok(Some(m.filename));
+        if library.root().join(&m.filename).is_file() {
+            return Ok(Some(m.filename));
+        }
+        // The paired file is gone under that name. If the pick recorded the
+        // bytes' hash, look for them under a new name (renamed/moved inside
+        // the library) and re-save the pairing; a deleted file falls through
+        // to the ordinary search below, which reports honestly.
+        if let Some(hash) = m.hash.as_deref()
+            && let Some(c) = load_candidates(library)?
+                .into_iter()
+                .find(|c| c.hash == hash)
+        {
+            manual.set_with_hash(item, &c.entry.filename, Some(hash))?;
+            return Ok(Some(c.entry.filename));
+        }
     }
     let candidates = candidate_matches(library, item)?;
     match candidates.len() {
@@ -1261,6 +1287,23 @@ pub struct LibraryListingEntry {
     /// [`listing_toc_label`]'s output — `"confirmed"` | `"embedded"` |
     /// `"derived"` | `"unusable"` | `"unavailable"`.
     pub toc: &'static str,
+    /// [`listing_text_label`]'s output — `"extractable"` | `"no_text"` |
+    /// `"extractor_failed"`. Anything but `"extractable"` is a book the
+    /// library check would refuse (no text to ground on), so the picker
+    /// refuses it first (2026-09-27).
+    pub text: &'static str,
+}
+
+/// The library row's text-layer label — the SAME test the library check
+/// runs ([`check_text_layer`]), so the picker and the gate can never
+/// disagree about whether a book has usable text.
+pub(crate) fn listing_text_label(pdf: &super::pdf::PdfDocument) -> &'static str {
+    match check_text_layer(pdf) {
+        TextLayerCheck::Extractable { .. } => "extractable",
+        TextLayerCheck::NoText => "no_text",
+        TextLayerCheck::ExtractorFailed => "extractor_failed",
+        TextLayerCheck::Skipped => "extractable",
+    }
 }
 
 /// The library rows' `toc` label: the tier cascade the consumers use,
@@ -1302,6 +1345,7 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
             continue;
         };
         let toc = listing_toc_label(toc_confirm.get(&hash).is_some(), &pdf);
+        let text = listing_text_label(&pdf);
         // Same empty-title fallback as the streaming listing endpoint — but
         // through `stem_metadata`, so a conventional download stem yields a
         // real title + authors instead of one long blob.
@@ -1320,6 +1364,7 @@ pub fn library_listing(data_dir: impl AsRef<Path>) -> std::io::Result<Vec<Librar
             hash,
             filename: entry.filename,
             toc,
+            text,
         });
     }
     Ok(out)
@@ -1869,6 +1914,62 @@ mod tests {
         )
         .expect("validate");
         assert_eq!(report.items[0].presence, PresenceCheck::Missing);
+    }
+
+    /// A pairing that recorded the file's hash follows a RENAME: the gate
+    /// finds the same bytes under the new name, passes, and re-saves the
+    /// pairing — and so does the grounding-side resolver.
+    #[test]
+    fn manual_pairing_with_a_hash_follows_a_renamed_file() {
+        let (mut doc, _pages) = build_document(
+            &["The Joy of Baking, by Jane Chef."],
+            Some("The Joy of Baking"),
+            None,
+        );
+        let (tmp, lib) = place_in_library(&mut doc, "renamed.pdf");
+        let hash = content_hash(&fs::read(lib.root().join("renamed.pdf")).unwrap());
+        let manual = ManualMatchStore::open(tmp.path().join("data")).expect("open store");
+        let item = ExpectedItem {
+            title: "Some Title The Metadata Does Not Carry".into(),
+            authors: vec![],
+            kind: SourceKind::Book,
+        };
+        manual
+            .set_with_hash(&item, "original-name.pdf", Some(&hash))
+            .expect("record pairing");
+
+        assert_eq!(
+            resolve_matched_filename(&lib, &manual, &item).unwrap(),
+            Some("renamed.pdf".to_string()),
+            "resolver follows the bytes"
+        );
+        assert_eq!(
+            manual.get(&item).unwrap().filename,
+            "renamed.pdf",
+            "re-saved"
+        );
+
+        // Reset the pairing to the stale name: the gate heals it too.
+        manual
+            .set_with_hash(&item, "original-name.pdf", Some(&hash))
+            .unwrap();
+        let report = validate_acervo(
+            &lib,
+            std::slice::from_ref(&item),
+            index_dir(&tmp),
+            toc_dir(&tmp),
+            None,
+            Some(&manual),
+        )
+        .expect("validate");
+        assert_eq!(
+            report.items[0].presence,
+            PresenceCheck::Found {
+                filename: "renamed.pdf".into()
+            }
+        );
+        assert_eq!(report.items[0].identity, IdentityCheck::Match);
+        assert_eq!(manual.get(&item).unwrap().filename, "renamed.pdf");
     }
 
     // -- Listing stems ---------------------------------------------------

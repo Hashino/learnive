@@ -3,7 +3,10 @@ use std::sync::Arc;
 use super::cold_start::outline_view;
 use super::grading::sse_frame;
 use super::reading::due_review_view;
-use super::reading::{SPLIT_DEFERRED, finalize, prepare, tail_chars, topic_and_title};
+use super::reading::{
+    ACERVO_REFUSAL_PREFIX, CHAPTER_MATCH_FAILED, INDEX_BUILD_FAILED, NO_EMBEDDER, SPLIT_DEFERRED,
+    finalize, prepare, tail_chars, topic_and_title,
+};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -141,6 +144,18 @@ struct FrameSink(Arc<InFlight>);
 
 impl FrameSink {
     fn send(&self, frame: Bytes) -> Result<(), ()> {
+        // Error frames reach only the tabs attached at the time; keep a
+        // server-side record so a failure is never lost with its tab.
+        if frame.starts_with(b"event: error")
+            || frame.starts_with(b"event: retryable_error")
+            || frame.starts_with(b"event: library_error")
+        {
+            eprintln!(
+                "generation {}: {}",
+                self.0.requested,
+                String::from_utf8_lossy(&frame).trim().replace('\n', " | ")
+            );
+        }
         let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         st.history.push(frame.clone());
         st.subscribers.retain(|s| s.send(frame.clone()).is_ok());
@@ -156,9 +171,20 @@ impl FrameSink {
 /// `retryable_error` by itself, with a countdown, up to 3 times (reported
 /// live 2026-09-27: "cases on 1 category should reload … after 3 tries
 /// then it stops").
+///
+/// A library-check refusal goes out as `library_error`: the client opens
+/// the library check screen for the document (its Re-check continues the
+/// generation once everything passes) instead of a dead-end error line.
 fn error_event(reason: &str) -> &'static str {
-    if reason == SPLIT_DEFERRED {
+    if reason == SPLIT_DEFERRED
+        || reason.starts_with(NO_EMBEDDER)
+        || reason.starts_with(INDEX_BUILD_FAILED)
+    {
         "retryable_error"
+    } else if reason.starts_with(ACERVO_REFUSAL_PREFIX) {
+        "library_error"
+    } else if reason == CHAPTER_MATCH_FAILED {
+        "chapter_match_failed"
     } else {
         "error"
     }
