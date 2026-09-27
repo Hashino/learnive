@@ -282,12 +282,15 @@ pub async fn generate_node(
             // `applies` is the same cheap grounded/in-scope check `verify`
             // makes internally; checked again here only to gate the status
             // frame, so a plain ungrounded/out-of-scope move never emits
-            // one. `verify` never errors this request: citations are
-            // mechanical (local embedder, zero tokens), and only blocks
-            // below the similarity floor reach the one small adjudication
-            // call — whose failure degrades to honest per-block doubt
+            // one. `verify` never errors this request: the model's own
+            // citations are validated against the selection (zero tokens),
+            // and only cites whose paragraph measures below the similarity
+            // floor against their page reach the one small adjudication
+            // call — whose failure degrades to honest per-cite doubt
             // (`data-unverified`, orange cite) rather than propagating.
-            // See `movement::grounding`'s module doc.
+            // `move_settled` then replaces the streamed buffer, so an
+            // invented cite seen mid-stream never persists. See
+            // `movement::grounding`'s module doc.
             let generated = if movement::grounding::applies(move_type, &ctx.grounding) {
                 let checking_en = "Checking grounding…";
                 let checking_pt = "Verificando fundamentação…";

@@ -38,13 +38,10 @@ use crate::locale::{Locale, language_directive};
 /// [`ISLAND_CONTRACT`] makes — the model commits to literal markers, the
 /// server does the rest.
 ///
-/// On citations: the model emits NONE (2026-09-05, user decision — the old
-/// `CITE_CONTRACT` is deleted). Citations are server machinery now: the
-/// post-generation grounding-verification call
-/// (`movement::grounding`) maps each block to the source passage that
-/// supports it, and the server inserts the validated `<cite>` markers
-/// itself — a citation can only ever point at a source the server
-/// selected, never one the model invented.
+/// On citations: this contract says nothing about them — grounded streamed
+/// moves get [`CITE_CONTRACT`] appended (2026-09-27, the agent cites
+/// again), and `movement::grounding` validates every marker against the
+/// selection before it persists.
 ///
 /// Written as one flat literal on purpose: this constant is interpolated
 /// *into* other `format!` strings, so a `{PLACEHOLDER}` for a second
@@ -101,17 +98,30 @@ inside a <p> or other block. Everything outside it still obeys the HTML \
 rules above. Use this sparingly, only when it teaches better than prose — \
 most content needs no island at all.";
 
-/// The grounding addendum that used to ride in every grounded call's
-/// system message (§10/§4.3). **Deleted 2026-09-05 (user decision):**
-/// the model no longer emits `<cite>` markers at all — it had to be asked,
-/// and live QA kept catching it not bothering (2026-08-27: eight-cite
-/// sections next to zero-cite ones, fabricated mechanisms uncited either
-/// way). Citations are server machinery now: `movement::grounding`'s
-/// verification call maps each numbered block to the passage that supports
-/// it and `learnive_core::insert_block_citations` inserts the validated
-/// markers. Kept as this stub comment so the slot in the contract's
-/// history stays legible.
-///
+/// The citation contract, appended to a grounded streamed move's system
+/// message (`movement::prompt::generate_move_streamed`). **Back 2026-09-27
+/// (user decision — the agent cites again, not the server).** Deleted
+/// 2026-09-05 when citations became server machinery; restored with two
+/// lessons from that era baked in: the marker is EMPTY (the page renders
+/// from the attribute, `app.css`), and it carries a concrete example built
+/// from the real header format — small models only cited correctly after
+/// seeing one (S21 live round, gpt-oss-20b invented loc words without it).
+/// The model is not trusted with it: `movement::grounding::verify` drops
+/// any cite whose id+loc pair is not a page of the selection it was given,
+/// and support-checks the rest.
+pub const CITE_CONTRACT: &str = "\
+Citations: the SOURCES below are real pages, each opened by a header like \
+[id: 3f9a… | loc: p:41 | Book title]. After a paragraph (or list item) whose \
+substance you took from a page, put an EMPTY citation marker \
+<cite data-source-id=\"ID\" data-locator=\"LOC\"></cite>, copying ID and LOC \
+EXACTLY from that page's header. Example: for the header \
+[id: 3f9a | loc: p:41 | Book], write <p>…your paragraph…<cite \
+data-source-id=\"3f9a\" data-locator=\"p:41\"></cite></p>. Cite the page the \
+content actually came from; several markers in one paragraph are fine if it \
+draws on several pages. Never invent an id or a page, and never cite a page \
+that is not in SOURCES — leave framing, transitions and your own examples \
+uncited. This is the one exception to the no-data-* rule.";
+
 /// Contract for the exercise block: it runs isolated in an `<iframe sandbox>`
 /// (§4.4) — NO same-origin, cannot see the token or the page DOM — so it is
 /// NOT sanitized and may use JS/CSS/SVG freely. In exchange it must return the
@@ -449,11 +459,10 @@ pub fn propose_chapter_split(chapter_title: &str, signal_text: &str) -> Vec<Chat
     ]
 }
 
-/// Formats retrieved passages into a user-message block. The model no
-/// longer cites them itself (2026-09-05 — citations are server-inserted
-/// from the verification call's mapping); the passages are here as the
-/// substantive ground the move must draw on. Empty string when there is no
-/// grounding (index still filling, §14).
+/// Formats retrieved passages into a user-message block — the substantive
+/// ground the move must draw on, and (since 2026-09-27, [`CITE_CONTRACT`])
+/// the pages the model cites by their `[id | loc]` headers. Empty string
+/// when there is no grounding (index still filling, §14).
 pub fn sources_block(sources: &str) -> String {
     if sources.trim().is_empty() {
         String::new()

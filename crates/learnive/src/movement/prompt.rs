@@ -1,7 +1,7 @@
 use super::{MoveContext, MoveType};
 use crate::ai::ChatMessage;
 use crate::engine::prompt::{
-    EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
+    CITE_CONTRACT, EXERCISE_HTML_CONTRACT, ISLAND_CONTRACT, PROSE_HTML_CONTRACT, sources_block,
 };
 use crate::events::aggregate::ScaffoldingLevel;
 use crate::locale::language_directive;
@@ -10,15 +10,14 @@ fn non_empty(s: &str) -> &str {
     if s.trim().is_empty() { "(none yet)" } else { s }
 }
 
-/// §S21 post-generation grounding gate, LEAN shape (2026-09-05, user
-/// decision): citations are assigned MECHANICALLY by the server
-/// (`movement::grounding` — embed each settled block, cite the best-matching
-/// page from the book's own index), so the model never sees the whole move
-/// and never maps citations. This is the only model call left in the gate —
-/// and it only fires when at least one block's best similarity fell below
-/// `MECHANICAL_FLOOR` (nothing to adjudicate ⇒ zero tokens). Each suspect
-/// paragraph arrives with the text of the page the mechanical citer picked
-/// for it; the model judges ONLY whether that paragraph's substance is
+/// §S21 post-generation grounding gate (agent-cited shape, 2026-09-27):
+/// the generating model places its own citations, the server validates
+/// them against the selection (`movement::grounding`), then measures each
+/// kept cite's paragraph against its own cited page. This is the only
+/// model call in the gate — and it only fires when at least one cite's
+/// similarity fell below `MECHANICAL_FLOOR` (nothing to adjudicate ⇒ zero
+/// tokens). Each suspect paragraph arrives with the text of the page the
+/// model cited for it; the checker judges ONLY whether that paragraph's substance is
 /// actually supported by that page. A failed paragraph keeps its citation,
 /// stamped `data-unverified` (orange + warning glyph, `app.css`) — the
 /// reader sees exactly which pointer is doubtful, not a whole-move banner.
@@ -478,12 +477,19 @@ fn remediation_addendum(ctx: &MoveContext, move_type: MoveType) -> String {
 /// the type, not emitted here.
 pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage> {
     let lang = language_directive(ctx.locale);
+    // The agent cites (2026-09-27): only when there are SOURCES to cite —
+    // an ungrounded move has nothing a marker could legitimately name.
+    let cite = if ctx.grounding.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{CITE_CONTRACT}")
+    };
     vec![
         ChatMessage::system(format!(
             "You are a personal tutor generating a \"{move_type}\" move \
              for a living document. {}\n\n{}\n\n{}\n\n{lang}\n\n\
              {PROSE_HTML_CONTRACT}\n\n\
-             {ISLAND_CONTRACT}",
+             {ISLAND_CONTRACT}{cite}",
             purpose(move_type, ctx),
             continuity_note(),
             topic_scope_note()

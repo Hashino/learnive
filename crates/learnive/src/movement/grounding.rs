@@ -1,62 +1,54 @@
-//! §S21 post-generation grounding gate — LEAN shape (2026-09-05, user
-//! decision). Generation prompts no longer carry any cite contract, and the
-//! model never assigns citations; the gate works in two layers:
+//! §S21 post-generation grounding gate — AGENT-CITED shape (2026-09-27,
+//! user decision: "faça as citações serem geradas pelo agente, como eram
+//! antes, não mais programaticamente"). The generation prompt carries a cite
+//! contract again (`engine::prompt::CITE_CONTRACT`) and the MODEL decides
+//! what to cite and where; this gate is what keeps that honest:
 //!
-//! 1. **Citations are MECHANICAL** (§2.1 cost category 1 — zero token,
-//!    arithmetic over the index): after a grounded move's content is fully
-//!    generated, each text-bearing block is embedded with the LOCAL offline
-//!    embedder (`retrieval::Embedder`, model2vec — no network, no 429, no
-//!    truncation) and matched by cosine against the grounding selection's
-//!    OWN pages — the same page set the move's grounding text was read
-//!    from, never a wider structural chapter range (a sparse TOC can leave
-//!    that range hundreds of pages past the chapter's real end; live
-//!    2026-09-05, blocks cited pages the model never read). The best page
-//!    becomes the block's `<cite data-source-id data-locator>` — inserted
-//!    by [`learnive_core::insert_block_citations`], so by construction a
-//!    citation can only point at a page the server itself selected AND the
-//!    move actually read, never one a model invented.
-//! 2. **Only the doubtful blocks reach the model.** A block whose best
-//!    similarity falls below [`MECHANICAL_FLOOR`] (its top page may be
-//!    coincidence, not derivation) goes into ONE small adjudication call
-//!    ([`prompt::verify_support`]): the paragraph plus the text of the page
-//!    its citation points at — never the whole move, never the whole
-//!    chapter window. That smallness is what makes the call survive the
-//!    free-tier reasoning burn that truncated the old dual-task check
-//!    (verified live, Groq gpt-oss-20b, same day). A suspect the model
-//!    judges unsupported keeps its citation stamped `data-unverified`
-//!    (orange + warning glyph, `app.css`) — the reader sees exactly which
-//!    pointer is doubtful. A suspect the check CLEARS keeps a normal
-//!    citation. No whole-move banner: the doubt is per-paragraph because
-//!    the evidence is per-paragraph.
+//! 1. **Validation — zero token.** Every `<cite>` the model wrote is lifted
+//!    out ([`learnive_core::extract_block_citations`]) and kept only if its
+//!    `data-source-id` + `data-locator` pair names a page that is actually
+//!    in the grounding selection the move was given — the `[id: … | loc: …]`
+//!    headers of `ctx.grounding`. Anything else is an invented citation by
+//!    definition and is dropped (the text it wrapped, if any, stays). This
+//!    is the guarantee the 2026-09-05 server-side citer existed for — a
+//!    citation can only point at a page the model actually read — kept
+//!    without the server choosing the citations itself.
+//! 2. **Support check — only on doubt.** Where the node has a page index
+//!    (`ctx.grounding_index`), each kept cite's paragraph is embedded with
+//!    the LOCAL offline embedder and compared against its OWN cited page.
+//!    Below [`MECHANICAL_FLOOR`] it goes into ONE small adjudication call
+//!    ([`prompt::verify_support`]): the paragraph plus that page's text.
+//!    Judged unsupported ⇒ the cite stays but is stamped `data-unverified`
+//!    (orange + warning glyph, `app.css`); cleared ⇒ normal cite. Zero
+//!    suspects ⇒ zero model calls.
 //!
-//! Failure posture (§12.2, never-fail-silently): the mechanical layer
-//! cannot fail on the network (local embedder, local file). If the
-//! adjudication call itself fails (provider error, unparseable verdict
-//! even after JSON-repair), every SUSPECT is stamped `data-unverified` —
-//! infrastructure trouble must degrade to honest doubt ("we could not
-//! confirm this one"), never to silent confidence on a block that already
-//! measured below the floor. Non-suspect blocks are untouched by provider
-//! hiccups, and the move's own content is NEVER dropped or replaced
-//! regardless of outcome.
+//! Kept cites are re-inserted as empty markers at the end of their block
+//! ([`learnive_core::insert_block_citations`]), so they render exactly as
+//! before regardless of where inside the paragraph the model put them.
+//! A paragraph the model did not cite stays uncited — there is no
+//! mechanical fallback anymore, by the same decision.
+//!
+//! Failure posture (§12.2, never-fail-silently): validation cannot fail.
+//! If the adjudication call fails (provider error, unparseable verdict even
+//! after JSON-repair), every SUSPECT is stamped `data-unverified` —
+//! infrastructure trouble degrades to honest doubt, never silent
+//! confidence. The move's own text is NEVER dropped or replaced.
 //!
 //! Scope: the streamed move types with grounded prose — `explain`/
-//! `integrate`/`revisit`/`respond` ([`in_scope`]). A no-op (returns
-//! `generated` completely unchanged) for any other type, when
-//! `ctx.grounding` is empty, or when the node's grounding did not come
-//! from a chapter page window (`ctx.grounding_index` is `None` — the
-//! mechanical citer has no page index to match against).
+//! `integrate`/`revisit`/`respond` ([`in_scope`]). Any other type is
+//! returned unchanged; an in-scope move with NO grounding has every cite
+//! stripped (there was nothing it could legitimately point at).
 
 use super::{EngineError, GeneratedMove, MoveContext, MoveType, parse, prompt, repair_messages};
 use crate::ai::{Ai, Tier};
 use crate::engine::collect_within;
 use crate::retrieval::Embedder;
 
-/// Best-similarity floor below which a block's top page match is treated as
-/// unproven and the block is sent to the adjudication call. Picked as a
-/// starting point, not a measurement — the `grounding (lean)` stderr
-/// diagnostic prints every block's real score precisely so live rounds can
-/// tune this number against telemetry (same discipline as the retriever's
-/// own `min_score`, PLAN.md).
+/// Best-similarity floor between a cited paragraph and its own cited page
+/// below which the citation is treated as unproven and sent to the
+/// adjudication call. Calibrated live 2026-09-05 against the mechanical
+/// citer's best-page scores (healthy range 0.58–0.83); the `grounding`
+/// stderr diagnostic prints every cite's real score for further tuning.
 pub const MECHANICAL_FLOOR: f32 = 0.5;
 
 /// Response ceiling for the adjudication call: the verdict is a tiny JSON
@@ -66,23 +58,16 @@ pub const MECHANICAL_FLOOR: f32 = 0.5;
 /// treat this call as small by construction.
 const ADJUDICATION_MAX_TOKENS: u32 = 1000;
 
-/// Blocks shorter than this get no citation and no check: a heading or a
-/// one-liner has no substantive claim to point a page at, and its embedding
-/// would be dominated by stopwords anyway.
+/// Paragraphs shorter than this are not support-checked: a one-liner's
+/// embedding is dominated by stopwords, so its similarity says nothing.
+/// Its citation is still validated like any other.
 const MIN_BLOCK_CHARS: usize = 40;
 
-/// What the mechanical citer needs to match blocks against a book's page
-/// index: the same cache dir / content hash the node's grounding text was
+/// What the support check needs to compare a paragraph against its cited
+/// page: the same cache dir / content hash the node's grounding text was
 /// read from (`api::reading::ground_node` owns both and threads them
-/// through `prepare`). The page pool itself is NOT carried here on purpose:
-/// it is the grounding selection's own page set, parsed from
-/// `ctx.grounding`'s passage headers at gate time — a citation must point
-/// at a page the model actually read, which is a narrower (and more honest)
-/// contract than any structural chapter range (live 2026-09-05: sparse TOC
-/// confirmation left the structural range hundreds of pages past the
-/// chapter's real end, and blocks cited pages the grounding never
-/// contained). `Embedder` is the local offline embedder — cloning this
-/// struct is cheap.
+/// through `prepare`). `Embedder` is the local offline embedder — cloning
+/// this struct is cheap.
 #[derive(Clone)]
 pub struct GroundingIndex {
     pub embedder: Embedder,
@@ -101,8 +86,7 @@ impl std::fmt::Debug for GroundingIndex {
 
 /// Whether the gate applies at all — the same test the caller
 /// (`api::generation::generate_node`) uses to decide whether emitting a
-/// status frame before the check is worthwhile. [`verify`] re-checks the
-/// index itself.
+/// status frame before the check is worthwhile.
 pub fn applies(move_type: MoveType, grounding: &str) -> bool {
     !grounding.trim().is_empty() && in_scope(move_type)
 }
@@ -115,10 +99,11 @@ fn in_scope(move_type: MoveType) -> bool {
 }
 
 /// One SOURCE page of the node's grounding selection, parsed out of
-/// `MoveContext::grounding`'s `[id: … | loc: … | title]` header lines —
-/// used to resolve a suspect block's cited page back to its text for the
-/// adjudication prompt.
+/// `MoveContext::grounding`'s `[id: … | loc: … | title]` header lines — the
+/// set a model citation is validated against, and the text a suspect is
+/// adjudicated against.
 struct Passage {
+    id: String,
     loc: String,
     text: String,
 }
@@ -133,12 +118,13 @@ fn parse_passages(grounding: &str) -> Vec<Passage> {
         if t.starts_with("[id: ") && t.contains(" | loc: ") && t.ends_with(']') {
             let inner = &t[1..t.len() - 1];
             let mut parts = inner.splitn(3, " | ");
-            let (Some(_id_part), Some(loc_part), Some(_title)) =
+            let (Some(id_part), Some(loc_part), Some(_title)) =
                 (parts.next(), parts.next(), parts.next())
             else {
                 continue;
             };
             out.push(Passage {
+                id: id_part.strip_prefix("id: ").unwrap_or(id_part).to_string(),
                 loc: loc_part
                     .strip_prefix("loc: ")
                     .unwrap_or(loc_part)
@@ -161,16 +147,13 @@ fn parse_passages(grounding: &str) -> Vec<Passage> {
     out
 }
 
-/// One block the mechanical layer measured below the floor: its 1-based
-/// block number, its visible text, and the text of the page its citation
-/// points at (empty when that page isn't in the selection — such a block is
-/// marked unverified outright, without spending a model call it could never
-/// pass: the checker must see the page it is judging against).
-#[derive(Clone)]
-struct Suspect {
+/// A kept citation after validation: its block, the two attributes, and
+/// whether it ends up stamped unverified.
+struct Kept {
     block: usize,
-    text: String,
-    page_text: String,
+    source_id: String,
+    locator: String,
+    unverified: bool,
 }
 
 /// Runs the gate. Always returns a usable [`GeneratedMove`] — the caller
@@ -181,140 +164,157 @@ pub async fn verify(
     ctx: &MoveContext,
     generated: GeneratedMove,
 ) -> GeneratedMove {
-    if !applies(move_type, &ctx.grounding) {
+    if !in_scope(move_type) {
         return generated;
     }
-    let Some(index) = &ctx.grounding_index else {
+    let (stripped, model_cites) = learnive_core::extract_block_citations(&generated.html);
+    if model_cites.is_empty() {
         return generated;
-    };
+    }
+    let mut generated = generated;
+    if ctx.grounding.trim().is_empty() {
+        // Nothing was supplied, so nothing can be cited: every cite is
+        // invented. The wrapped text (if any) stays.
+        eprintln!(
+            "grounding: ungrounded move, dropped {} cites",
+            model_cites.len()
+        );
+        generated.html = stripped;
+        return generated;
+    }
 
-    let blocks = learnive_core::block_texts(&generated.html);
     let passages = parse_passages(&ctx.grounding);
+    let blocks = learnive_core::block_texts(&stripped);
 
-    // The citer's pool is EXACTLY the grounding selection's own pages — the
-    // `[id: … | loc: p:N]` headers above — never a wider structural range:
-    // a citation must point at a page the model actually read. (Live
-    // 2026-09-05: a sparsely confirmed TOC left the structural chapter range
-    // hundreds of pages past the chapter's real end, and blocks cited pages
-    // the grounding text never contained.)
-    let allowed: std::collections::HashSet<usize> = passages
-        .iter()
-        .filter_map(|p| p.loc.strip_prefix("p:").and_then(|n| n.parse().ok()))
-        .collect();
-    let Ok(chunks) = crate::source::load_index_cache(&index.dir, &index.content_hash) else {
-        return generated;
-    };
-    let pool: Vec<&crate::source::CachedChunk> = chunks
-        .iter()
-        .filter(|c| allowed.contains(&c.page))
-        .collect();
+    // Layer 1 — validation: a cite survives only if it names a page of the
+    // selection the move was actually given. Duplicates collapse.
+    let mut kept: Vec<Kept> = Vec::new();
+    let mut dropped = 0usize;
+    for c in &model_cites {
+        let (id, loc) = (c.source_id.trim(), c.locator.trim());
+        let valid = passages.iter().any(|p| p.id == id && p.loc == loc);
+        if !valid {
+            dropped += 1;
+            continue;
+        }
+        if kept
+            .iter()
+            .any(|k| k.block == c.block && k.source_id == id && k.locator == loc)
+        {
+            continue;
+        }
+        kept.push(Kept {
+            block: c.block,
+            source_id: id.to_string(),
+            locator: loc.to_string(),
+            unverified: false,
+        });
+    }
 
-    // Layer 1 — mechanical citation: embed each text-bearing block, cite its
-    // best-matching page within the pool. Every score is kept for the stderr
-    // diagnostic, so MECHANICAL_FLOOR can be tuned against real distributions
-    // instead of guesses.
-    let mut cites: Vec<(usize, String, String, bool)> = Vec::new();
-    let mut suspects: Vec<Suspect> = Vec::new();
+    // Layer 2 — support check, only where there is a page index to measure
+    // with and only for cites into that indexed book.
     let mut scores: Vec<String> = Vec::new();
-    for (i, text) in blocks.iter().enumerate() {
-        if text.chars().count() < MIN_BLOCK_CHARS {
-            continue;
-        }
-        let block_no = i + 1;
-        let query = index.embedder.embed(text);
-        let Some((page, score)) = pool
-            .iter()
-            .map(|c| (c.page, crate::retrieval::cosine(&query, &c.vector)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        else {
-            continue;
-        };
-        let loc = format!("p:{page}");
-        let supported = score >= MECHANICAL_FLOOR;
-        scores.push(format!("b{block_no}@{loc}={score:.2}"));
-        cites.push((
-            block_no,
-            index.content_hash.clone(),
-            loc.clone(),
-            !supported,
-        ));
-        if !supported {
-            let page_text = passages
+    let mut suspects: Vec<usize> = Vec::new(); // indexes into `kept`
+    if let Some(index) = &ctx.grounding_index
+        && let Ok(chunks) = crate::source::load_index_cache(&index.dir, &index.content_hash)
+    {
+        for (i, k) in kept.iter().enumerate() {
+            if k.source_id != index.content_hash {
+                continue;
+            }
+            let Some(text) = blocks.get(k.block - 1) else {
+                continue;
+            };
+            if text.chars().count() < MIN_BLOCK_CHARS {
+                continue;
+            }
+            let Some(page) = k
+                .locator
+                .strip_prefix("p:")
+                .and_then(|n| n.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let query = index.embedder.embed(text);
+            let score = chunks
                 .iter()
-                .find(|p| p.loc == loc)
+                .filter(|c| c.page == page)
+                .map(|c| crate::retrieval::cosine(&query, &c.vector))
+                .fold(f32::MIN, f32::max);
+            scores.push(format!("b{}@{}={score:.2}", k.block, k.locator));
+            if score < MECHANICAL_FLOOR {
+                suspects.push(i);
+            }
+        }
+    }
+
+    if !suspects.is_empty() {
+        let page_text = |k: &Kept| {
+            passages
+                .iter()
+                .find(|p| p.id == k.source_id && p.loc == k.locator)
                 .map(|p| p.text.clone())
-                .unwrap_or_default();
-            suspects.push(Suspect {
-                block: block_no,
-                text: text.clone(),
-                page_text,
-            });
-        }
-    }
-
-    if cites.is_empty() {
-        return generated;
-    }
-
-    // Layer 2 — adjudicate only the suspects. Blocks the mechanical layer
-    // already trusts never reach the model; a move with zero suspects costs
-    // ZERO model calls.
-    let mut unsupported: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let checkable: Vec<Suspect> = suspects
-        .iter()
-        .filter(|s| !s.page_text.is_empty())
-        .cloned()
-        .collect();
-    if !checkable.is_empty() {
-        let views: Vec<(usize, &str, &str)> = checkable
+                .unwrap_or_default()
+        };
+        let items: Vec<(usize, String, String)> = suspects
             .iter()
-            .map(|s| (s.block, s.text.as_str(), s.page_text.as_str()))
+            .enumerate()
+            .map(|(n, &i)| {
+                let k = &kept[i];
+                (
+                    n + 1,
+                    blocks.get(k.block - 1).cloned().unwrap_or_default(),
+                    page_text(k),
+                )
+            })
             .collect();
-        match check(ai, &views).await {
-            Ok(verdict) => {
-                for n in verdict.unsupported {
-                    unsupported.insert(n);
-                }
-            }
-            Err(e) => {
-                // Infrastructure failure, not a verdict — degrade to honest
-                // doubt on exactly the blocks that measured below the floor.
-                // Non-suspect blocks keep their clean citations.
-                eprintln!("grounding adjudication failed: {e}");
-                for s in &checkable {
-                    unsupported.insert(s.block);
+        let checkable: Vec<(usize, &str, &str)> = items
+            .iter()
+            .filter(|(_, _, page)| !page.is_empty())
+            .map(|(n, t, p)| (*n, t.as_str(), p.as_str()))
+            .collect();
+        let mut unsupported: std::collections::HashSet<usize> = items
+            .iter()
+            .filter(|(_, _, page)| page.is_empty())
+            .map(|(n, _, _)| *n)
+            .collect();
+        if !checkable.is_empty() {
+            match check(ai, &checkable).await {
+                Ok(verdict) => unsupported.extend(verdict.unsupported),
+                Err(e) => {
+                    // Infrastructure failure, not a verdict — degrade to
+                    // honest doubt on exactly the suspects.
+                    eprintln!("grounding adjudication failed: {e}");
+                    unsupported.extend(checkable.iter().map(|(n, _, _)| *n));
                 }
             }
         }
-    }
-    // Suspects with no page text to judge against are unconfirmed by
-    // construction — no call could ever clear them.
-    for s in &suspects {
-        if s.page_text.is_empty() {
-            unsupported.insert(s.block);
+        for (n, &i) in suspects.iter().enumerate() {
+            kept[i].unverified = unsupported.contains(&(n + 1));
         }
-    }
-    // The cite's flag was born as "measured below the floor" — the
-    // adjudication verdict is what settles it: cleared ⇒ clean, named (or
-    // never checkable) ⇒ unverified.
-    for cite in &mut cites {
-        cite.3 = cite.3 && unsupported.contains(&cite.0);
     }
 
     eprintln!(
-        "grounding (lean): cited={} suspects={} unsupported={} floor={MECHANICAL_FLOOR} scores=[{}]",
-        cites.len(),
+        "grounding: model_cites={} kept={} dropped={dropped} suspects={} unverified={} floor={MECHANICAL_FLOOR} scores=[{}]",
+        model_cites.len(),
+        kept.len(),
         suspects.len(),
-        unsupported.len(),
+        kept.iter().filter(|k| k.unverified).count(),
         scores.join(", "),
     );
 
-    let mut generated = generated;
-    let refs: Vec<(usize, &str, &str, bool)> = cites
+    let refs: Vec<(usize, &str, &str, bool)> = kept
         .iter()
-        .map(|(b, id, loc, unv)| (*b, id.as_str(), loc.as_str(), *unv))
+        .map(|k| {
+            (
+                k.block,
+                k.source_id.as_str(),
+                k.locator.as_str(),
+                k.unverified,
+            )
+        })
         .collect();
-    generated.html = learnive_core::insert_block_citations(&generated.html, &refs);
+    generated.html = learnive_core::insert_block_citations(&stripped, &refs);
     generated
 }
 
@@ -438,135 +438,158 @@ mod tests {
         assert_eq!(result.html, "<form>An exercise.</form>");
     }
 
-    /// Grounding without a page index (no chapter pointer — the mechanical
-    /// citer has nothing to match against) is a full no-op: no calls, no
-    /// cites, unchanged content.
-    #[tokio::test]
-    async fn grounding_without_an_index_is_a_full_noop() {
-        let ai = scripted_ai(|_| panic!("no index means no model call"));
-        let ctx = MoveContext {
-            grounding: "[id: hash1 | loc: p:1 | A]\nsome source text".to_string(),
-            ..Default::default()
-        };
-        let generated =
-            stub_move("<p>Some claim that stands alone without any citation marker at all.</p>");
-        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
-        assert_eq!(
-            result.html,
-            "<p>Some claim that stands alone without any citation marker at all.</p>"
-        );
+    const A: &str =
+        "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
+    const B: &str = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
+    const P2: &str = "The stroma surrounds the grana.";
+
+    fn cite(loc: &str) -> String {
+        format!(r#"<cite data-source-id="hash1" data-locator="{loc}"></cite>"#)
     }
 
-    /// The happy path costs ZERO model calls: a block identical to its page
-    /// scores 1.0 ≥ floor, gets its citation, and nothing is adjudicated.
+    /// Grounding without a page index (the /ask cascade, or no chapter
+    /// pointer) still VALIDATES — invented cites go, real ones stay — but
+    /// never spends a model call: there is nothing to measure support with.
     #[tokio::test]
-    async fn trusted_blocks_cost_zero_model_calls() {
-        let ai = scripted_ai(|_| panic!("a fully trusted move must not call the AI"));
-        let page_text =
-            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
-        let (_dir, ctx) = grounded_fixture(&[("1", page_text)]);
-        let generated = stub_move(&format!("<p>{page_text}</p>"));
+    async fn grounding_without_an_index_validates_only() {
+        let ai = scripted_ai(|_| panic!("no index means no model call"));
+        let ctx = MoveContext {
+            grounding: format!("[id: hash1 | loc: p:1 | A]\n{A}"),
+            ..Default::default()
+        };
+        let generated = stub_move(&format!(
+            "<p>{A}{}</p>\n<p>{B}{}</p>",
+            cite("p:1"),
+            cite("p:7")
+        ));
+        let result = verify(&ai, MoveType::Respond, &ctx, generated).await;
+        assert_eq!(result.html.matches("<cite").count(), 1, "{}", result.html);
+        assert!(
+            result.html.contains(&format!("{A}{}</p>", cite("p:1"))),
+            "{}",
+            result.html
+        );
+        assert!(!result.html.contains("p:7"), "{}", result.html);
+    }
+
+    /// The happy path costs ZERO model calls: the model cited the page the
+    /// paragraph came from, its similarity clears the floor, the cite stays.
+    #[tokio::test]
+    async fn supported_cites_cost_zero_model_calls() {
+        let ai = scripted_ai(|_| panic!("a fully supported move must not call the AI"));
+        let (_dir, ctx) = grounded_fixture(&[("1", A)]);
+        let generated = stub_move(&format!("<p>{A}{}</p>", cite("p:1")));
         let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
         assert!(
-            result
-                .html
-                .contains(r#"<cite data-source-id="hash1" data-locator="p:1"></cite></p>"#),
-            "trusted block gets a clean cite: {}",
+            result.html.contains(&format!("{A}{}</p>", cite("p:1"))),
+            "{}",
             result.html
         );
         assert!(!result.html.contains("data-unverified"));
     }
 
-    /// A block below the floor is adjudicated: cleared by the model ⇒ clean
-    /// cite; judged unsupported ⇒ the SAME cite gains `data-unverified`.
+    /// A cite naming a page (or a source) outside the selection the move was
+    /// given is invented by definition: dropped, text it wrapped kept.
     #[tokio::test]
-    async fn suspect_blocks_are_adjudicated_and_marked_per_paragraph() {
-        // Block A's text matches page 1 (trusted); block B shares no
-        // vocabulary with any page (score 0.0 < floor ⇒ suspect).
-        let a_text =
-            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
-        let b_text = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
-
-        // Cleared: the verdict lists no unsupported numbers.
-        let pages = [("1", a_text), ("2", "The stroma surrounds the grana.")];
-        let (_dir, ctx) = grounded_fixture(&pages);
-        let ai = mock_ai(r#"{"unsupported":[]}"#);
-        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
+    async fn invented_cites_are_dropped_and_wrapped_text_kept() {
+        let ai = scripted_ai(|_| panic!("validation is zero-token"));
+        let (_dir, ctx) = grounded_fixture(&[("1", A), ("2", P2)]);
+        let generated = stub_move(&format!(
+            r#"<p>{A}<cite data-source-id="hash1" data-locator="p:300"></cite></p>
+<p>See <cite data-source-id="other" data-locator="p:1">this claim</cite> now.</p>"#
+        ));
         let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(!result.html.contains("<cite"), "{}", result.html);
+        assert!(
+            result.html.contains("See this claim now."),
+            "{}",
+            result.html
+        );
+    }
+
+    /// No mechanical fallback: a paragraph the model did not cite stays
+    /// uncited, even when it matches a page perfectly.
+    #[tokio::test]
+    async fn uncited_paragraphs_stay_uncited() {
+        let ai = scripted_ai(|_| panic!("no cites, nothing to check"));
+        let (_dir, ctx) = grounded_fixture(&[("1", A)]);
+        let generated = stub_move(&format!("<p>{A}</p>"));
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert_eq!(result.html, format!("<p>{A}</p>"));
+    }
+
+    /// An in-scope move with no grounding at all had nothing to cite: every
+    /// cite goes.
+    #[tokio::test]
+    async fn ungrounded_moves_have_every_cite_stripped() {
+        let ai = scripted_ai(|_| panic!("zero-token"));
+        let generated = stub_move(&format!("<p>{A}{}</p>", cite("p:1")));
+        let result = verify(&ai, MoveType::Respond, &MoveContext::default(), generated).await;
+        assert!(!result.html.contains("<cite"), "{}", result.html);
+        assert!(result.html.contains(A));
+    }
+
+    /// The model may put the cite mid-sentence; it is re-seated at the end
+    /// of its own paragraph, the one rendering the reader knows.
+    #[tokio::test]
+    async fn kept_cites_are_reseated_at_the_end_of_their_block() {
+        let ai = scripted_ai(|_| panic!("supported, zero-token"));
+        let (_dir, ctx) = grounded_fixture(&[("1", A)]);
+        let generated = stub_move(
+            r#"<p>Photosynthesis <cite data-source-id="hash1" data-locator="p:1">converts light energy</cite> into chemical energy inside the chloroplast.</p>"#,
+        );
+        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        assert!(
+            result.html.contains(&format!("{A}{}</p>", cite("p:1"))),
+            "{}",
+            result.html
+        );
+    }
+
+    /// A cite whose paragraph doesn't resemble its own page is adjudicated:
+    /// cleared ⇒ clean; judged unsupported ⇒ stamped `data-unverified`.
+    #[tokio::test]
+    async fn suspect_cites_are_adjudicated_and_marked_per_paragraph() {
+        let pages = [("1", A), ("2", P2)];
+        let html = format!("<p>{A}{}</p>\n<p>{B}{}</p>", cite("p:1"), cite("p:2"));
+
+        let (_dir, ctx) = grounded_fixture(&pages);
+        let result = verify(
+            &mock_ai(r#"{"unsupported":[]}"#),
+            MoveType::Explain,
+            &ctx,
+            stub_move(&html),
+        )
+        .await;
         assert_eq!(result.html.matches("<cite").count(), 2, "{}", result.html);
         assert!(!result.html.contains("data-unverified"), "{}", result.html);
 
-        // Flagged: block B (the suspect) keeps its cite, stamped unverified;
-        // block A stays clean.
         let (_dir, ctx) = grounded_fixture(&pages);
-        let ai = mock_ai(r#"{"unsupported":[2]}"#);
-        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
-        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        let result = verify(
+            &mock_ai(r#"{"unsupported":[1]}"#),
+            MoveType::Explain,
+            &ctx,
+            stub_move(&html),
+        )
+        .await;
         assert!(
             result
                 .html
-                .contains(r#"data-locator="p:1" data-unverified="true""#)
-                || result.html.contains(r#"data-unverified="true""#),
-            "suspect must be stamped: {}",
+                .contains(r#"data-locator="p:2" data-unverified="true""#),
+            "the suspect is stamped: {}",
             result.html
         );
-        let clean_a =
-            format!(r#"<p>{a_text}<cite data-source-id="hash1" data-locator="p:1"></cite></p>"#);
         assert!(
-            result.html.contains(&clean_a),
-            "trusted block must keep its clean cite: {}",
+            result.html.contains(&format!("{A}{}</p>", cite("p:1"))),
+            "{}",
             result.html
         );
     }
 
-    /// A block whose best match lives on a page OUTSIDE the grounding
-    /// selection must cite the best IN-selection page instead: the citer's
-    /// pool is the selection itself, never a wider index or structural
-    /// range (live 2026-09-05 — a sparse TOC left the structural range
-    /// hundreds of pages past the chapter's real end, and blocks cited
-    /// pages the move never read).
-    #[tokio::test]
-    async fn citations_cannot_escape_the_grounding_selection() {
-        let a_text =
-            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
-        let b_text = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
-        let (_dir, ctx) =
-            grounded_fixture(&[("1", a_text), ("2", "The stroma surrounds the grana.")]);
-        // Sneak page 3 into the INDEX cache only — same content hash — with
-        // text that matches block B perfectly. The selection (and so the
-        // allowed pool) still holds only pages 1-2.
-        let index = ctx.grounding_index.as_ref().unwrap();
-        let cache_path = index.dir.join(format!("{}.json", index.content_hash));
-        let mut chunks: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
-        chunks.push(serde_json::json!({
-            "page": 3,
-            "text": b_text,
-            "vector": Embedder::Mock.embed(b_text),
-        }));
-        std::fs::write(&cache_path, serde_json::to_string(&chunks).unwrap()).unwrap();
-
-        let ai = mock_ai(r#"{"unsupported":[]}"#);
-        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
-        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
-        assert!(
-            !result.html.contains("p:3"),
-            "a cite must never point outside the selection: {}",
-            result.html
-        );
-        // Both blocks still cited: B's best IN-selection page is a poor
-        // match (suspect), the adjudication clears it, the cite stays clean.
-        assert_eq!(result.html.matches("<cite").count(), 2, "{}", result.html);
-        assert!(!result.html.contains("data-unverified"), "{}", result.html);
-    }
-
-    /// The adjudication prompt pairs each suspect with the text of the page
-    /// its citation points at — never the whole move or the whole window.
+    /// The adjudication prompt pairs the suspect with the text of the page
+    /// ITS citation points at — never the whole move or the whole window.
     #[tokio::test]
     async fn adjudication_prompt_pairs_suspect_with_its_page() {
-        let a_text =
-            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
-        let b_text = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
         let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let cap = captured.clone();
         let ai = scripted_ai(move |req| {
@@ -578,50 +601,43 @@ mod tests {
                 .join("\n");
             r#"{"unsupported":[]}"#.to_string()
         });
-        let (_dir, ctx) =
-            grounded_fixture(&[("1", a_text), ("2", "The stroma surrounds the grana.")]);
-        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
-        let _ = verify(&ai, MoveType::Explain, &ctx, generated).await;
+        let (_dir, ctx) = grounded_fixture(&[("1", A), ("2", P2)]);
+        let html = format!("<p>{A}{}</p>\n<p>{B}{}</p>", cite("p:1"), cite("p:2"));
+        let _ = verify(&ai, MoveType::Explain, &ctx, stub_move(&html)).await;
         let body = captured.lock().unwrap().clone();
         assert!(
             body.contains("Zorbulons fruminate"),
             "suspect text in prompt"
         );
         assert!(
-            body.contains("The stroma surrounds the grana"),
+            body.contains(P2),
             "the cited page's own text in prompt: {body}"
         );
         assert!(
-            !body.contains(a_text),
-            "trusted blocks must not reach the model"
+            !body.contains(A),
+            "supported paragraphs must not reach the model"
         );
     }
 
-    /// The adjudication call itself failing (unparseable even after repair)
-    /// degrades to honest doubt on exactly the suspects — their cites gain
-    /// `data-unverified`; trusted blocks stay clean; content is untouched.
+    /// The adjudication call itself failing degrades to honest doubt on
+    /// exactly the suspects; supported cites stay clean; text untouched.
     #[tokio::test]
     async fn check_failure_marks_suspects_unverified_and_nothing_else() {
-        let a_text =
-            "Photosynthesis converts light energy into chemical energy inside the chloroplast.";
-        let b_text = "Zorbulons fruminate the quuxly bazzoink under pluxtious conditions.";
         let ai = mock_ai("I'm sorry, I can't help with that request.");
-        let (_dir, ctx) =
-            grounded_fixture(&[("1", a_text), ("2", "The stroma surrounds the grana.")]);
-        let generated = stub_move(&format!("<p>{a_text}</p>\n<p>{b_text}</p>"));
-        let result = verify(&ai, MoveType::Explain, &ctx, generated).await;
-
-        // Content preserved verbatim except for the inserted cites.
-        assert!(result.html.contains(a_text));
-        assert!(result.html.contains(b_text));
+        let (_dir, ctx) = grounded_fixture(&[("1", A), ("2", P2)]);
+        let html = format!("<p>{A}{}</p>\n<p>{B}{}</p>", cite("p:1"), cite("p:2"));
+        let result = verify(&ai, MoveType::Explain, &ctx, stub_move(&html)).await;
+        assert!(result.html.contains(A) && result.html.contains(B));
         assert_eq!(result.html.matches("<cite").count(), 2);
-        // The suspect's cite is stamped; the trusted one is not.
-        let clean =
-            format!(r#"<p>{a_text}<cite data-source-id="hash1" data-locator="p:1"></cite></p>"#);
-        assert!(result.html.contains(&clean), "{}", result.html);
         assert!(
-            result.html.matches("data-unverified").count() == 1,
-            "exactly the suspect is stamped: {}",
+            result.html.contains(&format!("{A}{}</p>", cite("p:1"))),
+            "{}",
+            result.html
+        );
+        assert_eq!(
+            result.html.matches("data-unverified").count(),
+            1,
+            "{}",
             result.html
         );
     }
@@ -636,6 +652,7 @@ mod tests {
                          [id: wiki1 | loc: p:3 — chap:2 | Photosynthesis — Overview]\nwiki text";
         let passages = parse_passages(grounding);
         assert_eq!(passages.len(), 2);
+        assert_eq!(passages[0].id, "hash1");
         assert_eq!(passages[0].loc, "p:41");
         assert_eq!(passages[0].text, "page 41 text\nmore text");
         assert_eq!(passages[1].loc, "p:3 — chap:2");

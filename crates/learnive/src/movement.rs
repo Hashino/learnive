@@ -253,17 +253,17 @@ pub struct MoveContext {
     /// concepts must be told APART). Empty when there is nothing nearby
     /// yet demonstrated to mix in.
     pub interleave_titles: Vec<String>,
-    /// §S21 post-generation grounding gate (`movement::grounding`), LEAN
-    /// shape (2026-09-05, user decision): citations are MECHANICAL —
-    /// `grounding::verify` embeds each settled block and cites the page
-    /// whose index vector best matches — and only blocks whose best
-    /// similarity falls below [`grounding::MECHANICAL_FLOOR`] go to the
-    /// model, as a small adjudication call ("is this paragraph supported
-    /// by this page?"). This field carries what the mechanical citer
-    /// needs: the SAME book's page-index cache the grounding text was
-    /// read from. `None` whenever the node's grounding didn't come from a
-    /// chapter page window (no source pointer, corpus fallback) — then no
-    /// citations are inserted and no check runs.
+    /// §S21 post-generation grounding gate (`movement::grounding`),
+    /// agent-cited shape (2026-09-27, user decision): the model places its
+    /// own citations, `grounding::verify` drops any that name a page
+    /// outside the selection, then embeds each kept cite's paragraph and
+    /// compares it against its own cited page — below
+    /// [`grounding::MECHANICAL_FLOOR`] it goes to a small adjudication call
+    /// ("is this paragraph supported by this page?"). This field carries
+    /// what that support check needs: the SAME book's page-index cache the
+    /// grounding text was read from. `None` whenever the grounding didn't
+    /// come from a chapter page window (the /ask cascade) — then cites are
+    /// still validated, but no support check runs.
     pub grounding_index: Option<grounding::GroundingIndex>,
 }
 
@@ -860,16 +860,30 @@ mod tests {
         assert!(sys.contains("figure data-interactive"));
     }
 
-    /// 2026-09-05: citation left the model's vocabulary (server-inserted
-    /// from the verification call's mapping) and the node title became a
-    /// server-owned `<h1>` — the prose contract must say so, and must no
-    /// longer carry any cite instruction.
+    /// The node title is a server-owned `<h1>` (2026-09-05) — the prose
+    /// contract must ban the model's own. Citations are the agent's again
+    /// (2026-09-27): the cite contract rides ONLY on grounded moves, since
+    /// an ungrounded one has no SOURCES a marker could name.
     #[test]
-    fn prose_contract_bans_h1_and_model_citations() {
+    fn prose_contract_bans_h1_and_cites_only_when_grounded() {
         let ctx = MoveContext::default();
         let sys = &prompt::generate_move_streamed(MoveType::Explain, &ctx)[0].content;
         assert!(sys.contains("NEVER emit <h1>"));
-        assert!(!sys.contains("<cite"));
+        assert!(!sys.contains("<cite"), "ungrounded: no cite contract");
+
+        let ctx = MoveContext {
+            grounding: "[id: h1 | loc: p:3 | Book]\npage text".to_string(),
+            ..Default::default()
+        };
+        let sys = &prompt::generate_move_streamed(MoveType::Explain, &ctx)[0].content;
+        assert!(
+            sys.contains("<cite data-source-id="),
+            "grounded: cite contract present"
+        );
+        assert!(
+            sys.contains("data-locator=\"p:41\""),
+            "with the concrete example"
+        );
     }
 
     #[test]

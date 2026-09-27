@@ -836,6 +836,11 @@ pub async fn ask_question(
             {
                 return Ok(Json(AskResp::NeedsSource { topic }));
             }
+            // The agent's own citations (2026-09-27) go through the same
+            // gate as a node move's: invented pages dropped, the rest
+            // support-checked where a page index exists.
+            let generated =
+                movement::grounding::verify(&ai, MoveType::Respond, &ctx, generated).await;
             if let Err(e) = event_log.append(
                 Some(&node_id),
                 EventKind::MoveGenerated {
@@ -896,6 +901,8 @@ pub async fn ask_question(
             {
                 return Ok(Json(AskResp::NeedsSource { topic }));
             }
+            let generated =
+                movement::grounding::verify(&ai, MoveType::Respond, &ctx, generated).await;
             if let Err(e) = event_log.append(
                 Some(&node_id),
                 EventKind::MoveGenerated {

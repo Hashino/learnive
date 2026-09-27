@@ -211,6 +211,121 @@ pub fn insert_block_citations(inner_html: &str, citations: &[(usize, &str, &str,
     out.trim_end().to_string()
 }
 
+/// One `<cite>` the MODEL wrote (citations are agent-emitted again since
+/// 2026-09-27, user decision): the 1-based top-level block it sits in —
+/// the same numbering as [`insert_block_citations`] — and the two
+/// attributes that make it a citation. Missing attributes come back empty;
+/// the caller validates every field against the grounding selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockCitation {
+    pub block: usize,
+    pub source_id: String,
+    pub locator: String,
+}
+
+/// Lifts every `<cite>` out of a move's HTML: returns the HTML with the cite
+/// tags removed (any text the model wrapped inside one is KEPT — only the
+/// tags go) plus each cite's block and attributes, in document order.
+/// The inverse half of the agent-citation pipeline: the server validates
+/// what came out here and puts back only what passes, as
+/// [`insert_block_citations`] markers at the end of the same block — so a
+/// citation the model invented never reaches the reader, and every kept
+/// one renders exactly like before (empty marker, locator from the
+/// attribute). Block numbering is unchanged by the strip: removing tags
+/// inside a block never adds or removes a top-level element.
+pub fn extract_block_citations(inner_html: &str) -> (String, Vec<BlockCitation>) {
+    let wrapped = format!(r#"<div id="__lv_root">{inner_html}</div>"#);
+    let frag = Html::parse_fragment(&wrapped);
+    let root_sel = Selector::parse("#__lv_root").expect("static selector");
+    let cite_sel = Selector::parse("cite").expect("static selector");
+    let root = frag
+        .select(&root_sel)
+        .next()
+        .expect("wrapper div always present");
+
+    let mut out = String::new();
+    let mut cites = Vec::new();
+    let mut n = 0;
+    for child in root.children() {
+        match child.value() {
+            Node::Element(_) => {
+                n += 1;
+                let el = ElementRef::wrap(child).expect("element node wraps");
+                let own = std::iter::once(el).filter(|e| e.value().name() == "cite");
+                for c in own.chain(el.select(&cite_sel)) {
+                    cites.push(BlockCitation {
+                        block: n,
+                        source_id: c.value().attr("data-source-id").unwrap_or("").to_string(),
+                        locator: c.value().attr("data-locator").unwrap_or("").to_string(),
+                    });
+                }
+                out.push_str(&strip_cite_tags(&el.html()));
+                out.push('\n');
+            }
+            Node::Text(text) if !text.trim().is_empty() => {
+                out.push_str(&escape_text(text));
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    (out.trim_end().to_string(), cites)
+}
+
+/// Removes `<cite …>` / `</cite>` tags from scraper-serialized HTML, keeping
+/// whatever sat between them. Safe as a string pass ONLY on scraper output:
+/// text content always serializes `<` as `&lt;`, so a literal `<cite` is
+/// always a real tag; the opening tag's end is the first `>` outside a
+/// double-quoted attribute value (values serialize with `"` escaped).
+fn strip_cite_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    loop {
+        // Whichever tag comes first (`</cite>` never contains `<cite`).
+        let (at, is_close) = match (rest.find("<cite"), rest.find("</cite>")) {
+            (Some(o), Some(c)) if c < o => (c, true),
+            (Some(o), _) => (o, false),
+            (None, Some(c)) => (c, true),
+            (None, None) => break,
+        };
+        out.push_str(&rest[..at]);
+        if is_close {
+            rest = &rest[at + "</cite>".len()..];
+            continue;
+        }
+        // `<cite` must be the whole tag name (not `<citex`).
+        let after = &rest[at + "<cite".len()..];
+        if !after.starts_with([' ', '>', '/']) {
+            out.push_str("<cite");
+            rest = after;
+            continue;
+        }
+        let mut in_quote = false;
+        let mut end = None;
+        for (i, ch) in after.char_indices() {
+            match ch {
+                '"' => in_quote = !in_quote,
+                '>' if !in_quote => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(i) => rest = &after[i + 1..],
+            None => {
+                // Unterminated tag (cannot happen on scraper output) — keep
+                // the rest verbatim rather than lose text.
+                out.push_str(&rest[at..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Reconstructs just the frozen prose blocks from a node's stored
 /// `content.html` — every top-level element that carries `data-block-id`
 /// but not `data-exercise-id`, in document order, re-serialized. Used to
@@ -479,6 +594,54 @@ mod tests {
         let one = out.find(r#"p:10"#).unwrap();
         let two = out.find(r#"p:11"#).unwrap();
         assert!(one < two, "same-block citations keep their given order");
+    }
+
+    #[test]
+    fn extract_block_citations_lifts_cites_and_keeps_wrapped_text() {
+        let inner = r#"<p>First claim.<cite data-source-id="h1" data-locator="p:4"></cite></p><ul><li>A <cite data-source-id="h1" data-locator="p:5">wrapped claim</cite> here.</li></ul><p>No cite.</p>"#;
+        let (html, cites) = extract_block_citations(inner);
+        assert!(!html.contains("<cite"), "{html}");
+        assert!(!html.contains("</cite>"), "{html}");
+        assert!(
+            html.contains("A wrapped claim here."),
+            "wrapped text kept: {html}"
+        );
+        assert_eq!(
+            cites,
+            vec![
+                BlockCitation {
+                    block: 1,
+                    source_id: "h1".into(),
+                    locator: "p:4".into()
+                },
+                BlockCitation {
+                    block: 2,
+                    source_id: "h1".into(),
+                    locator: "p:5".into()
+                },
+            ]
+        );
+        // Numbering survives the strip: re-inserting by block number lands
+        // each marker back in its own block.
+        let back = insert_block_citations(&html, &[(2, "h1", "p:5", false)]);
+        let li = back.find("<ul>").unwrap();
+        assert!(back[li..].contains(r#"data-locator="p:5""#), "{back}");
+        assert!(!back[..li].contains("p:5"), "{back}");
+    }
+
+    #[test]
+    fn extract_block_citations_handles_gt_inside_attribute_and_bare_text() {
+        let inner =
+            r#"Loose text.<p>X<cite data-source-id="a>b" data-locator="p:1"></cite> tail</p>"#;
+        let (html, cites) = extract_block_citations(inner);
+        assert_eq!(cites.len(), 1);
+        assert_eq!(
+            cites[0].block, 1,
+            "bare text doesn't consume a block number"
+        );
+        assert_eq!(cites[0].source_id, "a>b");
+        assert!(html.contains("Loose text."), "{html}");
+        assert!(html.contains("<p>X tail</p>"), "{html}");
     }
 
     #[test]
