@@ -549,6 +549,9 @@ body.source-resizing #askBar {
   line-height: 1;
   cursor: pointer;
 }
+.source-edge-toggle[hidden] {
+  display: none;
+}
 .source-edge-toggle:hover {
   color: var(--accent);
 }

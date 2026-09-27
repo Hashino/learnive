@@ -1092,9 +1092,94 @@ async function fetchSourceIndex(sourceId) {
   };
 }
 
+// The last location opened in the viewer, per document, so the edge toggle
+// can reopen it after a reload. Browser storage is a convenience here, not
+// state: an empty/blocked store just falls back to the document's first
+// cited book at page 1.
+const LAST_SOURCE_KEY = "learnive-last-source";
+
+function rememberSourceLocation(sourceId, locator) {
+  if (!state.docId) return;
+  try {
+    const all = JSON.parse(localStorage.getItem(LAST_SOURCE_KEY) || "{}");
+    all[state.docId] = { sourceId, locator: locator || null };
+    localStorage.setItem(LAST_SOURCE_KEY, JSON.stringify(all));
+  } catch {
+    // storage unavailable — reopening degrades to the first page
+  }
+}
+
+function lastSourceLocation() {
+  if (!state.docId) return null;
+  try {
+    const all = JSON.parse(localStorage.getItem(LAST_SOURCE_KEY) || "{}");
+    return all[state.docId] || null;
+  } catch {
+    return null;
+  }
+}
+
+// The viewer is still mounted for THIS document (closing only slides it
+// away) — reopening it as-is keeps the exact spot the learner scrolled to
+// inside the native viewer, which no stored page number could restore.
+function sourceViewerMountedForDoc() {
+  const panel = el("sourcePanel");
+  return (
+    panel.dataset.docId === state.docId &&
+    !!el("sourceBody").querySelector("iframe")
+  );
+}
+
+// The book the document is grounded in, for a first open with no history:
+// every generated node carries server-inserted citations, all pointing at
+// library content hashes.
+function firstCitedSourceId() {
+  const cite = el("nodeSections").querySelector("cite[data-source-id]");
+  return cite ? cite.dataset.sourceId : null;
+}
+
+// Edge toggle: "›" closes the open viewer, "‹" (panel closed) reopens it —
+// at the last location if there is one, else the first page of the
+// document's cited book. Hidden while closed with nothing to open (cold
+// start, a document with no generated content yet).
+function updateSourceToggle() {
+  const btn = el("sourceCloseBtn");
+  const open = el("sourcePanel").classList.contains("open");
+  const label = t(open ? "source.close" : "source.open");
+  btn.textContent = open ? "›" : "‹";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.hidden =
+    !open &&
+    !(
+      state.docId &&
+      !el("doc").hidden &&
+      (sourceViewerMountedForDoc() || lastSourceLocation() || firstCitedSourceId())
+    );
+}
+
+function reopenSourcePanel() {
+  if (sourceViewerMountedForDoc()) {
+    el("sourcePanel").classList.add("open");
+    document.body.classList.add("source-open");
+    updateSourceToggle();
+    return;
+  }
+  const last = lastSourceLocation();
+  if (last) {
+    openSourcePanel(last.sourceId, last.locator);
+    return;
+  }
+  const first = firstCitedSourceId();
+  if (first) openSourcePanel(first, null);
+}
+
 async function openSourcePanel(sourceId, locator) {
   el("sourcePanel").classList.add("open");
   el("sourcePanel").dataset.sourceId = sourceId;
+  el("sourcePanel").dataset.docId = state.docId || "";
+  rememberSourceLocation(sourceId, locator);
+  updateSourceToggle();
   // Split-view (§11.1): re-centers `.main-container` in the half of the
   // screen the panel doesn't occupy (`app.css`'s `body.source-open` rule).
   document.body.classList.add("source-open");
@@ -1137,8 +1222,35 @@ async function openSourcePanel(sourceId, locator) {
 function closeSourcePanel() {
   el("sourcePanel").classList.remove("open");
   document.body.classList.remove("source-open");
+  updateSourceToggle();
 }
-el("sourceCloseBtn").addEventListener("click", closeSourcePanel);
+el("sourceCloseBtn").addEventListener("click", () => {
+  if (el("sourcePanel").classList.contains("open")) closeSourcePanel();
+  else reopenSourcePanel();
+});
+// The toggle's visibility depends on what's on screen (a document with
+// citations, which view is up) — both change outside this file, so watch
+// for them instead of threading a call through every render path.
+{
+  let queued = false;
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      updateSourceToggle();
+    });
+  };
+  new MutationObserver(schedule).observe(el("nodeSections"), {
+    childList: true,
+    subtree: true,
+  });
+  new MutationObserver(schedule).observe(el("doc"), {
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+  schedule();
+}
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && el("sourcePanel").classList.contains("open")) {
     closeSourcePanel();

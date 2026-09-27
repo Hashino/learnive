@@ -20,6 +20,7 @@ const I18N = {
     "theme.toggle": "Toggle light/dark theme",
     "source.title": "Source",
     "source.close": "Close",
+    "source.open": "Open source",
     "docs.backOutline": "Back to outline",
     // Cold start / objective
     "coldstart.choiceTitle": "Do you already know which PDFs we'll use?",
@@ -232,6 +233,7 @@ const I18N = {
     "theme.toggle": "Alternar tema claro/escuro",
     "source.title": "Fonte",
     "source.close": "Fechar",
+    "source.open": "Abrir fonte",
     "docs.backOutline": "Voltar ao sumário",
     "coldstart.choiceTitle": "Você já sabe quais PDFs vamos usar?",
     "coldstart.choiceHint":
