@@ -2962,7 +2962,9 @@ async fn a_chapter_that_cannot_be_split_or_placed_is_never_generated() {
     ))
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("event: error"));
+    // Transient by nature (2026-09-27): sent as `retryable_error`, which
+    // the client retries on its own with a countdown.
+    assert!(body.contains("event: retryable_error"), "{body}");
     assert!(body.contains("has not been split into nodes yet"));
     assert!(!body.contains("event: done"));
 

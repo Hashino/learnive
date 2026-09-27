@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::cold_start::outline_view;
 use super::grading::sse_frame;
 use super::reading::due_review_view;
-use super::reading::{finalize, prepare, tail_chars, topic_and_title};
+use super::reading::{SPLIT_DEFERRED, finalize, prepare, tail_chars, topic_and_title};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -148,6 +148,22 @@ impl FrameSink {
     }
 }
 
+/// Which SSE event a `prepare` refusal goes out as: `retryable_error` for
+/// the transient ones (today: a deferred chapter split), `error` for the
+/// rest — a locked node, a library-check refusal, a container request.
+/// Provider/stream/parse failures of the move itself are always sent as
+/// `retryable_error` at their own call sites. The client retries a
+/// `retryable_error` by itself, with a countdown, up to 3 times (reported
+/// live 2026-09-27: "cases on 1 category should reload … after 3 tries
+/// then it stops").
+fn error_event(reason: &str) -> &'static str {
+    if reason == SPLIT_DEFERRED {
+        "retryable_error"
+    } else {
+        "error"
+    }
+}
+
 /// Streams the SSE format over a POST — one real move per request as of
 /// §S18 (module docs above). Events: `token` (prose — both streamed moves
 /// and, as one full frame, ungraded structured moves, which share the same
@@ -264,7 +280,7 @@ pub async fn generate_node(
                     break match joined {
                         Ok(Ok(p)) => p,
                         Ok(Err(e)) => {
-                            let _ = frame_tx.send(sse_frame("error", &e));
+                            let _ = frame_tx.send(sse_frame(error_event(&e), &e));
                             return;
                         }
                         Err(e) => {
@@ -384,7 +400,7 @@ pub async fn generate_node(
                     {
                         Ok(s) => s,
                         Err(e) => {
-                            let _ = frame_tx.send(sse_frame("error", &e.to_string()));
+                            let _ = frame_tx.send(sse_frame("retryable_error", &e.to_string()));
                             return;
                         }
                     };
@@ -402,7 +418,7 @@ pub async fn generate_node(
                                 }
                             }
                             Some(Err(e)) => {
-                                let _ = frame_tx.send(sse_frame("error", &e.to_string()));
+                                let _ = frame_tx.send(sse_frame("retryable_error", &e.to_string()));
                                 return;
                             }
                             None => break,
@@ -418,7 +434,7 @@ pub async fn generate_node(
                     match movement::generate_move(&ai, move_type, &ctx).await {
                         Ok(mv) => mv,
                         Err(e) => {
-                            let _ = frame_tx.send(sse_frame("error", &e.to_string()));
+                            let _ = frame_tx.send(sse_frame("retryable_error", &e.to_string()));
                             return;
                         }
                     }

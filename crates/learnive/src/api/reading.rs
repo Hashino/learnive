@@ -1511,6 +1511,14 @@ fn review_context(state: &AppState, doc_id: &str, outline: &Outline, item: &Outl
 /// any interaction appended against the partial node (a mid-stream `/ask`,
 /// now possible — the whole point) survives the retry's overwrite, carried
 /// forward rather than clobbered.
+/// `prepare`'s refusal when a chapter's mandatory split did not conclude
+/// (the split model call or its inputs failed) — transient by nature, so
+/// `generate_node` reports it as a `retryable_error` the client retries on
+/// its own. Shared as a constant so that classification can't drift from
+/// the message.
+pub(super) const SPLIT_DEFERRED: &str =
+    "this chapter has not been split into nodes yet; the split is retried on the next visit";
+
 pub(super) async fn prepare(
     state: &AppState,
     doc_id: &str,
@@ -1806,7 +1814,7 @@ pub(super) async fn prepare(
         return Err(reason);
     }
     if item.item_type == OutlineItemType::Chapter && item.expansion == ExpansionState::NotExpanded {
-        let reason = "this chapter has not been split into nodes yet; the split is retried on the next visit".to_string();
+        let reason = SPLIT_DEFERRED.to_string();
         if let Err(e) = event_log.append(
             Some(&item.id),
             EventKind::GenerationBlocked {

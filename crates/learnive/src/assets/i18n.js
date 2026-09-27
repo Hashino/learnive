@@ -106,6 +106,9 @@ const I18N = {
     "status.generating": "generating…",
     "continue.button": "Continue →",
     "gen.error": "generation error: ",
+    "gen.retryIn": "Generation failed ({0}). Trying again in {1}s — attempt {2} of {3}.",
+    "gen.retryGaveUp":
+      "Generation failed {0} times in a row ({1}). Reload the page to try again.",
     "gen.streamLost":
       "The connection to the server dropped mid-generation. Nothing was lost — continue where you left off.",
     "gen.continue": "Continue",
@@ -303,6 +306,9 @@ const I18N = {
     "status.generating": "gerando…",
     "continue.button": "Continuar →",
     "gen.error": "erro de geração: ",
+    "gen.retryIn": "A geração falhou ({0}). Tentando de novo em {1}s — tentativa {2} de {3}.",
+    "gen.retryGaveUp":
+      "A geração falhou {0} vezes seguidas ({1}). Recarregue a página para tentar de novo.",
     "gen.streamLost":
       "A conexão com o servidor caiu no meio da geração. Nada foi perdido — continue de onde parou.",
     "gen.continue": "Continuar",

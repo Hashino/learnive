@@ -536,6 +536,52 @@ async function continueGeneration(rec, id) {
 // `api::generation::generate_node`'s doc comment for the full event
 // vocabulary. Shared by `generateNode` (the node's first move, after DOM
 // reset) and `continueGeneration` (every later move).
+// A transient generation failure (provider error, rate limit outlasting
+// the server's own retries, unparseable model output, a deferred chapter
+// split — the server sends these as `retryable_error`) is retried by the
+// client on its own, with a visible countdown, up to
+// `GEN_RETRY_MAX` times per node (user decision 2026-09-27). A reload
+// used to be the only way out of these, and nothing said so. The count
+// resets whenever a move settles; each retry is the same request the
+// reload would have made, so it resumes from the event log.
+const GEN_RETRY_MAX = 3;
+const GEN_RETRY_DELAY_S = 30;
+
+class RetryableGenError extends Error {}
+
+function scheduleGenerationRetry(rec, id, reason) {
+  rec.genRetries = (rec.genRetries || 0) + 1;
+  rec.controls.innerHTML = "";
+  const msg = document.createElement("p");
+  msg.className = "error";
+  rec.controls.appendChild(msg);
+  if (rec.genRetries > GEN_RETRY_MAX) {
+    msg.textContent = t("gen.retryGaveUp", GEN_RETRY_MAX, reason);
+    return;
+  }
+  let left = GEN_RETRY_DELAY_S;
+  const render = () => {
+    msg.textContent = t("gen.retryIn", reason, left, rec.genRetries, GEN_RETRY_MAX);
+  };
+  render();
+  const timer = setInterval(() => {
+    // The learner left this section (switched document, section torn
+    // down): drop the retry rather than generating into a dead section.
+    if (!rec.controls.isConnected || state.sections.get(id) !== rec) {
+      clearInterval(timer);
+      return;
+    }
+    left -= 1;
+    if (left > 0) {
+      render();
+      return;
+    }
+    clearInterval(timer);
+    rec.controls.innerHTML = '<p class="muted">' + t("status.generating") + "</p>";
+    streamMoveRequest(rec, id);
+  }, 1000);
+}
+
 async function streamMoveRequest(rec, id) {
   // A settled move becomes real, permanent DOM siblings inside `rec.prose`
   // (below) rather than a string folded into one big re-render: an earlier
@@ -573,6 +619,7 @@ async function streamMoveRequest(rec, id) {
         prose += data;
         live.innerHTML = sanitizeHtml(prose);
       } else if (event === "move_settled") {
+        rec.genRetries = 0;
         // This move is now tagged with real, permanent `data-block-id`s
         // and already persisted (§S6 follow-up) — insert it as real
         // siblings just before `live`, then clear `live` for whatever
@@ -688,6 +735,8 @@ async function streamMoveRequest(rec, id) {
           scheduleReadingLine();
           armEdgeLoading();
         }
+      } else if (event === "retryable_error") {
+        throw new RetryableGenError(data);
       } else if (event === "error") {
         throw new Error(data);
       }
@@ -714,6 +763,10 @@ async function streamMoveRequest(rec, id) {
     // instead of showing a raw TypeError (live 2026-09-10: minutes of
     // silence during the gate + free-tier 429 retries got the browser's
     // idle stream killed, twice).
+    if (err instanceof RetryableGenError) {
+      scheduleGenerationRetry(rec, id, err.message);
+      return;
+    }
     if (err instanceof TypeError || /network|stream/i.test(String(err))) {
       rec.controls.innerHTML = "";
       const msg = document.createElement("p");
