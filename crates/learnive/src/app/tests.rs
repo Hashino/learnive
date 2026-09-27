@@ -343,6 +343,59 @@ async fn a_confirmation_that_skips_everything_is_refused_not_created_empty() {
     assert_eq!(body.trim(), "[]");
 }
 
+/// S38 regression (bug reported live 2026-09-27): with the book's real
+/// nesting, a chapter's own prerequisite is its LAST section — a skipped
+/// "Selected Solutions" satisfies it immediately — so every chapter read
+/// "available" and clicking one errored on a locked first section. A
+/// container is available only when something inside it is.
+#[tokio::test]
+async fn a_chapter_with_a_skipped_last_section_stays_locked_until_reached() {
+    let state = test_state();
+    let call = |req: Request<Body>| {
+        let state = state.clone();
+        async move {
+            let resp = build_router(state).oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+    let chapter = |id: &str, title: &str, p: u32| {
+        format!(
+            r#"{{"id":"{id}","title":"{title}","action":"learn","item_type":"chapter","page":{p},"end_page":{e},"children":[
+                {{"id":"{id}s1","title":"{title} section","action":"learn","item_type":"chapter","page":{p},"end_page":{p},"children":[]}},
+                {{"id":"{id}sol","title":"Selected Solutions","action":"skip","item_type":"chapter","page":{e},"end_page":{e},"children":[]}}
+            ]}}"#,
+            e = p + 9
+        )
+    };
+    let body = format!(
+        r#"{{"topic":"sipser","name":"Sipser","nodes":[{{"id":"b","title":"Book","action":"learn","item_type":"book","children":[{},{}]}}]}}"#,
+        chapter("c3", "Ch 3", 10),
+        chapter("c4", "Ch 4", 20)
+    );
+    let (status, created) = call(authed("POST", "/api/documents", &body)).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let doc: serde_json::Value = serde_json::from_str(&created).unwrap();
+    let state_of = |id: &str| {
+        doc["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == id)
+            .map(|i| i["state"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    assert_eq!(state_of("c3s1"), "available", "the first section is open");
+    assert_eq!(state_of("c3"), "available", "its chapter holds it");
+    assert_eq!(state_of("c4s1"), "locked", "Ch 4's section waits for Ch 3");
+    assert_eq!(
+        state_of("c4"),
+        "locked",
+        "Ch 4 must not open through its skipped last section"
+    );
+}
+
 #[tokio::test]
 async fn documents_are_listed_resumable_and_renameable() {
     let state = test_state();

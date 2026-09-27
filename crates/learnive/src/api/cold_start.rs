@@ -915,6 +915,69 @@ pub(super) fn outline_view(
         }
     }
 
+    // A container's state comes from what it contains (bug reported live
+    // 2026-09-27, S38): with the book's real nesting, a chapter's own
+    // prerequisite is its last section — often a skipped "Selected
+    // Solutions", which satisfies a gate immediately — so every chapter of
+    // the book read "available" and clicking one redirected into a locked
+    // first section and errored. A container is available only when
+    // something inside it is; its own prerequisites never open it.
+    let own_state = |item: &OutlineItem| -> &'static str {
+        match engine::effective_state(outline, &states, &item.id) {
+            Some(NodeState::Demonstrated) => "demonstrated",
+            Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
+            _ if engine::subtree_started(outline, &states, &item.id) => "available",
+            _ => {
+                let unlocked = item.prerequisites.iter().all(|p| {
+                    matches!(
+                        engine::effective_state(outline, &states, p),
+                        Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
+                    )
+                });
+                if unlocked { "available" } else { "locked" }
+            }
+        }
+    };
+    let mut children: std::collections::HashMap<&str, Vec<&OutlineItem>> =
+        std::collections::HashMap::new();
+    for item in &items {
+        if let Some(pid) = item.parent_id.as_deref() {
+            children.entry(pid).or_default().push(item);
+        }
+    }
+    fn view_state<'a>(
+        item: &'a OutlineItem,
+        children: &std::collections::HashMap<&str, Vec<&'a OutlineItem>>,
+        own_state: &dyn Fn(&OutlineItem) -> &'static str,
+        memo: &mut std::collections::HashMap<String, &'static str>,
+    ) -> &'static str {
+        if let Some(s) = memo.get(&item.id) {
+            return s;
+        }
+        let own = own_state(item);
+        let state = match children.get(item.id.as_str()) {
+            Some(kids) if own != "demonstrated" => {
+                let any_open = kids
+                    .iter()
+                    .any(|k| view_state(k, children, own_state, memo) == "available");
+                if any_open { "available" } else { "locked" }
+            }
+            _ => own,
+        };
+        memo.insert(item.id.clone(), state);
+        state
+    }
+    let mut memo = std::collections::HashMap::new();
+    let states_by_id: std::collections::HashMap<String, &'static str> = items
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                view_state(item, &children, &own_state, &mut memo),
+            )
+        })
+        .collect();
+
     Ok(items
         .iter()
         // §S15: every item is shown now, tree-nested by `parent_id` client-
@@ -941,20 +1004,7 @@ pub(super) fn outline_view(
             // prerequisite satisfies the gate too, and `effective_state`
             // — not a plain `states.get` — resolves a prerequisite that is
             // itself a container/parent through its own children).
-            let view_state = match engine::effective_state(outline, &states, &item.id) {
-                Some(NodeState::Demonstrated) => "demonstrated",
-                Some(NodeState::Attempted) | Some(NodeState::Skipped) => "available",
-                _ if engine::subtree_started(outline, &states, &item.id) => "available",
-                _ => {
-                    let unlocked = item.prerequisites.iter().all(|p| {
-                        matches!(
-                            engine::effective_state(outline, &states, p),
-                            Some(NodeState::Demonstrated) | Some(NodeState::Skipped)
-                        )
-                    });
-                    if unlocked { "available" } else { "locked" }
-                }
-            };
+            let view_state = states_by_id[&item.id];
             // Promoted to `engine::chapter_match_failed` (bug reported live
             // 2026-09-01) — `prepare` now shares this exact predicate
             // instead of only this view computing it. See that function's

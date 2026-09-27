@@ -189,9 +189,24 @@ function renderOutline() {
       if (it && it.chapter_match_failed) {
         row.addEventListener("click", () => openChapterRemediate(it.id));
       } else if (it && it.state !== "locked") {
-        row.addEventListener("click", () => openNode(it.id));
+        row.addEventListener("click", () => openNode(openTargetOf(it.id)));
       }
     });
+}
+
+// A container row (book, part, chapter holding sections) opens the section
+// being worked on inside it — its first still-open leaf, else its first
+// readable one — never the container itself: asking the server to generate
+// a container lands on whichever child is next in line, which can be a
+// locked one (bug reported live 2026-09-27, S38).
+function openTargetOf(id) {
+  const kids = (state.allItems || [])
+    .filter((i) => i.parent_id === id)
+    .sort((a, b) => orderIndexOf(a.id) - orderIndexOf(b.id));
+  if (!kids.length) return id;
+  const next =
+    kids.find((k) => k.state === "available") || kids.find((k) => k.state !== "locked");
+  return next ? openTargetOf(next.id) : id;
 }
 
 // S33-3: the outline's only suggestion is the chapter review DUE right now
