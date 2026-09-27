@@ -437,7 +437,7 @@ function startEditingNote(id) {
   textarea.rows = 3;
   textarea.value = plain;
   entry.el.appendChild(textarea);
-  textarea.focus();
+  textarea.focus({ preventScroll: true });
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
   textarea.addEventListener("blur", () => finishEditingNote(id, plain));
   textarea.addEventListener("keydown", (e) => {
@@ -564,11 +564,17 @@ function startNewAnnotation(blockId) {
   const textarea = document.createElement("textarea");
   textarea.rows = 3;
   noteEl.appendChild(textarea);
+  // Positioned synchronously, before focus: `scheduleAnnotations` only
+  // places it on the next frame, and focusing an unplaced note (top of
+  // #doc) made the browser scroll the whole document to the top to
+  // reveal it. preventScroll is the second guard — the note sits beside
+  // the paragraph being read, already on screen.
+  noteEl.style.top = `${blockMidY(target, el("doc").getBoundingClientRect())}px`;
   annotationsLayer().appendChild(noteEl);
   draftAnnotation = { el: noteEl, textarea, blockId };
   scheduleAnnotations();
   updateAnnotationPlus();
-  textarea.focus();
+  textarea.focus({ preventScroll: true });
   textarea.addEventListener("blur", finishDraftAnnotation);
   textarea.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
