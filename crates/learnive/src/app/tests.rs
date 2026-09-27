@@ -2745,12 +2745,19 @@ async fn a_book_with_chapter_children_is_never_directly_generable_and_gates_corr
             .clone()
     };
 
-    // Neither chapter is done yet: the book is locked, not available — a
-    // container never shows "available", since there is nothing to click
-    // through to generate directly.
+    // Neither chapter is done yet, but the first one is open: a container
+    // reads "available" exactly when something inside it is (2026-09-27 —
+    // its state comes from its contents, never its own prerequisites; a
+    // click on it opens that open leaf client-side). What stays true: it is
+    // never generated directly (below), and what comes after it stays
+    // locked until its contents settle.
+    assert_eq!(
+        find_state(&created["items"], "c1"),
+        serde_json::json!("available")
+    );
     assert_eq!(
         find_state(&created["items"], "book1"),
-        serde_json::json!("locked")
+        serde_json::json!("available")
     );
     assert_eq!(
         find_state(&created["items"], "after"),
