@@ -106,7 +106,35 @@ fn topic_scope_note() -> &'static str {
      and never as text the learner sees named or referenced. \"Teach in \
      full\" still excludes anything listed under \"Not yet taught\" below, \
      when present — those are separate, later nodes' own material, not a \
-     part of THIS node's concept just because they're related to it."
+     part of THIS node's concept just because they're related to it. \
+     When the node is labelled \"Part of the source this node covers\" \
+     instead, \"in full\" means: everything THAT PART of the source says — \
+     not a general treatment of whatever its heading names."
+}
+
+/// The line naming what this node teaches. An ungrounded node teaches a
+/// concept. A grounded node is a PART OF A SOURCE — a book section, a
+/// paper's "Abstract" — and its title is that part's heading, not a
+/// subject: presented as "Concept of this node: Abstract", the model taught
+/// what an abstract is instead of what the paper's abstract says (bug
+/// reported live 2026-09-27, evans2017). The same trap waits behind every
+/// generic heading (Introduction, Method, Results, "Level of Evidence"…).
+fn node_subject_line(ctx: &MoveContext) -> String {
+    if ctx.grounding.trim().is_empty() {
+        format!("Concept of this node: {}", ctx.item_title)
+    } else {
+        format!(
+            "Part of the source this node covers: \"{}\" — teach what the \
+             SOURCES below say in that part of this work: its actual \
+             content (claims, methods, findings, arguments, examples). The \
+             title is the source's own heading for this part, not the \
+             subject: when it is a generic structural heading (Abstract, \
+             Introduction, Background, Method, Results, Discussion, \
+             Conclusion, Summary…), teach the substance of THIS work's \
+             section, never what such a section is in general.",
+            ctx.item_title
+        )
+    }
 }
 
 fn node_so_far_line(ctx: &MoveContext) -> String {
@@ -495,11 +523,11 @@ pub fn generate_move_streamed(move_type: MoveType, ctx: &MoveContext) -> Vec<Cha
             topic_scope_note()
         )),
         ChatMessage::user(format!(
-            "Overall topic: {}\nConcept of this node: {}\n\
+            "Overall topic: {}\n{}\n\
              Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}{}{}{}",
             ctx.topic,
-            ctx.item_title,
+            node_subject_line(ctx),
             non_empty(&ctx.outline_context),
             not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
@@ -556,11 +584,11 @@ pub fn generate_move(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage>
             topic_scope_note()
         )),
         ChatMessage::user(format!(
-            "Overall topic: {}\nConcept of this node: {}\n\
+            "Overall topic: {}\n{}\n\
              Context of what has been taught so far: {}{}\n\
              Curriculum objective: {}{}{}",
             ctx.topic,
-            ctx.item_title,
+            node_subject_line(ctx),
             non_empty(&ctx.outline_context),
             not_yet_taught_line(ctx),
             non_empty(&ctx.objective),
@@ -573,6 +601,38 @@ pub fn generate_move(move_type: MoveType, ctx: &MoveContext) -> Vec<ChatMessage>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grounded node's title is a heading of the source, not a concept:
+    /// "Concept of this node: Abstract" made the model explain what an
+    /// abstract is (evans2017, 2026-09-27). Both the prose and the exercise
+    /// prompt must frame it as a part of the source.
+    #[test]
+    fn a_grounded_node_is_framed_as_a_part_of_the_source() {
+        let ctx = MoveContext {
+            item_title: "Abstract".to_string(),
+            grounding: "[id: h | loc: p:2 | evans2017]\nThe purpose of this research..."
+                .to_string(),
+            ..Default::default()
+        };
+        for msgs in [
+            generate_move_streamed(MoveType::Explain, &ctx),
+            generate_move(MoveType::Test, &ctx),
+        ] {
+            let user = &msgs[1].content;
+            assert!(
+                user.contains("Part of the source this node covers: \"Abstract\""),
+                "{user}"
+            );
+            assert!(!user.contains("Concept of this node"), "{user}");
+            assert!(user.contains("never what such a section is in general"));
+        }
+        let ungrounded = MoveContext {
+            item_title: "Recursion".to_string(),
+            ..Default::default()
+        };
+        let user = &generate_move_streamed(MoveType::Explain, &ungrounded)[1].content;
+        assert!(user.contains("Concept of this node: Recursion"));
+    }
 
     /// §S15: a node with materialized children must be told, in its `test`
     /// move, to integrate them rather than probe each in isolation — the

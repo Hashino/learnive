@@ -1,9 +1,6 @@
 alternate mode when no chapters
-sipser: sections as chapters
 prefer exercises extracted from source
 better annotation: google docs style
 prefer owned books for reading list generation
-reload mid generation restarts generation
 configurable data dir
 change default data dir to sensible (OS specific) appdata dir
-reloading mid acervo checking breaks app
